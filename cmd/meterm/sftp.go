@@ -41,7 +41,7 @@ func runSftpShell(args []string) error {
 		startDir = args[1]
 	}
 	_ = history.RecordAndSave(args[0])
-	recordActivity(cfg, *h, "sftp", startDir)
+	run := beginActivity(cfg, *h, "sftp", startDir)
 	kickAutosync(false, true)
-	return runInherited(sshrun.SftpCommand(cfg.Resolve(*h), startDir))
+	return run.runInherited(sshrun.SftpCommand(cfg.Resolve(*h), startDir))
 }

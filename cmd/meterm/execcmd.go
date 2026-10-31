@@ -18,6 +18,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/spf13/cobra"
 
+	"meterm/internal/activity"
 	"meterm/internal/config"
 	"meterm/internal/sshrun"
 	"meterm/internal/termsafe"
@@ -74,15 +75,19 @@ func newExecCmd() *cobra.Command {
 			if len(hosts) == 0 {
 				return fmt.Errorf("no hosts matched (use names, --tag, --group, or --all)")
 			}
-			for _, h := range hosts {
-				recordActivity(cfg, h, "exec", commandDetail(command, logArgs))
-			}
-			kickAutosync(false, true)
 			if format != "text" && format != "json" {
 				return fmt.Errorf("--format must be text or json")
 			}
-			return runExec(hosts, command, sshRunner(cfg), execOptions{parallel: parallel, timeout: timeout, format: format,
-				safeOut: !raw && isTerminal(os.Stdout), safeErr: !raw && isTerminal(os.Stderr)})
+			runs := make([]*activityRun, len(hosts))
+			for i, h := range hosts {
+				runs[i] = beginActivity(cfg, h, "exec", commandDetail(command, logArgs))
+			}
+			kickAutosync(false, true)
+			err = runExec(hosts, command, sshRunner(cfg), execOptions{parallel: parallel, timeout: timeout, format: format,
+				safeOut: !raw && isTerminal(os.Stdout), safeErr: !raw && isTerminal(os.Stderr),
+				done: func(i int, r execResult, timedOut bool) { runs[i].outcome(execOutcome(r, timedOut)) }})
+			kickAutosync(false, true)
+			return err
 		},
 	}
 	cmd.Flags().StringArrayVar(&tags, "tag", nil, "select hosts with this tag (repeatable)")
@@ -196,6 +201,21 @@ func shQuoteWords(words []string) string {
 	return strings.Join(quoted, " ")
 }
 
+// execOutcome is what the activity log says about one host's run.
+func execOutcome(r execResult, timedOut bool) activity.Outcome {
+	o := activity.Outcome{Took: time.Duration(r.Seconds * float64(time.Second))}
+	switch {
+	case timedOut:
+		o.Note = "timed out"
+	case r.ExitCode >= 0:
+		code := r.ExitCode
+		o.ExitCode = &code
+	default:
+		o.Note = "failed to finish"
+	}
+	return o
+}
+
 type execOptions struct {
 	parallel int
 	timeout  time.Duration // per host; 0 = none
@@ -204,6 +224,9 @@ type execOptions struct {
 	// safeOut and safeErr drop escape sequences from a host's stdout and stderr, for
 	// when they're going to a terminal. Text mode only: JSON escapes them itself.
 	safeOut, safeErr bool
+	// done is told as each host finishes, not at the end, so that one host hanging
+	// doesn't keep the others' outcomes from the log.
+	done func(i int, r execResult, timedOut bool)
 }
 
 // runExec runs command on every host. In text mode output streams live with
@@ -274,6 +297,9 @@ func runExec(hosts []config.Host, command []string, run execRunner, o execOption
 				r.ExitCode, r.Error, r.failed = -1, err.Error(), true
 			}
 			results[i] = r
+			if o.done != nil {
+				o.done(i, r, ctx.Err() == context.DeadlineExceeded)
+			}
 		}(i, h)
 	}
 	wg.Wait()

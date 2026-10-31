@@ -16,10 +16,14 @@ import (
 	"meterm/internal/activity"
 	"meterm/internal/config"
 	"meterm/internal/team"
+	"meterm/internal/termsafe"
 )
 
 // pullInterval is how often autosync pulls a team's hosts while meterm is in use.
 const pullInterval = 5 * time.Minute
+
+// backgroundWait is how long an upload waits for one already running.
+const backgroundWait = 60 * time.Second
 
 type syncOpts struct {
 	pull, push bool
@@ -250,6 +254,11 @@ func runTeamSync(ctx context.Context, tc *teamCtx, t team.Team, cfg *config.Conf
 		if n > 0 {
 			fmt.Printf("Uploaded %d activity event(s).\n", n)
 		}
+		// A warning: the sync did what it was asked, and a log that needs a person
+		// mustn't stop `meterm team sync && deploy` for good.
+		if err := localLogTrouble(l); err != nil {
+			fmt.Fprintf(os.Stderr, "meterm: warning: %s\n", termsafe.Lines(err.Error()))
+		}
 	}
 	if n := team.Problems(res.Changes); n > 0 {
 		return fmt.Errorf("%d host(s) need attention — see `meterm team status`", n)
@@ -362,6 +371,9 @@ func teamStatusCmd(teamFlag *string) *cobra.Command {
 						}
 					}
 					fmt.Printf("Activity: %d event(s) waiting to upload.\n", n)
+					if err := localLogTrouble(l); err != nil {
+						fmt.Printf("Activity: %s\n", termsafe.Text(err.Error()))
+					}
 				}
 			}
 			if ign := tc.state.Ignored[t.ID]; len(ign) > 0 {
@@ -382,6 +394,17 @@ func teamStatusCmd(teamFlag *string) *cobra.Command {
 			return nil
 		},
 	}
+}
+
+// localLogTrouble is the local log's own check, said where someone will see it: an
+// upload carries on regardless, as what's still there is what the team most needs.
+func localLogTrouble(l *activity.Log) error {
+	if _, broken, err := l.VerifyFile(); err != nil {
+		return err
+	} else if broken != nil {
+		return fmt.Errorf("the local activity log fails its check: %s (`meterm team log --verify` compares it with the team's copy)", broken.Error())
+	}
+	return nil
 }
 
 func humanAgo(d time.Duration) string {
@@ -586,16 +609,37 @@ func teamBackgroundCmd() *cobra.Command {
 			// wait for a password nobody will type.
 			os.Setenv("GCM_INTERACTIVE", "never")
 			os.Setenv("GIT_TERMINAL_PROMPT", "0")
-			ctx, cancel := context.WithTimeout(cmd.Context(), 60*time.Second)
-			defer cancel()
 			tc, err := openTeam()
 			if err != nil || tc.be == nil {
 				return err
 			}
-			unlock, ok, err := team.Lock(tc.dir, 0)
-			if err != nil || !ok {
-				return err // busy: another sync is already doing this
+			// Busy: another sync is already doing this. With hosts that's as good as
+			// done. A command's outcome, though, is logged moments after its start, whose
+			// upload is the one holding the lock and has read the log by now, so one process
+			// waits its turn. One is enough, as it reads the log only when it gets there. Any
+			// more just leave: on a slow remote, each command would otherwise add one more.
+			var unlock func()
+			if upload && !hosts {
+				leaveWaiting, ok, err := team.WaiterLock(tc.dir)
+				if err != nil || !ok {
+					return err
+				}
+				defer leaveWaiting()
+				got, ok, err := team.Lock(tc.dir, backgroundWait)
+				if err != nil || !ok {
+					return err
+				}
+				unlock = got
+				leaveWaiting() // this one's next, so the next to come may wait behind it
+			} else {
+				got, ok, err := team.Lock(tc.dir, 0)
+				if err != nil || !ok {
+					return err
+				}
+				unlock = got
 			}
+			ctx, cancel := context.WithTimeout(cmd.Context(), 60*time.Second)
+			defer cancel()
 			defer unlock()
 			if tc.state, err = team.LoadState(tc.dir); err != nil {
 				return err
@@ -648,6 +692,7 @@ func backgroundSync(ctx context.Context, tc *teamCtx, hosts, upload bool) error 
 			}
 			_, err = team.UploadActivity(ctx, tc.be, t.ID, cfg, l)
 			keep(err)
+			keep(localLogTrouble(l))
 		}
 	}
 	return firstErr

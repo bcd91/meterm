@@ -93,12 +93,20 @@ type Host struct {
 	Team string `yaml:"team,omitempty"`
 }
 
+// ActivitySettings says what happens to the activity log beyond this machine's file.
+type ActivitySettings struct {
+	// Sink is where each event is copied as well: "syslog", or an absolute path to
+	// append to. See activity.ParseSink. It's never shared with a team.
+	Sink string `yaml:"sink,omitempty"`
+}
+
 // Config is the full on-disk document.
 type Config struct {
 	Version  int              `yaml:"version"`
 	Defaults Defaults         `yaml:"defaults"`
 	Groups   map[string]Group `yaml:"groups,omitempty"`
 	Hosts    []Host           `yaml:"hosts"`
+	Activity ActivitySettings `yaml:"activity,omitempty"`
 
 	path   string      // where this was loaded from / will be saved to
 	loaded []byte      // the file as it was when read or last written; nil if absent

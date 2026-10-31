@@ -101,6 +101,9 @@ func main() {
 		newAuditCmd(),
 		newReportCmd(),
 		newActivityCmd(),
+		newFactsCmd(),
+		newAuthMethodsCmd(),
+		newLoginsCmd(),
 		newTeamCmd(),
 	)
 

@@ -235,11 +235,43 @@ func (g *GitStore) changeOn(ctx context.Context, branch, msg string, edit func()
 	return errors.New("too many concurrent changes to the team repository; try again")
 }
 
-// read refreshes the clone for a read-only call.
+// read refreshes the clone for a read-only call, or with WithNoFetch only makes sure
+// it's on the team's branch, which takes no network.
 func (g *GitStore) read(ctx context.Context) error {
 	g.mu.Lock()
 	defer g.mu.Unlock()
+	if noFetch, _ := ctx.Value(noFetchKey{}).(bool); noFetch {
+		return g.onTeamBranch(ctx)
+	}
 	return g.refresh(ctx)
+}
+
+type noFetchKey struct{}
+
+// WithNoFetch makes reads under ctx use the clone as it is: what this machine last
+// saw, with no network. It's a copy this account can write to, so it's for looking,
+// and evidence of nothing that isn't also on the remote.
+func WithNoFetch(ctx context.Context) context.Context {
+	return context.WithValue(ctx, noFetchKey{}, true)
+}
+
+// ErrNoClone is OpenLocalGitStore's way of saying there's nothing here to read.
+var ErrNoClone = errors.New("this machine has no copy of the team's repository yet; run `meterm team pull` once")
+
+// OpenLocalGitStore is OpenGitStore that never clones, for reads that promise no network.
+func OpenLocalGitStore(dir string, gt GitTeam) (*GitStore, error) {
+	branch := gt.Branch
+	if branch == "" {
+		branch = "main"
+	}
+	id := GitTeamID(gt.Remote)
+	g := &GitStore{ID: id, Name: gt.Name, Remote: gt.Remote, Branch: branch,
+		Dir: filepath.Join(dir, "git", safeName(strings.TrimPrefix(id, "git:")))}
+	g.identityFn = g.gitIdentity
+	if _, err := os.Stat(filepath.Join(g.Dir, ".git")); err != nil {
+		return nil, ErrNoClone
+	}
+	return g, nil
 }
 
 func (g *GitStore) path(rel string) string { return filepath.Join(g.Dir, filepath.FromSlash(rel)) }
@@ -676,10 +708,15 @@ func (g *GitStore) ListAudits(ctx context.Context, teamID string) ([]AuditRecord
 	return out, nil
 }
 
+// sameEvent compares what the legacy hash covers, and ExtHash where both have one. The
+// copy here may have lost what an older meterm doesn't know about, if that's who
+// uploaded it, and that doesn't make it a different event. The rest of the struct
+// isn't compared, as it holds pointers.
 func sameEvent(a, b activity.Event) bool {
-	ta, tb := a.Time, b.Time
-	a.Time, b.Time = time.Time{}, time.Time{}
-	return a == b && ta.Equal(tb)
+	return a.Device == b.Device && a.Seq == b.Seq && a.Time.Equal(b.Time) && a.User == b.User &&
+		a.Action == b.Action && a.Host == b.Host && a.Target == b.Target && a.Detail == b.Detail &&
+		a.PrevHash == b.PrevHash && a.Hash == b.Hash &&
+		(a.ExtHash == "" || b.ExtHash == "" || a.ExtHash == b.ExtHash)
 }
 
 func safeName(s string) string {

@@ -49,7 +49,7 @@ func newConnectCmd() *cobra.Command {
 				return fmt.Errorf("no such host: %s (use `meterm list` to see saved hosts)", name)
 			}
 			_ = history.RecordAndSave(h.Name) // best-effort; a broken history file shouldn't block connecting
-			recordActivity(cfg, *h, "connect", connectDetail(extra, logArgs))
+			run := beginActivity(cfg, *h, "connect", connectDetail(extra, logArgs))
 			kickAutosync(false, true)
 			r := cfg.Resolve(*h)
 			if via := routeNote(r); via != "" {
@@ -60,7 +60,7 @@ func newConnectCmd() *cobra.Command {
 					extra = append(append(extra, "-t"), remote)
 				}
 			}
-			return runInherited(sshrun.Command(r, extra...))
+			return run.runInherited(sshrun.Command(r, extra...))
 		},
 	}
 	return cmd

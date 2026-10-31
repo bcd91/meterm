@@ -1,5 +1,9 @@
 # meterm
 
+`ssh` is a pay phone, where you have to remember every number. meterm is a smartphone: it
+knows the contacts, redials when the line drops, keeps the call history and flags the numbers
+to be careful with. It's a tool, not a guard.
+
 You have a dozen servers and every one of them needs a different IP, a
 different user, a different key, and half of them are only reachable through
 a bastion. `meterm` remembers all of that so you don't have to — give each
@@ -158,7 +162,10 @@ meterm relay init|enroll|invite|accept|status|remove   reach a machine behind NA
 meterm route add|list|rm|check  other ways to reach a host (public forward, LAN, another jump), used when its own address doesn't answer
 
 meterm history                  show recently connected hosts, most recent first
-meterm activity [--host H] [--verify] [--format text|json]   what meterm was used to do, as a tamper-evident log
+meterm activity [--host H] [--verify] [--format text|json]   what meterm was used to do: a record of use, with a hash chain
+meterm facts [--format json]    history, routes and what's known of each server (local, read-only)
+meterm auth-methods [host...] [--tag t] [--group g] [--format text|json]   which login methods a host accepts, without logging in
+meterm logins [host...] [--tag t] [--group g] [--format text|json]   who logged in, by the host's wtmp, beside meterm's log; read-only, not logged
 meterm rename <old> <new>       rename a host, keeping history and jump-host references
 meterm files <host> [dir]       two-pane file manager: copy between here and the host (--shell: plain sftp prompt)
 
@@ -774,12 +781,16 @@ destination, and `-o ProxyCommand`, `-A` or `-M` would make this more than one f
 ```json
 {"schema":1,"hosts":[{"host":"devbox","reachable":true,"error":"","agents":[
   {"cwd":"/home/a/src","kind":"interactive","startedAt":1793311202058,"pid":812,
-   "status":"busy","sessionId":"…","name":"fix login"}]}]}
+   "status":"busy","sessionId":"…","name":"fix login","event":"working",
+   "agent_kind":"claude-code","source":"claude agents --json","confidence":"high"}]}]}
 ```
 
 - `agents` holds the fields `cwd`, `kind`, `startedAt` (Unix milliseconds), `id`, `state`,
   `pid`, `status`, `waitingFor`, `sessionId` and `name`, each only when the host sent it.
   Anything else is dropped. A known field of the wrong type makes the whole host an error.
+- Each agent also has `event` (`working`, `needs_input`, `done`, `failed`, `idle`, `unknown`),
+  `agent_kind`, `source` and `confidence`, in words that aren't Claude Code's, from meterm's own
+  tables: see [docs/agent-events.md](docs/agent-events.md).
 - `reachable` says the command ran on the host.
 - `error` is empty when the host answered, and in meterm's own words otherwise: it never
   quotes the host. When it's set, `agents` is `null`, so a host that can't say doesn't read
@@ -794,7 +805,7 @@ destination, and `-o ProxyCommand`, `-A` or `-M` would make this more than one f
 | 1 | Nothing was asked: bad flags, no selection, an unknown host, or a tag or group that matched nothing | nothing |
 | 2 | At least one host has an `error`, a refused production host included | the report, complete |
 
-**It isn't in the activity log.** That log is tamper-evident and shared with the team, so
+**It isn't in the activity log.** That log is kept for good and shared with the team, so
 nothing can be taken out later, and a status bar asking every 30 seconds would bury
 everything else in it. So `agents` writes no activity entry and no history, and doesn't
 start a team sync. What shows instead is on each host: every look is a login of its own,
@@ -817,6 +828,43 @@ comes back as an error for that host. It needs OpenSSH 7.6 or newer, for `Remote
 has been run only with 10.3. It uses the first `ssh` on `PATH`, and since `-F` replaces the
 system config, an ssh from elsewhere such as Homebrew reads `/etc/ssh/ssh_config` instead of its
 own.
+
+## Who logged in, and how they can
+
+`meterm logins` asks a host's `last` who logged in, and sets each login beside this machine's
+activity log: the host's record next to meterm's, for finding logins meterm doesn't know of.
+
+```sh
+meterm logins web1                   # time (UTC), user, tty, source address, the matching event
+meterm logins web1 --format json
+meterm auth-methods web1 web2        # which login methods a host accepts, without logging in
+```
+
+It runs one fixed command, `last -F -i -w -n 500`, with no sudo. A match means an event on that
+host, for that account, within two minutes. What it can't see:
+
+- wtmp mostly holds sessions with a terminal. `ssh host command`, `scp`, `sftp` and so `meterm exec`
+  often don't appear, and those are what an agent mostly uses. They're in `auth.log`, which needs root.
+- How someone logged in. That's in `auth.log` too.
+- Other people's meterm: no match means not in this machine's log, not an intruder. And a match
+  only means an event was close.
+- Anything removed by root, and hosts whose `last` has no `-F -i -w`, such as macOS and BSD, which
+  come back as an error.
+
+`auth-methods` connects asking for no authentication, so no key or password is offered, and reports
+what the server says can continue. `password_login` says it takes passwords. It's `null` when it
+can't be said, as when a jump host on the way refuses: the host has an `error`, and never that jump host's
+answer. A jump host is logged in to as usual, and a server that lets anyone in with no authentication
+runs `true`, and reads as `none_accepted`. An answer only counts after ssh has matched the host key against
+the known one and new keys are in use. Text from the other end before that, or any disconnect, makes it `null`,
+as ssh prints such text with its newlines and it can read like anything. `null` is also what's left when ssh can't
+be tied to this host, and an unknown host key is an error, as with `agents`. `audit` can't tell you this from the outside: `--probe` only
+opens a TCP connection, and its check of `sshd_config` takes a login. It's what's on offer to this account
+from this address, and a `Match` block can differ for others.
+
+Both are looks, like `agents`: a production host only when named, the same `extra_args` allowlist, no
+activity entry, and refused on a Windows client. A look that's safe to run on a schedule would bury
+a log that can't forget. Each one shows in the host's sshd log. The format is in [docs/export.md](docs/export.md).
 
 ## Status and history
 
@@ -861,7 +909,11 @@ A few things make that reliable:
   each command's `--help`) instead of the tabwriter-aligned columns meant
   for a terminal — those columns can shift width release to release.
 - **`meterm agents --format json`** is safe to poll, and has its own exit codes: see
-  [Claude Code sessions on your hosts](#claude-code-sessions-on-your-hosts).
+  [Claude Code sessions on your hosts](#claude-code-sessions-on-your-hosts). Each agent also
+  has a neutral `event`, documented in [docs/agent-events.md](docs/agent-events.md).
+- **For insights, read the export, not meterm's files:** `meterm activity --format json -n 0`,
+  `meterm team log --format json --no-fetch` and `meterm facts --format json`, all described
+  in [docs/export.md](docs/export.md).
 - **`exec`, `stats`, and `cp` are already non-interactive**
   by design — they need working key-based auth ahead of time and fail fast
   with a clear error instead of blocking on a password prompt.
@@ -882,7 +934,7 @@ A few things make that reliable:
 Every `connect`, `exec`, `cp` and `files` session appends one line to a local
 activity log: when, which local account, which saved host and what it
 resolved to, and the program or paths involved. `logs` is in there too. `meterm agents`
-isn't: see [Claude Code sessions on your hosts](#claude-code-sessions-on-your-hosts).
+and `meterm logins` aren't: see [Claude Code sessions on your hosts](#claude-code-sessions-on-your-hosts).
 
 The log can't forget, and it goes to the team for shared hosts, so a command's
 arguments stay out of it by default: `exec` records `mysql (+3 args)`, and
@@ -892,14 +944,31 @@ redacted, for when you need the record to say exactly what ran.
 ```sh
 meterm activity                     # most recent 50
 meterm activity --host WEB -n 0      # everything on one host
-meterm activity --verify            # check nobody edited or removed old entries
+meterm activity --verify            # check the chain, and any copy
 ```
 
-Each entry stores the hash of the one before it, so changing or deleting an
-earlier entry breaks the chain from that point on, and `--verify` names the
-first line that no longer fits. That makes tampering *evident*, not
-impossible: anyone with the file can rebuild the whole chain. The team
-repository keeps every member's copy, in its history, for that reason.
+**How it ended.** `connect`, `exec`, `cp`, `sync`, `sftp` and `logs` write a second event when
+they end, `outcome`, with `ref_seq` pointing at the first, `exit_code` and `duration_ms`. The
+first one is written before the host is touched and is never changed. So a machine losing power,
+or a kill, leaves a start with no outcome, which means nobody can say how it ended, and a
+long `connect` is in the log from its first moment. `exec` writes an outcome per host, as each
+finishes. There's no `exit_code` for a timeout or something killed: no exit code isn't a
+success. `dev`, tunnels and `files` sessions have no outcome.
+
+**Who.** Each event has `actor_type`, and `attribution_source: declared`, because it's only ever
+what the environment claims. A process with `CLAUDECODE=1` or an `AI_AGENT` marker reads as
+`agent`, with `agent_kind` and `agent_session_id`. That session ID goes where the event goes, which
+for a shared host means into the team's log for good: set `METERM_NO_AGENT_SESSION=1` where the agent
+runs to leave it out. A person's shell reads as `unknown`, not
+`human`: no variable and a terminal doesn't prove a person, as an agent can clear a variable and
+open a pty. So `human` is reserved, and nothing writes it today. A shell started from inside
+an agent is that agent, as far as this can tell.
+
+**Older versions.** The hash an older meterm checks covers only the fields it knows, and new
+fields have a second hash chain of their own, so old and new read each other's lines,
+verify them and append to them, here and in a team's copy. v0.22.0 uploading a newer event drops
+those fields. That can't be told from someone stripping them, so `team log --verify` counts it as
+a gap, `ext_gaps`, and nothing is vouched for across one.
 
 A line can't be removed later without breaking the chain, and shared hosts'
 lines go to the team, so what looks like a credential is masked as
@@ -908,12 +977,143 @@ lines go to the team, so what looks like a credential is masked as
 tokens in URLs, private key blocks, and well-known token formats. It's pattern
 matching, so it leans towards masking too much and still can't catch everything:
 a password given as a plain argument to a program it doesn't know stays as
-typed. Pass secrets through a file or the environment on the host instead.
+typed. Pass secrets through a file or the environment on the host instead. Control characters
+are replaced, and `detail` is cut at 4096 characters.
 
-The log only sees what goes through meterm. Someone running plain `ssh` is
-not recorded, so treat it as a record of the team's work, not as access
-enforcement (that needs every connection to go through a proxy, as Teleport
-does).
+### What each check finds
+
+Each event stores the hash of the one before it, and there's a witness, `head`, of how far the
+log got and what was written there. Nothing here holds a secret, so this shows carelessness, and a
+tool that doesn't know about the chain. It can't resist anything that does:
+
+| Done to the local log | `activity --verify` | `team log --verify` | `team sync` |
+|---|---|---|---|
+| A line edited | fails, names the line | fails, if it was uploaded | exit 0, warns |
+| Exit code or actor stripped or changed, on any line | fails | fails, if it was uploaded | exit 0, warns |
+| Last lines removed, file emptied or deleted | fails: it had reached seq N | fails, if they were uploaded | exit 0, warns |
+| A whole line that isn't an event | fails, names the line, until `--repair` | passes | exit 0, warns |
+| Half a last line, from a crash or a full disk | passes, with a note | passes | exit 0 |
+| Every hash rebuilt, and `head` rewritten to match | **passes** | fails | exit 0 |
+| The whole directory deleted | **passes** | **passes**, the team keeps its copy | exit 0 |
+
+Deleting `head` fails `--verify` too, once this version has written more than one event, as it can't say how
+far the log got. The next event puts a new one there, and records that it was missing, which stays in the
+chain: lines cut before that aren't seen, and that record is all there is. So anything careful enough to
+rewrite `head` as well gets past `--verify`, whatever it changed. New events
+still reach the team in every row: `scripts/it-evidence.sh` runs each of these. What's removed before
+it was uploaded is gone from the team's copy too, and autosync keeps that window short.
+
+**`team log --verify` has limits of its own.** It's only as good as a team copy this account can't
+rewrite, so protect the branch against force-pushes on the Git host, as `git push` works for anything
+running as you. Plain commits count too: the checks read the files, not the history, so removing this
+device's events from the team's copy, or stripping their exit codes in a new commit, doesn't fail it.
+Removed events on hosts shared now show as a note, `not_in_team_copy`, since they could equally be from
+before a host was shared. Stripped ones show as `ext_gaps`, on the machine that wrote them, and elsewhere
+only where a newer event follows. A second event with the same sequence number and a valid hash isn't
+noticed from another device, only by `--verify` on the device that wrote it. A line there that isn't an event is skipped. `git log`
+on the repository has the rest. With `--no-fetch` it compares against this machine's clone, which is no
+further out of reach than the log.
+
+### When the log is damaged
+
+A write cut short leaves half a last line. It isn't a failure, as nothing whole is missing, and the
+next event moves it to a `damaged-*` file beside the log and records that as a `log-repair` event. A
+full disk leaves nothing: the failed line is taken back, the command carries on and warns that the
+log wasn't updated. Tested on a real full file system on macOS, and it needs a power cut to leave half a line.
+
+Anything else that isn't an event fails `--verify` until a person looks. `meterm activity --repair` moves
+those lines to a `damaged-*` file and records that. It keeps what it takes, and it's in the chain and
+in `--verify` from then on. It can't make a log hold that doesn't: an edited event stays broken, and a
+real event replaced by rubbish leaves a hole the chain shows, so `--repair` then exits 1.
+
+v0.22.0 stops at any line that isn't an event, in the log and for uploads. After a downgrade, run `--repair`
+with this version first, or remove that line by hand.
+
+### A copy with no team repository
+
+```yaml
+# in hosts.yaml
+activity:
+  sink: /mnt/logs/laptop-meterm.jsonl   # an absolute path to append to, or: syslog
+```
+
+Each event is copied as it's written, and what a failed attempt missed goes the next time. A
+sink gets one second and can't stop a command. `activity --verify` shows how it stands, compares
+a file with the log, and exits 2 when the chain holds and the copy is failing or different. Being
+a little behind is a note. One machine to a file, as events from another device read as a
+difference. A new file is private to you, and a file that's already there keeps its mode. The path can't
+lead into the activity directory, by any name.
+
+Its limit is plain: `sink` is in a file this account can edit, and a path this account can write it can
+also empty. It's worth having only if the place it writes to is out of reach, such as a
+share another account owns, or a file root has made append-only with `chattr +a`. `syslog` goes to the
+machine's own daemon, which is out of reach until something has root. It's been tested only
+against a stand-in socket, and is refused on macOS, which takes the messages and then couldn't
+show them. A version older than this one drops the setting when it rewrites `hosts.yaml`.
+
+## What meterm can't stop
+
+A contact list can't stop anyone dialling a number by hand. meterm guides and records an honest
+agent. It isn't a boundary against anything running as the same user, so what must not happen has
+to be stopped at the far end.
+
+`scripts/it-bypass.sh` tries each of these against a loopback sshd, and fails if a row stops being true:
+
+| Tried, as the same user | Result |
+|---|---|
+| Run `ssh` directly, with a key from `~/.ssh` | not blocked, not logged |
+| `meterm export`, then `ssh` with what it wrote | not blocked, not logged |
+| Read `hosts.yaml` | not blocked: every host, and which are production |
+| Connect to a production host with plain `ssh` | not blocked, not logged |
+| `meterm exec` on a production host, named | not blocked, and logged |
+| `meterm agents --tag` reaching production | refused, until `env: production` is edited out of `hosts.yaml`, which isn't blocked |
+| Edit or delete the log, or strip exit codes from it | not blocked; `--verify` notices |
+| Rewrite the log with every hash and `head` | not blocked; `--verify` doesn't notice, a team copy does |
+| Delete the whole activity directory | not blocked; `--verify` doesn't notice |
+| `team autosync off`, `METERM_NO_AUTOSYNC=1` | not blocked: nothing uploaded |
+| `METERM_ACTIVITY_DIR`, `METERM_CONFIG` elsewhere | not blocked: the real log has nothing to show for it |
+| Set or clear `CLAUDECODE` and the like | not blocked: `declared` means just that |
+| Remove `activity.sink` | not blocked: the copy stops |
+
+The production label and refusal are a warning sign, not a lock. The activity log is a record of
+use, which a same-user process can tamper with. Evidence comes from comparing it with what the
+far end recorded, such as the logins `meterm logins` reads from wtmp, or `auth.log` there with root,
+or from a copy kept out of reach.
+
+**What does enforce:** remote accounts, `sudoers`, forced commands, database logins and network
+rules. Those run where the agent's process can't change them.
+
+### A restricted account for an agent
+
+Give the agent its own account on the host, and a key that can only run what you've decided.
+On the host, in that account's `~/.ssh/authorized_keys`:
+
+```
+restrict,command="/usr/local/bin/agent-gate" ssh-ed25519 AAAA... agent@laptop
+```
+
+And `/usr/local/bin/agent-gate`, owned by root:
+
+```sh
+#!/bin/sh
+# Runs for every login with this key, whatever the client asked for.
+logger -t agent-gate -- "$SSH_CONNECTION: $SSH_ORIGINAL_COMMAND"
+case "$SSH_ORIGINAL_COMMAND" in
+  uptime|"df -h") exec $SSH_ORIGINAL_COMMAND ;;
+esac
+echo "agent-gate: refused" >&2
+exit 1
+```
+
+`restrict` takes away forwarding, a pty and the rest, and the case statement matches the whole
+line, so `uptime; rm -rf /` doesn't. `logger` leaves a record on the far side. Then
+`meterm add` the host with that account and key, and leave your own keys out of the agent's reach, by
+running it under its own local account. `meterm exec host -- uptime` works through this.
+
+`it-bypass.sh` tests this with a loopback sshd: the allowed commands run; other commands, `;`,
+`&&` and `$(...)`, a shell, `-W`, `-R` and `scp` are refused; and the far side's record survives wiping
+the local log. It uses a restricted key on the test's own account, as it can't create one without
+root. Separate accounts, `sudoers` and network rules aren't tested here.
 
 ## Teams
 
@@ -1002,10 +1202,12 @@ picker show a one-line reminder (`⚠ team ACME: 1 not pushed — run meterm tea
     `meterm rename <host> <new>` instead.
 - **Activity:** only events on hosts shared with that team are uploaded.
   Activity on personal hosts stays on your machine. `team log` re-checks
-  every event's hash chain, so an edited or deleted entry shows. Anyone who
+  every event's hash chain, and `team log --verify` also compares this machine's
+  log with the team's copy of it: see [What each check finds](#what-each-check-finds).
+  `--no-fetch` reads this machine's clone with no network. Anyone who
   can push could rewrite history, so protect the branch (no force-push) on
-  the Git host. Keep in mind that `exec` records the
-  command line, so don't put secrets in it on shared hosts.
+  the Git host. `--log-args` puts arguments in the log, so don't use it for
+  secrets on shared hosts.
 
 Earlier versions also had a hosted cloud backend. It's gone (v0.17.0): a
 team that was on it was moved to Git with `team git migrate` beforehand, and
@@ -1019,11 +1221,37 @@ Hosts are stored in a plain YAML file at `$XDG_CONFIG_HOME/meterm/hosts.yaml`
 database, easy to back up or put in a private dotfiles repo. Override the
 location with `--config` or `$METERM_CONFIG`. Connection history lives next
 to it in `history.json` (override with `$METERM_HISTORY`), and the activity
-log in `activity/` (override with `$METERM_ACTIVITY_DIR`).
+log in `activity/` (override with `$METERM_ACTIVITY_DIR`). Other tools should read
+[the export](docs/export.md) rather than these files.
 
 Nothing is ever stored in `~/.ssh/config` unless you run `meterm export
 --write-include`, which is entirely optional and only adds one `Include`
 line.
+
+## Upgrading from v0.22.0
+
+What changes for scripts:
+
+- Each logged command writes a second line, `outcome`, so the log and the team's copy grow by that. Filter on
+  `action` if you count lines. v0.22.0 shows them as an action called `outcome`.
+- The `activity` table has `ACTOR`, `EXIT` and `TOOK` columns. Tables aren't a stable format; `--format json` is.
+- `activity --verify` now fails on removed lines, and on changed or stripped exit codes and actors, where it
+  used to say OK. It exits 2 if the chain holds and `activity.sink` is failing or different.
+- A last line cut short is a note with exit 0. A bad line anywhere else used to stop the log being
+  read at all, recording included. Now it fails only `--verify`, until `activity --repair`.
+- `team sync` warns about a local log that fails its check, and still exits 0.
+- `team log --format json` exits 0 with every event, each with `verified` and, if false,
+  `integrity_problem`, and a warning on stderr. It's `team log --verify` that exits 1, as do the text and CSV forms.
+- `exec --format` with a bad value errors before logging anything.
+- `detail` has control characters replaced and is cut at 4096 characters, so `--log-args` loses
+  newlines and very long text.
+- CSV cells that a spreadsheet would read as a formula start with `'`.
+- `activity` doesn't create its directory just by reading it.
+- `team background` keeps one process waiting for a running upload. That's not something you'd call yourself.
+
+Upgrade every machine and team member together if you can. Mixed versions read each other's lines, with
+the limits above: v0.22.0 uploads newer events without their exit codes and actors, drops `activity.sink` when it
+rewrites `hosts.yaml`, and stops at a damaged line in the log.
 
 ## Shell completion
 

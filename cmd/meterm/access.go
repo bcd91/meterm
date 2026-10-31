@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"meterm/internal/activity"
 	"meterm/internal/audit"
 	"meterm/internal/config"
 	"meterm/internal/team"
@@ -66,6 +67,9 @@ func accessRows(events []team.TeamEvent) []audit.AccessRow {
 	rows := map[key]*audit.AccessRow{}
 	kinds := map[key]map[string]int{}
 	for _, e := range events {
+		if e.Action == activity.ActionOutcome {
+			continue // how an action ended isn't another action
+		}
 		k := key{e.Host, e.UploaderEmail}
 		r := rows[k]
 		if r == nil {

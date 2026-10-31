@@ -69,24 +69,25 @@ func runCopy(src, dst string, recursive, sync bool, rsyncFlags []string) error {
 	var host *config.Host
 	var remotePath, localPath string
 	upload := false
+	var run *activityRun
 	switch {
 	case srcRemote && dstRemote:
 		return fmt.Errorf("one end must be local; copy host to host as a download then an upload")
 	case srcRemote:
 		host, remotePath, localPath = srcHost, srcPath, dstPath
-		recordActivity(cfg, *host, verb, "download "+srcPath+" -> "+dstPath)
+		run = beginActivity(cfg, *host, verb, "download "+srcPath+" -> "+dstPath)
 	case dstRemote:
 		host, remotePath, localPath, upload = dstHost, dstPath, srcPath, true
-		recordActivity(cfg, *host, verb, "upload "+srcPath+" -> "+dstPath)
+		run = beginActivity(cfg, *host, verb, "upload "+srcPath+" -> "+dstPath)
 	default:
 		return fmt.Errorf("neither argument references a saved host — write the remote side as <name>:<path>")
 	}
 	kickAutosync(false, true)
 	r := cfg.Resolve(*host)
 	if sync {
-		return runInherited(sshrun.RsyncCommand(r, remotePath, localPath, upload, rsyncFlags))
+		return run.runInherited(sshrun.RsyncCommand(r, remotePath, localPath, upload, rsyncFlags))
 	}
-	return runInherited(sshrun.ScpCommand(r, remotePath, localPath, upload, recursive))
+	return run.runInherited(sshrun.ScpCommand(r, remotePath, localPath, upload, recursive))
 }
 
 // splitRemoteArg recognizes a "<host>:<path>" argument where <host> is a

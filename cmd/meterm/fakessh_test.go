@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"meterm/internal/testenv"
 )
 
 // fakeSSHEnv makes the test binary act as an ssh that fails three times, then
@@ -43,7 +45,7 @@ func TestMain(m *testing.M) {
 		}
 		os.Exit(255)
 	}
-	os.Exit(m.Run())
+	testenv.Main(m)
 }
 
 // installFakeSSH puts a copy of the test binary first on PATH, as ssh.

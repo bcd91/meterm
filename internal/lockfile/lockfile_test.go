@@ -11,6 +11,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+
+	"meterm/internal/testenv"
 	"time"
 )
 
@@ -27,7 +29,7 @@ func TestMain(m *testing.M) {
 		}
 		os.Exit(0)
 	}
-	os.Exit(m.Run())
+	testenv.Main(m)
 }
 
 func runHolder(mode, rest string) error {

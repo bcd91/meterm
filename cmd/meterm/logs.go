@@ -51,32 +51,35 @@ func newLogsCmd() *cobra.Command {
 			}
 			windows := isWindowsServer(r)
 			if len(paths) == 0 {
-				recordActivity(cfg, *h, "logs", "list")
+				run := beginActivity(cfg, *h, "logs", "list")
 				kickAutosync(false, true)
 				if windows {
 					list := sshrun.WinListLogsCommand(r, "")
 					guardOutput(list, raw)
-					if err := runInherited(list); err != nil {
+					if err := run.runInherited(list); err != nil {
 						return err
 					}
 					fmt.Printf("\nPick one: meterm logs %s System [-f]   (an event log above, or a file: meterm logs %s 'C:\\path\\app.log')\n", h.Name, h.Name)
 					return nil
 				}
-				if err := listLogs(cfg, *h, logfiles.DefaultDir, false, raw); err != nil {
+				err := listLogs(cfg, *h, logfiles.DefaultDir, false, raw)
+				run.end(err)
+				if err != nil {
 					return err
 				}
 				fmt.Printf("\nPick one: meterm logs %s %s/<file> [-f]\n", h.Name, logfiles.DefaultDir)
 				return nil
 			}
-			recordActivity(cfg, *h, "logs", strings.Join(paths, " "))
+			run := beginActivity(cfg, *h, "logs", strings.Join(paths, " "))
 			kickAutosync(false, true)
 			if windows {
 				c, err := sshrun.WinLogsCommand(r, paths, lines, follow)
 				if err != nil {
+					run.end(err)
 					return err
 				}
 				guardOutput(c, raw)
-				return runInherited(c)
+				return run.runInherited(c)
 			}
 
 			c := sshrun.SSH(r, logsTailScript(paths, lines, follow))
@@ -84,7 +87,7 @@ func newLogsCmd() *cobra.Command {
 			c.Stdout = os.Stdout
 			c.Stderr = os.Stderr
 			guardOutput(c, raw)
-			return runInherited(c)
+			return run.runInherited(c)
 		},
 	}
 	cmd.Flags().BoolVarP(&follow, "follow", "f", false, "stream new lines as they're written, like tail -f (Ctrl-C to stop)")

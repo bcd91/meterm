@@ -33,7 +33,7 @@ import (
 // `meterm agents`: which Claude Code sessions are running on which hosts.
 //
 // It deliberately writes no activity entry, unlike `exec`. The activity log is
-// tamper-evident and shared with the team, so nothing can be taken out of it later:
+// chained and shared with the team, so nothing can be taken out of it later:
 // a status bar asking every 30 seconds would bury everything else in there. There's
 // also little to record, because the command that runs is one constant that reads
 // and changes nothing (agents.RemoteCommand), with no user data in it. So this also
@@ -53,10 +53,7 @@ const (
 )
 
 func newAgentsCmd() *cobra.Command {
-	var tags, groups []string
-	var format string
-	var timeout time.Duration
-	var parallel int
+	var flags lookFlags
 	cmd := &cobra.Command{
 		Use:   "agents [host...] [--tag t] [--group g]",
 		Short: "List the Claude Code sessions running on hosts (read-only, not logged)",
@@ -76,30 +73,7 @@ func newAgentsCmd() *cobra.Command {
 			"  1  nothing was asked: bad flags, no selection, or an unknown host\n" +
 			"  2  the report is on stdout, and at least one host has an error in it",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if format != "text" && format != "json" {
-				return fmt.Errorf("--format must be text or json")
-			}
-			if timeout <= 0 {
-				return fmt.Errorf("--timeout must be above zero")
-			}
-			if parallel < 1 || parallel > agentsMaxParallel {
-				return fmt.Errorf("-j must be between 1 and %d", agentsMaxParallel)
-			}
-			if err := checkAgentsClient(agentsGOOS); err != nil {
-				return err
-			}
-			if len(args) == 0 && len(tags) == 0 && len(groups) == 0 {
-				return fmt.Errorf("say which hosts: name them, or use --tag or --group; `agents` won't go to every host")
-			}
-			path, err := resolveCfgPath()
-			if err != nil {
-				return err
-			}
-			cfg, err := config.Load(path) // not loadConfig: its route picker writes
-			if err != nil {
-				return err
-			}
-			jobs, err := selectAgentHosts(cfg, args, tags, groups)
+			jobs, _, err := flags.jobs("agents", args)
 			if err != nil {
 				return err
 			}
@@ -110,9 +84,9 @@ func newAgentsCmd() *cobra.Command {
 			// Its ssh processes have no terminal, so Ctrl-C has to reach them from here.
 			ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
 			defer stop()
-			rep := runAgents(ctx, jobs, sshAgentQuery(sshConfig, timeout), timeout, parallel)
+			rep := runAgents(ctx, jobs, sshAgentQuery(sshConfig, flags.timeout), flags.timeout, flags.parallel)
 			removeSSHConfig()
-			if err := writeAgents(os.Stdout, rep, format); err != nil {
+			if err := writeAgents(os.Stdout, rep, flags.format); err != nil {
 				return err
 			}
 			if failed := agentsFailed(rep); failed > 0 {
@@ -122,11 +96,7 @@ func newAgentsCmd() *cobra.Command {
 			return nil
 		},
 	}
-	cmd.Flags().StringArrayVar(&tags, "tag", nil, "select hosts with this tag (repeatable)")
-	cmd.Flags().StringArrayVar(&groups, "group", nil, "select hosts in this group (repeatable)")
-	cmd.Flags().StringVar(&format, "format", "text", "output format: text or json")
-	cmd.Flags().DurationVar(&timeout, "timeout", agentsDefaultTimeout, "give up on a host after this long")
-	cmd.Flags().IntVarP(&parallel, "parallel", "j", agentsDefaultParallel, "maximum hosts asked at once")
+	flags.add(cmd)
 	return cmd
 }
 
@@ -137,9 +107,11 @@ var agentsGOOS = runtime.GOOS
 // config reaching each jump hop: OpenSSH puts that path unquoted into the command it builds
 // for a hop, and a config's Include lines name Unix paths. Neither is known to hold for
 // Windows' ssh and C:\ paths, and a look that silently lost its options would be worse.
-func checkAgentsClient(goos string) error {
+func checkAgentsClient(goos string) error { return checkLookClient(goos, "agents") }
+
+func checkLookClient(goos, name string) error {
 	if goos == "windows" {
-		return errors.New("`agents` doesn't run on Windows yet, as it can't be sure its ssh options reach jump hops there; run it from Linux or macOS")
+		return fmt.Errorf("`%s` doesn't run on Windows yet, as it can't be sure its ssh options reach jump hops there; run it from Linux or macOS", name)
 	}
 	return nil
 }
@@ -225,23 +197,11 @@ func agentsFailed(rep agents.Report) int {
 // and that's not to be taken for what meterm found.
 func askAgents(ctx context.Context, job agentJob, query agentQuery, timeout time.Duration) agents.Host {
 	out := agents.Host{Host: termsafe.Text(job.label)}
-	if job.refused != "" {
-		out.Error = job.refused
-		return out
-	}
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	r := job.resolve(ctx)
-	if r.Err != nil {
-		out.Error = "not asked: " + termsafe.Text(r.Err.Error())
-		return out
-	}
-	if err := checkAgentExtraArgs(r.ExtraArgs); err != nil {
-		out.Error = "not asked: " + termsafe.Text(err.Error())
-		return out
-	}
-	if ctx.Err() == context.DeadlineExceeded {
-		out.Error = "timed out after " + timeout.String()
+	r, refused := prepareLook(ctx, job, timeout)
+	if refused != "" {
+		out.Error = refused
 		return out
 	}
 	stdout, stderr, overflow, err := query(ctx, r)
@@ -285,6 +245,72 @@ func askAgents(ctx context.Context, job agentJob, query agentQuery, timeout time
 	return out
 }
 
+// prepareLook is what comes before any look at a host: production, a host that isn't
+// safe to reach, extra_args that could make it more than a look. It returns the host,
+// or why it wasn't asked.
+func prepareLook(ctx context.Context, job agentJob, timeout time.Duration) (config.Resolved, string) {
+	if job.refused != "" {
+		return config.Resolved{}, job.refused
+	}
+	r := job.resolve(ctx)
+	if r.Err != nil {
+		return r, "not asked: " + termsafe.Text(r.Err.Error())
+	}
+	if err := checkAgentExtraArgs(r.ExtraArgs); err != nil {
+		return r, "not asked: " + termsafe.Text(err.Error())
+	}
+	if ctx.Err() == context.DeadlineExceeded {
+		return r, "timed out after " + timeout.String()
+	}
+	return r, ""
+}
+
+// lookFlags are the selection and limits every look takes.
+type lookFlags struct {
+	tags, groups []string
+	format       string
+	timeout      time.Duration
+	parallel     int
+}
+
+func (f *lookFlags) add(cmd *cobra.Command) {
+	cmd.Flags().StringArrayVar(&f.tags, "tag", nil, "select hosts with this tag (repeatable)")
+	cmd.Flags().StringArrayVar(&f.groups, "group", nil, "select hosts in this group (repeatable)")
+	cmd.Flags().StringVar(&f.format, "format", "text", "output format: text or json")
+	cmd.Flags().DurationVar(&f.timeout, "timeout", agentsDefaultTimeout, "give up on a host after this long")
+	cmd.Flags().IntVarP(&f.parallel, "parallel", "j", agentsDefaultParallel, "maximum hosts asked at once")
+}
+
+// jobs checks the flags and picks the hosts, under the rules `agents` has. name is the
+// command, for what it says.
+func (f *lookFlags) jobs(name string, args []string) ([]agentJob, *config.Config, error) {
+	if f.format != "text" && f.format != "json" {
+		return nil, nil, fmt.Errorf("--format must be text or json")
+	}
+	if f.timeout <= 0 {
+		return nil, nil, fmt.Errorf("--timeout must be above zero")
+	}
+	if f.parallel < 1 || f.parallel > agentsMaxParallel {
+		return nil, nil, fmt.Errorf("-j must be between 1 and %d", agentsMaxParallel)
+	}
+	if err := checkLookClient(agentsGOOS, name); err != nil {
+		return nil, nil, err
+	}
+	if len(args) == 0 && len(f.tags) == 0 && len(f.groups) == 0 {
+		return nil, nil, fmt.Errorf("say which hosts: name them, or use --tag or --group; `%s` won't go to every host", name)
+	}
+	path, err := resolveCfgPath()
+	if err != nil {
+		return nil, nil, err
+	}
+	cfg, err := config.Load(path) // not loadConfig: its route picker writes
+	if err != nil {
+		return nil, nil, err
+	}
+	jobs, err := selectAgentHosts(cfg, args, f.tags, f.groups)
+	return jobs, cfg, err
+}
+
 // sshFailureText says why ssh couldn't get in.
 func sshFailureText(stderr string) string {
 	if f := sshrun.ClassifyFailure(stderr); f != sshrun.FailureNone {
@@ -308,14 +334,20 @@ func sshFailureText(stderr string) string {
 // sshAgentQuery runs agents.RemoteCommand over ssh. r.ExtraArgs have passed
 // checkAgentExtraArgs by now.
 func sshAgentQuery(sshConfig string, timeout time.Duration) agentQuery {
+	return sshLookQuery(sshConfig, timeout, agents.RemoteCommand, agents.MaxOutput)
+}
+
+// sshLookQuery runs one fixed command as a look, keeping up to maxOut bytes of it. The
+// command is a constant at every call: nothing from a host or a flag reaches it.
+func sshLookQuery(sshConfig string, timeout time.Duration, command string, maxOut int) agentQuery {
 	return func(ctx context.Context, r config.Resolved) ([]byte, string, bool, error) {
 		r.Forwards = nil
 		r.ExtraArgs = agentSSHArgs(r, sshConfig, timeout)
 		ctx, cancel := context.WithCancel(ctx)
 		defer cancel()
-		c := sshrun.SSHContext(ctx, r, agents.RemoteCommand)
+		c := sshrun.SSHContext(ctx, r, command)
 		noPrompts(c)
-		stdout := &cappedBuffer{max: agents.MaxOutput, over: cancel}
+		stdout := &cappedBuffer{max: maxOut, over: cancel}
 		stderr := &sshrun.Tail{Max: 16 << 10}
 		c.Stdout, c.Stderr = stdout, stderr
 		// -J's ssh can hold stderr open after this ssh has ended. There's nothing more

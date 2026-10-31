@@ -10,9 +10,15 @@ W=$(cd "$W" && pwd -P)
 SSHD_PID=""
 cleanup() {
   [ -z "$SSHD_PID" ] || kill "$SSHD_PID" 2>/dev/null || true
+  # A fake claude told to hang outlives its login. The name is this run's own.
+  local p
+  for p in $(pgrep -f "$W/" 2>/dev/null); do
+    [ "$p" = "$$" ] || kill "$p" 2>/dev/null || true
+  done
   rm -rf "$W"
 }
 trap cleanup EXIT
+trap 'exit 130' INT TERM HUP
 fail() { echo "FAIL: $*"; tail -n 20 "$W/sshd.log" 2>/dev/null || true; exit 1; }
 free_port() { python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1])'; }
 
@@ -45,13 +51,32 @@ SSHD_PID=$!
 KNOWN=$W/known_hosts
 printf '[127.0.0.1]:%s %s\n[localhost]:%s %s\n' "$PORT" "$(cut -d' ' -f1,2 "$W/hostkey.pub")" "$PORT" "$(cut -d' ' -f1,2 "$W/hostkey.pub")" >"$KNOWN"
 # meterm runs the ssh on PATH, and -J's hop runs the ssh that argv[0] says, so this holds
-# for hops too. It keeps known_hosts out of the real home. `agents` has no -F to spare and
-# won't take these options from extra_args, which is the point.
+# for hops too. `agents` won't take these options from extra_args, which is the point.
+# OpenSSH reads ~/.ssh from the password database, not from $HOME, and the -F file that `agents`
+# writes Includes it. So this takes every Include out, and adds what the run needs. Nothing of
+# the real ~/.ssh or /etc/ssh is read: check_isolated below proves it.
 cat >"$W/bin/ssh" <<CONF
 #!/bin/bash
-exec -a ssh /usr/bin/ssh -o UserKnownHostsFile=$KNOWN -o IdentityFile=$W/key -o IdentitiesOnly=yes "\$@"
+cfg=/dev/null; args=()
+while [ \$# -gt 0 ]; do
+  case "\$1" in
+    -F) cfg=\$2; shift 2 ;;
+    *) args+=("\$1"); shift ;;
+  esac
+done
+clean=\$(mktemp "$W/sshcfg.XXXXXX")
+grep -v '^Include ' "\$cfg" >"\$clean" || true
+exec -a ssh /usr/bin/ssh -F "\$clean" -o UserKnownHostsFile=$KNOWN -o IdentityFile=$W/key -o IdentitiesOnly=yes -o IdentityAgent=none "\${args[@]}"
 CONF
 chmod +x "$W/bin/ssh"
+unset SSH_AUTH_SOCK
+check_isolated() {
+  printf 'Include ~/.ssh/config\nInclude /etc/ssh/ssh_config\n' >"$W/include_probe"
+  local read
+  read=$("$W/bin/ssh" -F "$W/include_probe" -G -v 127.0.0.1 2>&1 | sed -n 's/^debug1: Reading configuration data //p')
+  case "$read" in "$W"/sshcfg.*) ;; *) echo "FAIL: the ssh wrapper read: $read"; exit 1 ;; esac
+}
+check_isolated
 export PATH=$W/bin:$PATH
 for i in $(seq 1 50); do grep -q 'Server listening' "$W/sshd.log" 2>/dev/null && break; sleep 0.1; done
 
@@ -90,7 +115,7 @@ run() { # <expected exit> <args...>: leaves stdout in $OUT
 echo "== finds claude in ~/.local/bin, with a non-login PATH"
 fake "echo '[{\"pid\":7,\"cwd\":\"/src\",\"kind\":\"interactive\",\"startedAt\":1793311202058,\"sessionId\":\"s\",\"name\":\"n\",\"status\":\"busy\",\"extra\":1}]'"
 run 0 box --format json
-[ "$OUT" = '{"schema":1,"hosts":[{"host":"box","reachable":true,"error":"","agents":[{"cwd":"/src","kind":"interactive","startedAt":1793311202058,"pid":7,"status":"busy","sessionId":"s","name":"n"}]}]}' ] || fail "got $OUT"
+[ "$OUT" = '{"schema":1,"hosts":[{"host":"box","reachable":true,"error":"","agents":[{"cwd":"/src","kind":"interactive","startedAt":1793311202058,"pid":7,"status":"busy","sessionId":"s","name":"n","event":"working","agent_kind":"claude-code","source":"claude agents --json","confidence":"high"}]}]}' ] || fail "got $OUT"
 echo ok
 
 echo "== nothing is written, and every look is a login of its own"
