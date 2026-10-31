@@ -11,11 +11,13 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"slices"
 	"sort"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 	"unicode/utf8"
 
@@ -131,6 +133,9 @@ func (launchdService) enable(spec, exe, config string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("%w; nothing was changed", err)
 	}
+	if before == jobNoDomain {
+		return "", fmt.Errorf("launchd has no session for this user; nothing was changed")
+	}
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return "", err
 	}
@@ -160,6 +165,11 @@ func (launchdService) enable(spec, exe, config string) (string, error) {
 		warnLaunchdAgent()
 		return label, nil
 	}
+	// A signal in the middle would leave the new file with the old job stopped, so they
+	// wait until this is done. It can't be held up for long: launchctl has a timeout.
+	// SIGKILL still can get in here, and then a run of `tunnel enable` or `disable` tidies up.
+	signal.Ignore(os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
+	defer signal.Reset(os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
 	if err := writeUnit(path, plist); err != nil {
 		return "", err
 	}
@@ -230,6 +240,9 @@ func (launchdService) disable(spec string) error {
 	if st != jobLoaded && errors.Is(statErr, os.ErrNotExist) {
 		return fmt.Errorf("%s isn't enabled (no %s)", termsafe.Text(spec), path)
 	}
+	if st == jobNoDomain {
+		fmt.Fprintln(os.Stderr, "meterm: nobody is logged in at this Mac's screen, so the job couldn't have been loaded; removing its file")
+	}
 	if st == jobLoaded {
 		if err := launchdBootout(target); err != nil {
 			return err
@@ -246,11 +259,16 @@ type jobState int
 const (
 	jobNotLoaded jobState = iota
 	jobLoaded
+	jobNoDomain // the user has no gui session, so no job of theirs can be loaded
 )
 
-// launchctlNoService is launchctl print's exit code for a job that isn't there. Any
-// other failure, such as 112 for a domain that isn't there, says nothing about the job.
-const launchctlNoService = 113
+// launchctl print's exit codes that say something about a job: it isn't there, or its
+// whole domain isn't, which is also what print gives for a job in that domain. Any other
+// failure says nothing.
+const (
+	launchctlNoService = 113
+	launchctlNoDomain  = 112
+)
 
 // launchdJob is what launchctl print says of a loaded job.
 type launchdJob struct {
@@ -266,8 +284,13 @@ func launchdInspect(target string) (jobState, launchdJob, error) {
 	out, err := launchctl("print", target)
 	if err != nil {
 		var coded interface{ ExitCode() int }
-		if errors.As(err, &coded) && coded.ExitCode() == launchctlNoService {
-			return jobNotLoaded, launchdJob{}, nil
+		if errors.As(err, &coded) {
+			switch coded.ExitCode() {
+			case launchctlNoService:
+				return jobNotLoaded, launchdJob{}, nil
+			case launchctlNoDomain:
+				return jobNoDomain, launchdJob{}, nil
+			}
 		}
 		return jobNotLoaded, launchdJob{}, launchctlError("print", out, err)
 	}
@@ -314,7 +337,7 @@ func launchdBootout(target string) error {
 		}
 		// meterm takes a moment over its ssh: up to its WaitDelay, and some.
 		for wait := 0; wait < 10; wait++ {
-			if st, _, ierr := launchdInspect(target); ierr == nil && st == jobNotLoaded {
+			if st, _, ierr := launchdInspect(target); ierr == nil && st != jobLoaded {
 				return nil
 			}
 			time.Sleep(launchctlRetryDelay)
@@ -589,6 +612,8 @@ func launchdRowState(s enabledService) (state string, pid int, detail string) {
 	switch {
 	case err != nil:
 		return unknownStatus, 0, "launchctl couldn't say how it is" + see
+	case st == jobNoDomain:
+		return stoppedStatus, 0, "enabled; nobody is logged in at this Mac's screen, and it starts at the next login" + see
 	case st == jobNotLoaded:
 		return stoppedStatus, 0, "enabled, not loaded; it starts at the next login or `tunnel enable`" + see
 	case job.running:

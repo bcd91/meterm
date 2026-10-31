@@ -133,13 +133,13 @@ wait_for 50 "launchd to restart it" back
 wait_for 10 "the tunnel to carry traffic again" through
 echo "ok: pid $PID was killed and pid $(job_pid) took over"
 
-echo "== a hostile banner neither stops it nor reaches the log (H3, L8)"
+echo "== a hostile banner neither stops it nor reaches the log"
 grep -q 'Unable to negotiate' "$HOME"/Library/Logs/meterm/*.log || fail "the banner wasn't seen, so this proves nothing"
 is_state connected || fail "the banner stopped it"
 if LC_ALL=C grep -q "$(printf '\033')" "$HOME"/Library/Logs/meterm/*.log; then fail "an escape sequence reached the log"; fi
 echo ok
 
-echo "== SIGTERM from outside: it comes back (L7)"
+echo "== SIGTERM from outside: it comes back"
 wait_for 20 "a state file saying connected" is_state connected
 PID=$(job_pid)
 kill -TERM "$PID"
@@ -148,7 +148,7 @@ wait_for 50 "launchd to restart it" back
 wait_for 10 "the tunnel to carry traffic" through
 echo "ok: pid $PID got SIGTERM and pid $(job_pid) took over"
 
-echo "== a broken config, across launchd's restarts, then fixed: it comes back (H3)"
+echo "== a broken config, across launchd's restarts, then fixed: it comes back"
 wait_for 20 "a state file saying connected" is_state connected
 PID=$(job_pid)
 printf 'hosts: [ {{{ not yaml' >"$METERM_CONFIG"
@@ -164,7 +164,7 @@ write_hosts with
 wait_for 50 "the tunnel to return once the file is fixed" through
 echo "ok: exit 1 while broken, and back on its own once fixed"
 
-echo "== the same with a file that's empty at login (H3)"
+echo "== the same with a file that's empty at login"
 wait_for 20 "a state file saying connected" is_state connected
 PID=$(job_pid)
 printf 'version: 1\nhosts: []\n' >"$METERM_CONFIG"
@@ -175,7 +175,7 @@ write_hosts with
 wait_for 50 "the tunnel to return" through
 echo ok
 
-echo "== the status directory purged: launchd says it's running (M2)"
+echo "== the status directory purged: launchd says it's running"
 wait_for 20 "a state file saying connected" is_state connected
 PID=$(job_pid)
 mv "$METERM_RUNTIME_DIR" "$METERM_RUNTIME_DIR.gone"
@@ -186,7 +186,7 @@ wait_for 20 "the directory to come back" test -d "$METERM_RUNTIME_DIR"
 wait_for 20 "a state file saying connected" is_state connected
 echo ok
 
-echo "== the binary moved: status says launchd can't start it (L8)"
+echo "== the binary moved: status says launchd can't start it"
 wait_for 20 "a state file saying connected" is_state connected
 PID=$(job_pid)
 mv "$M" "$M.moved"
@@ -198,7 +198,7 @@ mv "$M.moved" "$M"
 wait_for 50 "the tunnel to return with the binary" through
 echo ok
 
-echo "== a failed re-enable brings the old job back, and a job with its file gone still stops (M3, M4)"
+echo "== a failed re-enable brings the old job back, and a job with its file gone still stops"
 wait_for 20 "a state file saying connected" is_state connected
 PID=$(job_pid)
 cp "$PLIST" "$W/plist.keep"

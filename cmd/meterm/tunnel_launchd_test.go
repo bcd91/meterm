@@ -15,6 +15,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -404,7 +405,7 @@ func TestLaunchdDisableWhenLaunchctlCantSay(t *testing.T) {
 	if err := runEnable("box/web"); err != nil {
 		t.Fatal(err)
 	}
-	f.fail["print"] = exitCode(112)
+	f.fail["print"] = exitCode(1)
 	err := runDisable("box/web")
 	if err == nil || !strings.Contains(err.Error(), "can't tell") {
 		t.Errorf("err = %v", err)
@@ -416,6 +417,56 @@ func TestLaunchdDisableWhenLaunchctlCantSay(t *testing.T) {
 	f.fail["print"] = errors.New("launchctl isn't there")
 	if err := runDisable("gone/web"); err == nil || !strings.Contains(err.Error(), "can't tell") {
 		t.Errorf("err = %v", err)
+	}
+}
+
+// Nobody logged in: no job can be loaded, so the file is all there is to remove.
+func TestLaunchdDisableWithNoSession(t *testing.T) {
+	f, home := launchdEnv(t)
+	if err := runEnable("box/web"); err != nil {
+		t.Fatal(err)
+	}
+	f.calls = nil
+	f.fail["print"] = exitCode(launchctlNoDomain)
+	if err := runDisable("box/web"); err != nil {
+		t.Errorf("err = %v", err)
+	}
+	if _, err := os.Stat(jobFile(home, "box/web")); !os.IsNotExist(err) {
+		t.Errorf("job file: %v", err)
+	}
+	if countPrefix(f.calls, "bootout") != 0 {
+		t.Errorf("calls: %q", f.calls)
+	}
+	if err := runDisable("box/web"); err == nil || !strings.Contains(err.Error(), "isn't enabled") {
+		t.Errorf("again: %v", err)
+	}
+}
+
+// A SIGTERM between writing the job file and loading it waits until enable has finished.
+func TestLaunchdEnableOutlivesASignalInTheMiddle(t *testing.T) {
+	f, home := launchdEnv(t)
+	inner := launchctl
+	launchctl = func(args ...string) (string, error) {
+		if args[0] == "bootstrap" {
+			self, err := os.FindProcess(os.Getpid())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := self.Signal(syscall.SIGTERM); err != nil {
+				t.Error(err)
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+		return inner(args...)
+	}
+	if err := runEnable("box/web"); err != nil {
+		t.Errorf("err = %v", err)
+	}
+	if !f.loaded[launchdDomain()+"/"+launchdLabel("box/web")] {
+		t.Error("not loaded")
+	}
+	if _, err := os.Stat(jobFile(home, "box/web")); err != nil {
+		t.Errorf("job file: %v", err)
 	}
 }
 
@@ -656,7 +707,11 @@ func TestStatusShowsEnabledAndStopped(t *testing.T) {
 	if r := one(); r.State != stoppedStatus || !strings.Contains(r.Detail, "not loaded") {
 		t.Errorf("not loaded: %+v", r)
 	}
-	f.fail["print"] = exitCode(112)
+	f.fail["print"] = exitCode(launchctlNoDomain)
+	if r := one(); r.State != stoppedStatus || !strings.Contains(r.Detail, "logged in") {
+		t.Errorf("no session: %+v", r)
+	}
+	f.fail["print"] = exitCode(1)
 	if r := one(); r.State != unknownStatus {
 		t.Errorf("launchctl can't say: %+v", r)
 	}
