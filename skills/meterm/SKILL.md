@@ -5,7 +5,7 @@ description: Reach and work on remote machines with meterm, a CLI that keeps an 
 
 # meterm
 
-meterm knows the user's SSH machines by name, including their users, keys, jump hosts and alternative routes. Work through it instead of plain `ssh`, because it finds the route for you and records the work in `meterm activity`, which a plain `ssh` bypasses.
+meterm knows the user's SSH machines by name, including their users, keys, jump hosts and alternative routes. Work through it instead of plain `ssh`, because it finds the route for you and records work on hosts in `meterm activity`, which a plain `ssh` bypasses. Not everything lands there: `agents` is left out on purpose, and looking at `list` or `status` touches no host.
 
 ## First check
 
@@ -21,7 +21,7 @@ Find hosts with `meterm list --format json`: `name`, `target`, `group`, `tags`, 
 
 These reach real servers, so the split follows what can go wrong.
 
-**Fine without asking:** `list`, `history`, `status`, `activity --format json`, `route list`, `route check`, `tunnel list`, `stats <host>`.
+**Fine without asking:** `list`, `history`, `status`, `activity --format json`, `route list`, `route check`, `tunnel list`, `stats <host>`, and `agents <host>` for a host you name that isn't production. That runs one fixed read-only command, lists Claude Code sessions, and isn't in the activity log.
 
 **Ask first, naming the host and the exact action:**
 
@@ -31,11 +31,12 @@ These reach real servers, so the split follows what can go wrong.
 | `exec` | Runs commands on the host. |
 | `cp`, `files` | Change or take files. |
 | `tunnel up`, `tunnel enable` | Open ports here into the host's network. |
+| `tunnel disable` | Stops a tunnel that something may rely on. |
 | `keys`, `copy-id`, `keygen` | Change who can log in. |
 | `relay`, `audit`, `report` | Change hosts, or run checks across them. |
 | `add`, `edit`, `rm`, `rename`, `route add`, `route rm`, `group`, `team` | Change the inventory, which a team may share. |
 
-**Needs approval of that exact command:** `exec --all`, `--tag` and `--group` selections, and anything aimed at production.
+**Needs approval of that exact command:** `exec --all`, `--tag` and `--group` selections (`agents` included), and anything aimed at production, `agents <host>` included.
 
 A host is production if its `env` is `production`. An unset `env` tells you nothing, so treat a host as production if its name, group or tags suggest it, or if you can't tell.
 

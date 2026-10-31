@@ -747,8 +747,8 @@ own ssh config is replaced while they run.
 `meterm agents` lists the Claude Code sessions running on the hosts you choose.
 
 ```sh
-meterm agents t480                       # a table
-meterm agents t480 web1 --format json    # for a status bar or a script
+meterm agents devbox                     # a table
+meterm agents devbox web1 --format json  # for a status bar or a script
 meterm agents --tag laptop --timeout 4s -j 4
 ```
 
@@ -758,7 +758,13 @@ on `PATH`. Nothing you type or that's saved about a host goes into that command.
 say which hosts; with none it's an error, and there's no `--all`. A production host is asked
 only when you name it: picked up by `--tag` or `--group`, it's listed as refused. The same goes
 for a host reached through production, by any of its routes, whether a hop is a saved name,
-`user@name` or just a production host's address.
+`user@name`, `ssh://…` or just a production host's address.
+
+That check goes by what's saved in meterm and is on the safe side. Addresses are compared
+whatever the port, so a non-production host on a production host's address is refused too
+unless named. A hop or address it can't read for sure, such as `127.1`, `010.0.0.1` or one
+with a zone, counts as production. It resolves no names and doesn't read your ssh config, so
+a `ProxyJump` or `HostName` in `~/.ssh/config` that leads to production is invisible to it.
 
 A host's `extra_args` have to pass an allowlist, or that host is reported as an error and
 no ssh runs: `-p`, `-i`, `-l`, a few plain flags, and `-o` with connection settings such as
@@ -766,7 +772,7 @@ no ssh runs: `-p`, `-i`, `-l`, a few plain flags, and `-o` with connection setti
 destination, and `-o ProxyCommand`, `-A` or `-M` would make this more than one fixed command.
 
 ```json
-{"schema":1,"hosts":[{"host":"t480","reachable":true,"error":"","agents":[
+{"schema":1,"hosts":[{"host":"devbox","reachable":true,"error":"","agents":[
   {"cwd":"/home/a/src","kind":"interactive","startedAt":1793311202058,"pid":812,
    "status":"busy","sessionId":"…","name":"fix login"}]}]}
 ```
@@ -804,6 +810,13 @@ there's one file in a private temp directory, the ssh config behind `-F` that ha
 options (`BatchMode`, strict host keys, no forwarding, no shared connection) to jump hops,
 which get none of a command line's `-o`. It includes your own ssh config after them, so
 `ProxyCommand` or `IdentityFile` there still apply: that file is yours to trust.
+
+`agents` runs on Linux and macOS, and refuses to run on Windows, where nothing shows those
+options would reach a hop. A Windows server can't answer either: the command needs `sh`, so it
+comes back as an error for that host. It needs OpenSSH 7.6 or newer, for `RemoteCommand`, and
+has been run only with 10.3. It uses the first `ssh` on `PATH`, and since `-F` replaces the
+system config, an ssh from elsewhere such as Homebrew reads `/etc/ssh/ssh_config` instead of its
+own.
 
 ## Status and history
 
