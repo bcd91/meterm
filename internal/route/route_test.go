@@ -315,3 +315,69 @@ func TestAvoidExpiresAndClears(t *testing.T) {
 		t.Error("still avoided after Clear")
 	}
 }
+
+// A look writes nothing, and goes no further than its context.
+func TestLookLeavesNoState(t *testing.T) {
+	dir := t.TempDir()
+	state := filepath.Join(dir, "routes.json")
+	known := filepath.Join(dir, "known_hosts")
+	if err := os.WriteFile(known, []byte("192.0.2.1 ssh-ed25519 AAAA\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	old := KnownHosts
+	KnownHosts = func() string { return known }
+	defer func() { KnownHosts = old }()
+	h := config.Host{Name: "a", Address: "192.0.2.1", Routes: []config.Route{{Name: "pub", Address: "198.51.100.1"}}}
+	cfg := &config.Config{Hosts: []config.Host{h}}
+	p := NewLook(cfg, state)
+	p.Dial = func(_ context.Context, addr string) error {
+		if strings.Contains(addr, "198.51.100.1") {
+			return nil
+		}
+		return errors.New("no")
+	}
+	rt, ok := p.Look(context.Background())(h)
+	if !ok || rt.Name != "pub" {
+		t.Fatalf("got %+v, %v", rt, ok)
+	}
+	if _, err := os.Stat(state); !os.IsNotExist(err) {
+		t.Errorf("routes.json: %v", err)
+	}
+	if b, _ := os.ReadFile(known); string(b) != "192.0.2.1 ssh-ed25519 AAAA\n" {
+		t.Errorf("known_hosts: %s", b)
+	}
+}
+
+func TestLookStopsWithItsContext(t *testing.T) {
+	h := config.Host{Name: "a", Address: "192.0.2.1", Routes: []config.Route{{Name: "r1", Address: "192.0.2.2"}, {Name: "r2", Address: "192.0.2.3"}}}
+	p := NewLook(&config.Config{Hosts: []config.Host{h}}, "")
+	dials := 0
+	ctx, cancel := context.WithCancel(context.Background())
+	p.Dial = func(context.Context, string) error {
+		dials++
+		cancel()
+		return errors.New("no")
+	}
+	p.Look(ctx)(h)
+	if dials != 1 {
+		t.Errorf("%d dials after the context ended", dials)
+	}
+}
+
+// A server that accepts and says nothing can't hold a probe past its context.
+func TestDialSSHHonoursCancel(t *testing.T) {
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	time.AfterFunc(50*time.Millisecond, cancel)
+	start := time.Now()
+	if err := dialSSH(ctx, l.Addr().String()); err == nil {
+		t.Error("no error")
+	}
+	if d := time.Since(start); d > 2*time.Second {
+		t.Errorf("took %s", d)
+	}
+}

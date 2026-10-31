@@ -14,6 +14,8 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
+
+	"meterm/internal/termsafe"
 )
 
 // packagedMeterm is where a medistro install keeps the binary: a unit pointing
@@ -28,21 +30,49 @@ var systemctlUser = func(args ...string) error {
 	return c.Run()
 }
 
+// serviceGOOS picks the service manager; tests set it to try either on any machine.
+var serviceGOOS = runtime.GOOS
+
+// tunnelService is what differs between the systems that can keep a tunnel running.
+type tunnelService interface {
+	// binary is the path the job should run, and warnBinary speaks up if it's a poor one.
+	binary() (string, error)
+	warnBinary(exe string)
+	// enable writes the job and starts it, and returns what it's called.
+	enable(spec, exe, config string) (string, error)
+	disable(spec string) error
+}
+
+func serviceForOS() (tunnelService, error) {
+	switch serviceGOOS {
+	case "linux":
+		return systemdService{}, nil
+	case "darwin":
+		return launchdService{}, nil
+	}
+	return nil, checkServiceSupport()
+}
+
 func newTunnelEnableCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "enable <host>/<tunnel>",
-		Short: "Keep a saved tunnel open in the background, from login on (Linux)",
-		Long: "Writes a systemd user unit that runs `meterm tunnel up --keep`, and starts it.\n" +
-			"It carries on after this terminal closes and comes back at the next login; a\n" +
-			"locked key or a refused login is retried rather than given up on. See how it's\n" +
-			"doing with `meterm status`, and its output with\n" +
-			"`journalctl --user -u <the unit this prints>`.",
+		Short: "Keep a saved tunnel open in the background, from login on (Linux, macOS)",
+		Long: "Writes a job that runs `meterm tunnel up --keep`, and starts it: a systemd user\n" +
+			"unit on Linux, a LaunchAgent on macOS. It carries on after this terminal closes\n" +
+			"and comes back at the next login; a locked key or a refused login is retried\n" +
+			"rather than given up on. See how it's doing with `meterm status`. Its output is\n" +
+			"in `journalctl --user -u <the unit this prints>` on Linux, and in\n" +
+			"~/Library/Logs/meterm/<the label this prints>.log on macOS.",
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if err := checkServiceSupport(); err != nil {
 				return err
 			}
 			spec, err := serviceSpec(args[0])
+			if err != nil {
+				return err
+			}
+			svc, err := serviceForOS()
 			if err != nil {
 				return err
 			}
@@ -59,16 +89,14 @@ func newTunnelEnableCmd() *cobra.Command {
 			}
 			f := sets[0].forward[0]
 			if cfg.IsProduction(sets[0].host) || f.MentionsProduction() {
-				fmt.Fprintf(os.Stderr, "⚠ %s reaches PRODUCTION, and will stay open: %s\n", spec, f.Note)
+				fmt.Fprintf(os.Stderr, "⚠ %s reaches PRODUCTION, and will stay open: %s\n", spec, termsafe.Text(f.Note))
 			}
 
-			exe, err := runningBinary()
+			exe, err := svc.binary()
 			if err != nil {
 				return err
 			}
-			if exe != packagedMeterm {
-				fmt.Fprintf(os.Stderr, "meterm: warning: the unit runs %s, not %s; it stops working if that copy moves\n", exe, packagedMeterm)
-			}
+			svc.warnBinary(exe)
 			config := ""
 			if cfgPath != "" || os.Getenv("METERM_CONFIG") != "" {
 				if config, err = resolveCfgPath(); err != nil {
@@ -78,24 +106,11 @@ func newTunnelEnableCmd() *cobra.Command {
 					return err
 				}
 			}
-			dir, err := userUnitDir()
+			name, err := svc.enable(spec, exe, config)
 			if err != nil {
 				return err
 			}
-			if err := os.MkdirAll(dir, 0o755); err != nil {
-				return err
-			}
-			unit := serviceUnitName(spec)
-			if err := writeUnit(filepath.Join(dir, unit), renderTunnelUnit(exe, config, spec)); err != nil {
-				return err
-			}
-			if err := systemctlUser("daemon-reload"); err != nil {
-				return fmt.Errorf("systemctl daemon-reload: %w", err)
-			}
-			if err := systemctlUser("enable", "--now", unit); err != nil {
-				return fmt.Errorf("systemctl enable %s: %w", unit, err)
-			}
-			fmt.Printf("Enabled %s as %s. Undo with `meterm tunnel disable %s`.\n", spec, unit, spec)
+			fmt.Printf("Enabled %s as %s. Undo with `meterm tunnel disable %s`.\n", spec, name, spec)
 			return nil
 		},
 	}
@@ -104,7 +119,7 @@ func newTunnelEnableCmd() *cobra.Command {
 func newTunnelDisableCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "disable <host>/<tunnel>",
-		Short: "Stop a tunnel enabled with `meterm tunnel enable`, and remove its unit",
+		Short: "Stop a tunnel enabled with `meterm tunnel enable`, and remove its job",
 		Long: "Works from the name alone, so a tunnel or host deleted since can still be\n" +
 			"turned off.",
 		Args: cobra.ExactArgs(1),
@@ -112,44 +127,103 @@ func newTunnelDisableCmd() *cobra.Command {
 			if err := checkServiceSupport(); err != nil {
 				return err
 			}
-			spec, err := serviceSpec(args[0])
+			spec, err := serviceSpecShape(args[0])
 			if err != nil {
 				return err
 			}
-			dir, err := userUnitDir()
+			svc, err := serviceForOS()
 			if err != nil {
 				return err
 			}
-			unit := serviceUnitName(spec)
-			path := filepath.Join(dir, unit)
-			if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
-				return fmt.Errorf("%s isn't enabled (no %s)", spec, path)
-			}
-			if err := systemctlUser("disable", "--now", unit); err != nil {
-				return fmt.Errorf("systemctl disable %s: %w", unit, err)
-			}
-			if err := os.Remove(path); err != nil {
+			if err := svc.disable(spec); err != nil {
 				return err
 			}
-			if err := systemctlUser("daemon-reload"); err != nil {
-				return fmt.Errorf("systemctl daemon-reload: %w", err)
-			}
-			fmt.Printf("Disabled %s.\n", spec)
+			fmt.Printf("Disabled %s.\n", termsafe.Text(spec))
 			return nil
 		},
 	}
 }
 
 func checkServiceSupport() error {
-	if runtime.GOOS != "linux" {
-		return fmt.Errorf("tunnel enable and disable need systemd, so they work on Linux only; use `meterm tunnel up --keep` here")
+	if serviceGOOS != "linux" && serviceGOOS != "darwin" {
+		return fmt.Errorf("tunnel enable and disable need systemd or launchd, so they work on Linux and macOS only; use `meterm tunnel up --keep` here")
+	}
+	return nil
+}
+
+// systemdService keeps a tunnel in a systemd user unit.
+type systemdService struct{}
+
+func (systemdService) binary() (string, error) { return runningBinary() }
+
+func (systemdService) warnBinary(exe string) {
+	if exe != packagedMeterm {
+		fmt.Fprintf(os.Stderr, "meterm: warning: the unit runs %s, not %s; it stops working if that copy moves\n", exe, packagedMeterm)
+	}
+}
+
+func (systemdService) enable(spec, exe, config string) (string, error) {
+	dir, err := userUnitDir()
+	if err != nil {
+		return "", err
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", err
+	}
+	unit := serviceUnitName(spec)
+	if err := writeUnit(filepath.Join(dir, unit), renderTunnelUnit(exe, config, spec)); err != nil {
+		return "", err
+	}
+	if err := systemctlUser("daemon-reload"); err != nil {
+		return "", fmt.Errorf("systemctl daemon-reload: %w", err)
+	}
+	if err := systemctlUser("enable", "--now", unit); err != nil {
+		return "", fmt.Errorf("systemctl enable %s: %w", unit, err)
+	}
+	return unit, nil
+}
+
+func (systemdService) disable(spec string) error {
+	dir, err := userUnitDir()
+	if err != nil {
+		return err
+	}
+	unit := serviceUnitName(spec)
+	path := filepath.Join(dir, unit)
+	if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("%s isn't enabled (no %s)", termsafe.Text(spec), path)
+	}
+	if err := systemctlUser("disable", "--now", unit); err != nil {
+		return fmt.Errorf("systemctl disable %s: %w", unit, err)
+	}
+	// The SIGTERM exit code of --service counts as a failure, which would stay listed.
+	_ = systemctlUser("reset-failed", unit)
+	if err := os.Remove(path); err != nil {
+		return err
+	}
+	if err := systemctlUser("daemon-reload"); err != nil {
+		return fmt.Errorf("systemctl daemon-reload: %w", err)
 	}
 	return nil
 }
 
 // serviceSpec checks for host/tunnel: a unit holds one tunnel, by name, so that
-// adding a tunnel to a host later doesn't quietly open it too.
+// adding a tunnel to a host later doesn't quietly open it too. The name ends up in a
+// job's command line and on the terminal, and no saved host can need a leading - or
+// an escape sequence to be turned on or off.
 func serviceSpec(arg string) (string, error) {
+	if _, err := serviceSpecShape(arg); err != nil {
+		return "", err
+	}
+	if strings.HasPrefix(arg, "-") || termsafe.Unsafe(arg) {
+		return "", fmt.Errorf("%q: not a name a tunnel can be enabled under", arg)
+	}
+	return arg, nil
+}
+
+// serviceSpecShape is all that disable asks of a name: one that an older meterm let
+// through, or one that a team has since changed, can still be turned off.
+func serviceSpecShape(arg string) (string, error) {
 	host, name, ok := strings.Cut(arg, "/")
 	if !ok || host == "" || name == "" {
 		return "", fmt.Errorf("%q: give one tunnel as <host>/<tunnel>", arg)

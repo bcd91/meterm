@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -22,6 +23,7 @@ import (
 	"meterm/internal/relay"
 	"meterm/internal/sshrun"
 	"meterm/internal/status"
+	"meterm/internal/termsafe"
 )
 
 func newTunnelCmd() *cobra.Command {
@@ -37,7 +39,7 @@ func newTunnelCmd() *cobra.Command {
 			"  meterm tunnel add bastion socks -D 1080\n" +
 			"  meterm tunnel up prod-db/pg            # Ctrl-C to close\n" +
 			"  meterm tunnel up prod-db web1 --keep   # every tunnel on both, reconnecting\n" +
-			"  meterm tunnel enable prod-db/pg        # in the background from now on (Linux)",
+			"  meterm tunnel enable prod-db/pg        # in the background from now on (Linux, macOS)",
 	}
 	cmd.AddCommand(newTunnelAddCmd(), newTunnelListCmd(), newTunnelRmCmd(), newTunnelUpCmd(),
 		newTunnelEnableCmd(), newTunnelDisableCmd())
@@ -399,8 +401,52 @@ func tunnelArgs(cfg *config.Config, set tunnelSet, options ...string) []string {
 // names it, so systemd shows the failure instead of restarting into it forever.
 const tunnelGaveUp = 78
 
+// tunnelSignalled is the exit code of `tunnel up --service` after SIGTERM: not success,
+// so that whatever killed it from outside (killall, a memory cleaner) doesn't end the
+// tunnel for good. A deliberate stop isn't affected. launchd doesn't restart what
+// bootout stopped, and systemd.service(5) says the same of a stop it was asked to do.
+const tunnelSignalled = 128 + 15
+
+// tunnelVerdict is the one thing that may stop a service for good: a decision read from
+// a config that parsed and has hosts in it, that this tunnel is gone or its host unsafe.
+// A config that can't be read, or has nothing in it yet, can be fixed; and nothing ssh
+// printed counts, since that includes what the server sends before authentication,
+// which mustn't be able to end a tunnel.
+type tunnelVerdict struct{ error }
+
+// errTunnelSignalled is how runTunnelUp in service mode says a signal ended it.
+var errTunnelSignalled = errors.New("stopped by a signal")
+
+// tunnelServiceExit is the exit code of `tunnel up --service` for how it ended.
+func tunnelServiceExit(err error, gaveUp int) int {
+	var verdict tunnelVerdict
+	switch {
+	case err == nil:
+		return 0
+	case errors.As(err, &verdict):
+		return gaveUp
+	case errors.Is(err, errTunnelSignalled):
+		return tunnelSignalled
+	}
+	return 1
+}
+
+// lockedWriter lets ssh's two streams and holdTunnel's own messages share a writer
+// that isn't safe for that.
+type lockedWriter struct {
+	mu sync.Mutex
+	w  io.Writer
+}
+
+func (l *lockedWriter) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.w.Write(p)
+}
+
 func newTunnelUpCmd() *cobra.Command {
 	var keep, service bool
+	var gaveUpExit int
 	cmd := &cobra.Command{
 		Use:   "up <host>[/<tunnel>]...",
 		Short: "Open saved tunnels until Ctrl-C",
@@ -410,9 +456,11 @@ func newTunnelUpCmd() *cobra.Command {
 		Args: cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			err := runTunnelUp(args, keep, service)
-			if err != nil && service {
-				fmt.Fprintf(os.Stderr, "meterm: %v\n", err)
-				finish(tunnelGaveUp)
+			if service && err != nil {
+				if !errors.Is(err, errTunnelSignalled) {
+					fmt.Fprintf(os.Stderr, "meterm: %s\n", termsafe.Lines(err.Error()))
+				}
+				finish(tunnelServiceExit(err, gaveUpExit))
 			}
 			return err
 		},
@@ -422,6 +470,10 @@ func newTunnelUpCmd() *cobra.Command {
 	// key, wait for it to be unlocked rather than exit and be restarted.
 	cmd.Flags().BoolVar(&service, "service", false, "keep retrying on failures that need a person")
 	_ = cmd.Flags().MarkHidden("service")
+	// launchd can't be told to leave one exit code alone as systemd can, only every
+	// code but 0: see renderLaunchAgent.
+	cmd.Flags().IntVar(&gaveUpExit, "gave-up-exit", tunnelGaveUp, "exit code when --service gives up")
+	_ = cmd.Flags().MarkHidden("gave-up-exit")
 	return cmd
 }
 
@@ -432,6 +484,9 @@ func runTunnelUp(args []string, keep, service bool) error {
 	}
 	sets, err := pickTunnels(cfg, args)
 	if err != nil {
+		if len(cfg.Hosts) > 0 {
+			return tunnelVerdict{err}
+		}
 		return err
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
@@ -441,14 +496,14 @@ func runTunnelUp(args []string, keep, service bool) error {
 	// unsafe shouldn't add to the permanent log on every try.
 	for _, s := range sets {
 		if err := cfg.Resolve(s.host).Err; err != nil {
-			return err
+			return tunnelVerdict{err}
 		}
 	}
 	for _, s := range sets {
 		var names []string
 		for _, f := range s.forward {
 			names = append(names, f.Name)
-			fmt.Printf("%s/%s: %s\n", s.host.Name, f.Name, describeTunnel(f))
+			fmt.Printf("%s/%s: %s\n", termsafe.Text(s.host.Name), termsafe.Text(f.Name), termsafe.Text(describeTunnel(f)))
 		}
 		recordActivity(cfg, s.host, "tunnel", strings.Join(names, ","))
 	}
@@ -456,7 +511,7 @@ func runTunnelUp(args []string, keep, service bool) error {
 	for _, set := range sets {
 		for _, f := range set.forward {
 			if cfg.IsProduction(set.host) || f.MentionsProduction() {
-				fmt.Fprintf(os.Stderr, "⚠ %s/%s reaches PRODUCTION: %s\n", set.host.Name, f.Name, f.Note)
+				fmt.Fprintf(os.Stderr, "⚠ %s/%s reaches PRODUCTION: %s\n", termsafe.Text(set.host.Name), termsafe.Text(f.Name), termsafe.Text(f.Note))
 			}
 		}
 	}
@@ -471,15 +526,24 @@ func runTunnelUp(args []string, keep, service bool) error {
 		wg.Add(1)
 		go func(i int, s tunnelSet) {
 			defer wg.Done()
-			hold := tunnelHold{keep: keep, stopOnFailure: !service, nextRoute: tunnelNextRoute(&s)}
+			hold := tunnelHold{keep: keep, stopOnFailure: !service, service: service, nextRoute: tunnelNextRoute(&s)}
 			stop := hold.track(reg, &s)
 			defer stop()
-			errs[i] = holdTunnel(ctx, s.host.Name, func() ([]string, error) { return freshTunnelArgs(cfg, s, hold.marker.options()...) }, hold, os.Stderr)
+			var log io.Writer = os.Stderr
+			if service {
+				// It ends up in a log file someone will cat, and ssh's stderr holds
+				// what the server sends before authentication.
+				log = &lockedWriter{w: termsafe.New(os.Stderr)}
+			}
+			errs[i] = holdTunnel(ctx, s.host.Name, func() ([]string, error) { return freshTunnelArgs(cfg, s, hold.marker.options()...) }, hold, log)
 		}(i, s)
 	}
 	wg.Wait()
 	if ctx.Err() != nil {
 		fmt.Println("\nTunnels closed.")
+		if service {
+			return errTunnelSignalled
+		}
 		return nil
 	}
 	for _, e := range errs {
@@ -497,10 +561,14 @@ func runTunnelUp(args []string, keep, service bool) error {
 // can't be read for the moment changes nothing.
 func freshTunnelArgs(cfg *config.Config, s tunnelSet, options ...string) ([]string, error) {
 	if fresh, err := loadConfig(); err == nil {
+		if len(fresh.Hosts) == 0 {
+			// Not a decision about this host: more likely a file on its way somewhere.
+			return nil, fmt.Errorf("the host file has no hosts in it, so %s's tunnel is closed for now", s.host.Name)
+		}
 		cfg = fresh
 		h, i := fresh.Find(s.host.Name)
 		if i < 0 {
-			return nil, fmt.Errorf("%s isn't a saved host any more, so its tunnel is closed", s.host.Name)
+			return nil, tunnelVerdict{fmt.Errorf("%s isn't a saved host any more, so its tunnel is closed", s.host.Name)}
 		}
 		user := s.host.User
 		s.host = *h
@@ -512,13 +580,13 @@ func freshTunnelArgs(cfg *config.Config, s tunnelSet, options ...string) ([]stri
 			}
 		}
 		if len(kept) == 0 {
-			return nil, fmt.Errorf("%s has no such tunnel any more, so it's closed", s.host.Name)
+			return nil, tunnelVerdict{fmt.Errorf("%s has no such tunnel any more, so it's closed", s.host.Name)}
 		}
 		s.forward = kept
 	}
 	r := cfg.Resolve(s.host)
 	if r.Err != nil {
-		return nil, r.Err
+		return nil, tunnelVerdict{r.Err}
 	}
 	if s.used != nil {
 		*s.used = r
@@ -545,6 +613,9 @@ type tunnelHold struct {
 	// a changed host key). Behind a session it's left off: the key may just be
 	// locked, and the session is what the user is there for.
 	stopOnFailure bool
+	// service is a job with nobody there and all the time in the world. Nothing read
+	// from ssh's stderr ends it: see tunnelVerdict.
+	service bool
 	// notice hears about tunnels that keep failing, once per run of failures,
 	// and about their recovery. It's for a user who can't see log.
 	notice func(string)
@@ -668,7 +739,7 @@ func holdTunnel(ctx context.Context, host string, args func() ([]string, error),
 		}
 		// What's refused now would be refused on every try. A locked key or a port in
 		// use can pass by itself, so those wait where nobody's there to see the exit.
-		if failure == sshrun.FailureConfig || hold.stopOnFailure && failure != sshrun.FailureNone {
+		if failure == sshrun.FailureConfig && !hold.service || hold.stopOnFailure && failure != sshrun.FailureNone {
 			hold.state.Set(status.Failing, failure.String())
 			return fmt.Errorf("%s: tunnel closed: %s", host, failure)
 		}

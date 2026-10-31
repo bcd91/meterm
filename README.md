@@ -171,6 +171,7 @@ meterm keys list [--by-key]             who can log in where (authorized_keys, r
 meterm keys revoke --comment bob@laptop take a key away from every host (preview, backup, lockout guard)
 
 meterm stats <name>             CPU/memory/disk/network snapshot from a host (Linux + macOS/BSD)
+meterm agents [host...] [--tag t] [--group g] [--format text|json] [--timeout 8s] [-j N]   Claude Code sessions on hosts; read-only, not logged
 
 meterm logs <name> [path...] [-f] [-n N]        tail log files (no path: list /var/log)
 meterm logs list <name> [dir]                   see what log files actually exist (default dir: /var/log)
@@ -190,7 +191,29 @@ shell, which meterm doesn't go through — so `meterm connect` and `files
 those terminals emulate. Set `METERM_TERM=keep` to send your `TERM`
 unchanged (for hosts where you've installed the terminfo, e.g. `infocmp -x
 xterm-ghostty | meterm connect web1 -- tic -x -`), or `METERM_TERM=<name>`
-to send a name of your choice.
+to send a name of your choice. `meterm dev` does the same.
+
+### Clipboard and notifications through `meterm dev`
+
+`meterm dev` puts you in tmux on the host, and what a program sends to the terminal has
+to get past that tmux. meterm doesn't filter any of it on the way. This is what comes out
+at your terminal with tmux's default settings and `TERM=xterm-256color`, as measured by
+`scripts/it-clipboard.sh` with tmux 3.8:
+
+| From a pane on the host | Reaches your terminal? |
+|---|---|
+| Copying in tmux's own copy mode | yes |
+| A program's OSC 52 (`vim`'s or `nvim`'s osc52, `printf '\e]52;…'`) | no |
+| The same with `set -s set-clipboard on` in the host's `tmux.conf` | yes |
+| OSC 52 in a passthrough wrapper, with `set -g allow-passthrough on` | yes, and not without it |
+| OSC 777 and OSC 9 notifications | no |
+
+The usual fix is the `set-clipboard on` line. `meterm dev` doesn't do it for you:
+`set-clipboard` belongs to the whole tmux server (setting it for one session changes every
+session, which the script also checks), so that would change how all your work on that
+host behaves. It also lets anything printed in that tmux, such as a hostile file you `cat`,
+write to your clipboard. That's for you to choose per host. Older tmux may differ: before
+3.2 the terminal support copy mode needs isn't built in.
 
 ## Moving files
 
@@ -264,7 +287,7 @@ meterm exec --all --timeout 30s --format json -- uptime   # for scripts and CI
 
 On a terminal, escape sequences other than colours are dropped from what hosts send,
 in `exec`, `logs` and `stats` alike, so a line of output can't set your clipboard or
-move your cursor. `--raw` shows them as they are; pipes and `--format json` always get
+move your cursor. Bidi controls go too, so it can't reorder what you read. `--raw` shows them as they are; pipes and `--format json` always get
 what was sent. An interactive session (`connect`, `dev`) isn't filtered, since
 full-screen programs are made of those sequences.
 
@@ -356,19 +379,51 @@ with its team; a group's isn't, because groups stay on each machine. A value
 typed by hand into `hosts.yaml` that meterm doesn't know counts as production,
 so a typo can't turn a warning off. A team copy with such a value is refused.
 
-### In the background (Linux)
+### In the background (Linux and macOS)
 
-`meterm tunnel enable <host>/<tunnel>` writes a systemd user unit that holds one
-tunnel open, starts it, and brings it back at each login. `meterm status` shows how
-it's doing, and `meterm tunnel disable <host>/<tunnel>` stops it and removes the unit.
+`meterm tunnel enable <host>/<tunnel>` writes a job that holds one tunnel open, starts
+it, and brings it back at each login: a systemd user unit on Linux, a LaunchAgent on
+macOS. `meterm status` shows how it's doing, and `meterm tunnel disable <host>/<tunnel>`
+stops it and removes the job.
 
 The unit runs the binary you enabled it with, by its full path, so a warning appears
 if that isn't `/usr/bin/meterm`. It logs in with no terminal, so the key has to be
 in your agent or have no passphrase; until then it keeps trying. If the tunnel or its
-host has been removed or turned unsafe, it stops and stays stopped, and `systemctl
---user status` shows why. The tunnel's start
+host has been removed or turned unsafe in a host file that can be read, it stops and stays
+stopped, and `systemctl --user status` shows why. Anything else is retried: a host file that
+can't be parsed or has no hosts in it, anything ssh said (a server can say what it likes
+before login), and a SIGTERM from outside. Being stopped with `systemctl --user stop` isn't
+restarted, though it shows as failed. The tunnel's start
 is one entry in the activity log, however long that takes. A tunnel on a production host,
 or whose name or note mentions production, warns you when enabled.
+
+**On macOS** the job is `~/Library/LaunchAgents/com.github.bcd91.meterm.tunnel.<name>-<hash>.plist`,
+loaded with `launchctl bootstrap gui/<uid>`, and its output goes to
+`~/Library/Logs/meterm/<the same name>.log`. It behaves as the Linux unit does, with these
+differences:
+
+- launchd can't be told to leave one exit code alone, only to restart on anything but
+  success. So a job that has nothing left to hold exits with 0, and stays stopped until
+  the next login or `tunnel enable`. The log says why, and `meterm status` lists it as
+  `stopped`.
+- `enable` puts back what was there if it fails: a new job file is removed, or the previous
+  job returns. Enabling what's already enabled doesn't drop the tunnel. `disable` works with
+  the job file gone, and won't say Disabled unless launchd says so.
+- It runs the binary by the path you started it with and not through symlinks, so
+  Homebrew's `/opt/homebrew/bin/meterm` keeps working through an upgrade. A binary in a
+  temp directory gets a warning.
+- ssh is the system's, and its agent is launchd's `SSH_AUTH_SOCK`, so the key has to be in
+  that agent (`ssh-add --apple-use-keychain`), have no passphrase, or be reached through
+  `IdentityAgent` in your ssh config. You're warned if this shell uses a different agent.
+- `$PATH` is the system's, then `/opt/homebrew/bin` and `/usr/local/bin`, for a
+  `ProxyCommand` that lives there. The `METERM_*` directories set at enable time carry
+  over, as `--config` does.
+- It runs in your login session: it stops when you log out and comes back when you log in,
+  as a systemd user unit does without lingering. With nobody logged in at the screen,
+  `enable` fails. macOS may show a "background item added" notice, and the job can be
+  switched off under Login Items in System Settings, which `enable` then reports.
+- The log file isn't rotated, and meterm won't: a tunnel failing for months adds some tens of
+  megabytes, and it's safe to empty. What ssh prints goes in with escape sequences removed.
 
 ## Routes: more than one way in
 
@@ -676,9 +731,92 @@ meterm status --format json --watch         # one JSON line at the start and per
 
 Each process keeps one file in `$XDG_RUNTIME_DIR/meterm` (`$METERM_RUNTIME_DIR` if
 set, or a directory of your own under the temp directory without either) and removes
-it when it ends. A process killed outright is dropped by the next `meterm status`.
+it when it ends. On macOS it's `~/Library/Caches/meterm/run` whatever those say, so a
+tunnel started by launchd and a `status` typed in a terminal always find each other. A
+process killed outright is dropped by the next `meterm status`. On macOS a tunnel from
+`tunnel enable` with no state file shows too, as launchd sees it: `running` (with its pid; the
+file was purged and comes back at the next change), `stopped`, saying why if it knows, such as a
+binary that has moved, or `unknown` if launchctl couldn't say. Under `sudo` with `HOME` kept,
+the directory is one of root's own under the temp directory, not the user's. All the strings
+in both formats have control, bidi and invisible characters replaced.
 Tunnels and sessions learn they got in through ssh's `LocalCommand`, so one set in your
 own ssh config is replaced while they run.
+
+## Claude Code sessions on your hosts
+
+`meterm agents` lists the Claude Code sessions running on the hosts you choose.
+
+```sh
+meterm agents devbox                     # a table
+meterm agents devbox web1 --format json  # for a status bar or a script
+meterm agents --tag laptop --timeout 4s -j 4
+```
+
+It runs one fixed, read-only command, `claude agents --json`, and looks for `claude` in
+`~/.local/bin` and the other usual places too, since a non-login ssh often hasn't got them
+on `PATH`. Nothing you type or that's saved about a host goes into that command. You have to
+say which hosts; with none it's an error, and there's no `--all`. A production host is asked
+only when you name it: picked up by `--tag` or `--group`, it's listed as refused. The same goes
+for a host reached through production, by any of its routes, whether a hop is a saved name,
+`user@name`, `ssh://…` or just a production host's address.
+
+That check goes by what's saved in meterm and is on the safe side. Addresses are compared
+whatever the port, so a non-production host on a production host's address is refused too
+unless named. A hop or address it can't read for sure, such as `127.1`, `010.0.0.1` or one
+with a zone, counts as production. It resolves no names and doesn't read your ssh config, so
+a `ProxyJump` or `HostName` in `~/.ssh/config` that leads to production is invisible to it.
+
+A host's `extra_args` have to pass an allowlist, or that host is reported as an error and
+no ssh runs: `-p`, `-i`, `-l`, a few plain flags, and `-o` with connection settings such as
+`Port`, `User`, `IdentityFile` or `ConnectTimeout`. A bare word in there would become ssh's
+destination, and `-o ProxyCommand`, `-A` or `-M` would make this more than one fixed command.
+
+```json
+{"schema":1,"hosts":[{"host":"devbox","reachable":true,"error":"","agents":[
+  {"cwd":"/home/a/src","kind":"interactive","startedAt":1793311202058,"pid":812,
+   "status":"busy","sessionId":"…","name":"fix login"}]}]}
+```
+
+- `agents` holds the fields `cwd`, `kind`, `startedAt` (Unix milliseconds), `id`, `state`,
+  `pid`, `status`, `waitingFor`, `sessionId` and `name`, each only when the host sent it.
+  Anything else is dropped. A known field of the wrong type makes the whole host an error.
+- `reachable` says the command ran on the host.
+- `error` is empty when the host answered, and in meterm's own words otherwise: it never
+  quotes the host. When it's set, `agents` is `null`, so a host that can't say doesn't read
+  as a host with no agents. That covers no connection, a refused key, a timeout, no `claude`,
+  output that isn't what's expected, and more than 1 MiB of it.
+- Every string has control, C1, bidi, format and other invisible characters replaced by
+  U+FFFD, in both formats, and is cut at 1024 characters.
+
+| Exit code | Meaning | stdout |
+|---|---|---|
+| 0 | Every host answered. Having no agents is an answer. | the report |
+| 1 | Nothing was asked: bad flags, no selection, an unknown host, or a tag or group that matched nothing | nothing |
+| 2 | At least one host has an `error`, a refused production host included | the report, complete |
+
+**It isn't in the activity log.** That log is tamper-evident and shared with the team, so
+nothing can be taken out later, and a status bar asking every 30 seconds would bury
+everything else in it. So `agents` writes no activity entry and no history, and doesn't
+start a team sync. What shows instead is on each host: every look is a login of its own,
+which sshd logs. Sharing a connection between looks would have hidden those, and let a
+revoked key keep working, so none is shared, on any host. `meterm exec` remains the command
+that's recorded.
+
+A look leaves nothing on this machine. It doesn't remember which route worked or carry a
+host key to a route's address as other commands do, and a host key that isn't trusted yet
+is that host's error rather than something to accept: run `meterm connect` once to trust
+it. `--timeout` covers picking a route as well as the login. For the length of the run
+there's one file in a private temp directory, the ssh config behind `-F` that hands the same
+options (`BatchMode`, strict host keys, no forwarding, no shared connection) to jump hops,
+which get none of a command line's `-o`. It includes your own ssh config after them, so
+`ProxyCommand` or `IdentityFile` there still apply: that file is yours to trust.
+
+`agents` runs on Linux and macOS, and refuses to run on Windows, where nothing shows those
+options would reach a hop. A Windows server can't answer either: the command needs `sh`, so it
+comes back as an error for that host. It needs OpenSSH 7.6 or newer, for `RemoteCommand`, and
+has been run only with 10.3. It uses the first `ssh` on `PATH`, and since `-F` replaces the
+system config, an ssh from elsewhere such as Homebrew reads `/etc/ssh/ssh_config` instead of its
+own.
 
 ## Status and history
 
@@ -722,6 +860,8 @@ A few things make that reliable:
   and `audit` all support it, with a stable, documented field schema (see
   each command's `--help`) instead of the tabwriter-aligned columns meant
   for a terminal — those columns can shift width release to release.
+- **`meterm agents --format json`** is safe to poll, and has its own exit codes: see
+  [Claude Code sessions on your hosts](#claude-code-sessions-on-your-hosts).
 - **`exec`, `stats`, and `cp` are already non-interactive**
   by design — they need working key-based auth ahead of time and fail fast
   with a clear error instead of blocking on a password prompt.
@@ -741,7 +881,8 @@ A few things make that reliable:
 
 Every `connect`, `exec`, `cp` and `files` session appends one line to a local
 activity log: when, which local account, which saved host and what it
-resolved to, and the program or paths involved. `logs` is in there too.
+resolved to, and the program or paths involved. `logs` is in there too. `meterm agents`
+isn't: see [Claude Code sessions on your hosts](#claude-code-sessions-on-your-hosts).
 
 The log can't forget, and it goes to the team for shared hosts, so a command's
 arguments stay out of it by default: `exec` records `mysql (+3 args)`, and

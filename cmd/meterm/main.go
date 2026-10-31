@@ -12,6 +12,7 @@ import (
 	"meterm/internal/config"
 	"meterm/internal/route"
 	"meterm/internal/team"
+	"meterm/internal/termsafe"
 )
 
 var cfgPath string
@@ -75,6 +76,7 @@ func main() {
 		newDevCmd(),
 		newListCmd(),
 		newStatusCmd(),
+		newAgentsCmd(),
 		newAddCmd(),
 		newEditCmd(),
 		newRmCmd(),
@@ -103,7 +105,8 @@ func main() {
 	)
 
 	if err := root.Execute(); err != nil {
-		fmt.Fprintln(os.Stderr, "meterm:", err)
+		// Errors can quote what was typed, or a saved name: not for the terminal to obey.
+		fmt.Fprintln(os.Stderr, "meterm:", termsafe.Lines(err.Error()))
 		finish(1)
 	}
 	finish(0)

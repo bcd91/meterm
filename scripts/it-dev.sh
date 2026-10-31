@@ -5,7 +5,10 @@
 # Needs: sshd, tmux, python3, curl, jq.
 set -euo pipefail
 
-W=$(mktemp -d)
+# Short and without symlinks: macOS's own temp path is long enough to take a ControlPath
+# past its 104 bytes, and mktemp -d alone goes there whatever TMPDIR says.
+W=$(mktemp -d /tmp/mtd.XXXXXX)
+W=$(cd "$W" && pwd -P)
 SSHD_PID=""
 HTTP_PID=""
 cleanup() {
@@ -53,7 +56,7 @@ KbdInteractiveAuthentication no
 UsePAM no
 StrictModes no
 PidFile $W/sshd.pid
-SetEnv TMUX_TMPDIR=$W/remote
+SetEnv TMUX_TMPDIR=$W/remote PATH=$PATH
 EOF
 /usr/sbin/sshd -D -f "$W/sshd_config" -E "$W/sshd.log" &
 SSHD_PID=$!
@@ -114,7 +117,7 @@ wait_for 'reconnect notice' sh -c "tmux -L it-outer capture-pane -p -t it | grep
 meterm status | grep -qE 'proj +(reconnecting|connected)' || fail 'status lost the session during the drop'
 wait_for 'client re-attached' sh -c "[ \"\$(TMUX_TMPDIR=$W/remote tmux display-message -p -t =proj: '#{session_attached}')\" = 1 ]"
 [ "$(remote_tmux display-message -p -t =proj: '#{pane_id}')" = "$PANE" ] || fail 'a different pane after reconnecting'
-[ "$(remote_tmux list-sessions | wc -l)" = 1 ] || fail 'reconnecting made another session'
+[ "$(remote_tmux list-sessions | wc -l | tr -d " ")" = 1 ] || fail 'reconnecting made another session'
 wait_for 'tunnel after drop' curl -fsS -o /dev/null "http://127.0.0.1:$WEB_LOCAL/"
 wait_for 'status: back to connected' status_is session proj connected
 
@@ -127,7 +130,7 @@ stop_outer
 echo '4. the same command lands in the same session'
 run_dev "box:$W/proj"
 wait_for 'attach' sh -c "[ \"\$(TMUX_TMPDIR=$W/remote tmux display-message -p -t =proj: '#{session_attached}')\" = 1 ]"
-[ "$(remote_tmux list-sessions | wc -l)" = 1 ] || fail 'second run made another session'
+[ "$(remote_tmux list-sessions | wc -l | tr -d " ")" = 1 ] || fail 'second run made another session'
 stop_outer
 
 echo '5. a missing directory says so and does not retry'
@@ -206,31 +209,33 @@ stop_outer
 remote_tmux kill-server 2>/dev/null || true
 sleep 0.3
 mkdir -p "$W/client-a/api" "$W/client-b/api"
-attached() { [ "$(remote_tmux list-clients | wc -l)" = 1 ]; }
+attached() { [ "$(remote_tmux list-clients | wc -l | tr -d " ")" = 1 ]; }
 current() { remote_tmux list-clients -F '#{session_name}' | head -1; }
 real() { (cd "$1" && pwd -P); }
 run_dev "box:$W/client-a/api"; wait_for 'first session' attached
 [ "$(current)" = api ] || fail "first directory got $(current), want api"
-stop_outer; wait_for 'detached' sh -c "[ \"\$(TMUX_TMPDIR=$W/remote tmux list-clients | wc -l)\" = 0 ]"
+stop_outer; wait_for 'detached' sh -c "[ \"\$(TMUX_TMPDIR=$W/remote tmux list-clients | wc -l | tr -d ' ')\" = 0 ]"
 run_dev "box:$W/client-b/api"; wait_for 'second session' attached
 B=$(current)
 [ "$B" != api ] || fail 'second directory attached to the first one'"'"'s session'
 [ "$(remote_tmux display-message -p -t "=$B:" '#{pane_current_path}')" = "$(real "$W/client-b/api")" ] || fail 'second session in the wrong directory'
-stop_outer; wait_for 'detached' sh -c "[ \"\$(TMUX_TMPDIR=$W/remote tmux list-clients | wc -l)\" = 0 ]"
+stop_outer; wait_for 'detached' sh -c "[ \"\$(TMUX_TMPDIR=$W/remote tmux list-clients | wc -l | tr -d ' ')\" = 0 ]"
 run_dev "box:$W/client-a/api"; wait_for 'back to the first' attached
 [ "$(current)" = api ] || fail 'the first directory lost its session name'
-stop_outer; wait_for 'detached' sh -c "[ \"\$(TMUX_TMPDIR=$W/remote tmux list-clients | wc -l)\" = 0 ]"
+stop_outer; wait_for 'detached' sh -c "[ \"\$(TMUX_TMPDIR=$W/remote tmux list-clients | wc -l | tr -d ' ')\" = 0 ]"
 run_dev "box:$W/client-b/api"; wait_for 'back to the second' attached
 [ "$(current)" = "$B" ] || fail 'the second directory got another session'
-[ "$(remote_tmux list-sessions | wc -l)" = 2 ] || fail 'more than two sessions'
-stop_outer; wait_for 'detached' sh -c "[ \"\$(TMUX_TMPDIR=$W/remote tmux list-clients | wc -l)\" = 0 ]"
+[ "$(remote_tmux list-sessions | wc -l | tr -d " ")" = 2 ] || fail 'more than two sessions'
+stop_outer; wait_for 'detached' sh -c "[ \"\$(TMUX_TMPDIR=$W/remote tmux list-clients | wc -l | tr -d ' ')\" = 0 ]"
 remote_tmux kill-session -t =api
 run_dev "box:$W/client-b/api"; wait_for 'own session after the other left' attached
 [ "$(current)" = "$B" ] || fail 'it moved off its own session once the name was free'
 stop_outer
 
 echo '13. SIGUSR1 redoes a connection at once, in the same session'
-meterm_pid() { pgrep -x meterm -P "$(outer list-panes -t it -F '#{pane_pid}')"; }
+# Options first: on BSD anything after the name is more names, so -P would be ignored,
+# and this would pick up every meterm on the machine.
+meterm_pid() { pgrep -x -P "$(outer list-panes -t it -F '#{pane_pid}')" meterm; }
 logins() { grep -c 'Accepted publickey' "$W/sshd.log"; }
 run_dev "box:$W/proj"
 wait_for 'attach' sh -c "[ \"\$(TMUX_TMPDIR=$W/remote tmux display-message -p -t =proj: '#{session_attached}')\" = 1 ]"
@@ -355,7 +360,9 @@ meterm activity --verify | grep 'chain intact' >/dev/null || fail 'the chain bro
 
 echo '22. on a terminal, what a host prints can only show text'
 printf 'plain line\n\033]52;c;ZXZpbA==\007after osc\n\033[2Jafter clear\n\033[31mred\033[0m\n' > "$W/logs/evil.log"
-on_tty() { script -qfec "$*" /dev/null; }
+on_tty() { # util-linux's script and the BSD one take different arguments
+  if script --version >/dev/null 2>&1; then script -qfec "$*" /dev/null; else script -q /dev/null sh -c "$*" </dev/null; fi
+}
 for run in "meterm logs box $W/logs/evil.log" "meterm exec box -- cat $W/logs/evil.log" ; do
   on_tty "env PATH=$PATH $W/bin/$run" > "$W/tty.out" 2>&1
   grep -q 'after osc' "$W/tty.out" || fail "$run: lost text"
@@ -399,7 +406,7 @@ wait_for 'the command ran' test -s "$W/cmd.pwd"
 [ "$(sed -n 2p "$W/cmd.log")" = 'two words' ] || fail 'arguments not intact'
 [ "$(sed -n 3p "$W/cmd.log")" = "\$(touch $W/pwned)" ] || fail 'argument changed'
 [ ! -e "$W/pwned" ] || fail 'an argument ran on the host'
-[ "$(remote_tmux list-windows -t =cmdproj: | wc -l)" = 2 ] || fail 'not a window of its own in the session'
+[ "$(remote_tmux list-windows -t =cmdproj: | wc -l | tr -d " ")" = 2 ] || fail 'not a window of its own in the session'
 wait_for 'attached' sh -c "[ \"\$(TMUX_TMPDIR=$W/remote tmux display-message -p -t =cmdproj: '#{session_attached}')\" = 1 ]"
 meterm activity --host box --format json | grep 'dev cmdproj: .*it-record (+3 args)' >/dev/null || fail 'activity should say the program'
 meterm activity --host box --format json | grep 'two words' >/dev/null && fail 'arguments in the activity log'
@@ -411,7 +418,7 @@ wait_for 'it to log in again' sh -c "[ \"\$(grep -c 'Accepted publickey' $W/sshd
 sleep 2
 wait_for 'back in the session' sh -c "[ \"\$(TMUX_TMPDIR=$W/remote tmux display-message -p -t =cmdproj: '#{session_attached}')\" = 1 ]"
 [ "$(wc -l < "$W/cmd.log")" = "$LINES_BEFORE" ] || fail 'a reconnect started it again'
-[ "$(remote_tmux list-windows -t =cmdproj: | wc -l)" = 2 ] || fail 'a reconnect opened another window'
+[ "$(remote_tmux list-windows -t =cmdproj: | wc -l | tr -d " ")" = 2 ] || fail 'a reconnect opened another window'
 outer send-keys -t it C-b d
 wait_for 'detach exits 0' rc_is 0
 stop_outer

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -14,6 +15,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"meterm/internal/status"
+	"meterm/internal/termsafe"
 )
 
 // statusReport is the --format json shape: stable field names for status bars
@@ -34,7 +36,9 @@ func newStatusCmd() *cobra.Command {
 		Short: "Show the sessions and tunnels meterm is holding open right now",
 		Long: "Lists what running `meterm dev` and `meterm tunnel up` processes hold open:\n" +
 			"which host, which route, and whether it's connected, connecting, reconnecting\n" +
-			"or failing. It reads local files only and never touches the network.\n\n" +
+			"or failing. On macOS it also shows a tunnel from `tunnel enable` that isn't holding\n" +
+			"anything, as launchd sees it. It stays on this machine and never touches the\n" +
+			"network.\n\n" +
 			"--format json is for status bars and scripts. With --watch it prints one line\n" +
 			"of JSON at the start and one for every change.",
 		Args: cobra.NoArgs,
@@ -72,8 +76,15 @@ func readStatus() (statusReport, error) {
 	if err != nil {
 		return statusReport{}, err
 	}
+	rows = serviceRows(rows)
 	if rows == nil {
 		rows = []status.Row{}
+	}
+	// Here, for both formats: a status bar shows the JSON's strings as they come.
+	for i := range rows {
+		e := &rows[i].Entry
+		e.Host, e.Kind, e.Name = termsafe.Text(e.Host), termsafe.Text(e.Kind), termsafe.Text(e.Name)
+		e.State, e.Route, e.Detail = termsafe.Text(e.State), termsafe.Text(e.Route), termsafe.Text(e.Detail)
 	}
 	return statusReport{Schema: status.SchemaVersion, Entries: rows, Skipped: skipped}, nil
 }
@@ -122,11 +133,18 @@ func writeStatus(w io.Writer, rep statusReport, format string) error {
 		_, err := fmt.Fprintln(w, "Nothing held open.")
 		return err
 	}
-	t := tabwriter.NewWriter(w, 0, 2, 2, ' ', 0)
+	// All at once: tabwriter writes cell by cell, and a reader that has seen what it
+	// wanted, such as grep -q, would end this with SIGPIPE halfway through.
+	var buf bytes.Buffer
+	t := tabwriter.NewWriter(&buf, 0, 2, 2, ' ', 0)
 	fmt.Fprintln(t, "HOST\tKIND\tNAME\tSTATE\tROUTE\tFOR\tDETAIL")
 	for _, r := range rep.Entries {
-		fmt.Fprintf(t, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n", r.Host, r.Kind, r.Name, r.State, r.Route,
-			time.Since(r.Since).Round(time.Second), r.Detail)
+		fmt.Fprintf(t, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n", termsafe.Text(r.Host), termsafe.Text(r.Kind), termsafe.Text(r.Name),
+			termsafe.Text(r.State), termsafe.Text(r.Route), time.Since(r.Since).Round(time.Second), termsafe.Text(r.Detail))
 	}
-	return t.Flush()
+	if err := t.Flush(); err != nil {
+		return err
+	}
+	_, err := w.Write(buf.Bytes())
+	return err
 }
