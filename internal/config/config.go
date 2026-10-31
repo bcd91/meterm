@@ -109,6 +109,14 @@ type Config struct {
 // choice only affects how hosts are resolved, never what's saved.
 func (c *Config) SetRoutePicker(p RoutePicker) { c.picker = p }
 
+// WithRoutePicker is c with another picker, for resolving under a deadline of its
+// own. It's for reading: the two share everything else.
+func (c *Config) WithRoutePicker(p RoutePicker) *Config {
+	cp := *c
+	cp.picker = p
+	return &cp
+}
+
 // DefaultPath returns the standard location for meterm's config file,
 // honoring $METERM_CONFIG for overrides (tests, alternate profiles).
 func DefaultPath() (string, error) {

@@ -68,6 +68,28 @@ func Install(cfg *config.Config, statePath string) *Picker {
 	return p
 }
 
+// NewLook is a Picker for looking without leaving a mark: it reads which route worked
+// last, and through Look it writes neither that file nor known_hosts. A route whose
+// host key isn't trusted yet stays that way, and ssh says so. It isn't hooked into
+// cfg: each caller gets a picker from Look under its own deadline.
+func NewLook(cfg *config.Config, statePath string) *Picker {
+	return &Picker{cfg: cfg, Timeout: DefaultTimeout, Dial: dialSSH, last: loadLast(statePath)}
+}
+
+// Look is a picker that goes no further than ctx, for Config.WithRoutePicker. Several
+// can run at once, since it only reads p.
+func (p *Picker) Look(ctx context.Context) config.RoutePicker {
+	return func(h config.Host) (config.Route, bool) {
+		c := p.check(ctx, h, p.last[h.Name])
+		for _, rt := range h.Routes {
+			if rt.Name == c.Route {
+				return rt, true
+			}
+		}
+		return config.Route{}, false
+	}
+}
+
 // errNotSSH is a port that answers with something other than an SSH server.
 var errNotSSH = errors.New("not an ssh server")
 
@@ -84,6 +106,8 @@ func dialSSH(ctx context.Context, addr string) error {
 	if t, ok := ctx.Deadline(); ok {
 		_ = c.SetReadDeadline(t)
 	}
+	stop := context.AfterFunc(ctx, func() { c.Close() }) // a read doesn't watch ctx
+	defer stop()
 	r := bufio.NewReaderSize(c, 512)
 	for range 8 {
 		line, err := r.ReadSlice('\n')
@@ -91,7 +115,7 @@ func dialSSH(ctx context.Context, addr string) error {
 			return nil
 		}
 		if err != nil {
-			if isTimeout(err) {
+			if isTimeout(err) || ctx.Err() != nil {
 				return err
 			}
 			return errNotSSH
@@ -214,6 +238,11 @@ func (p *Picker) Choose(h config.Host) Choice {
 // When none does, the choice is the host's own address unless that's to be
 // avoided, so errors read as they always have.
 func (p *Picker) Check(h config.Host, prefer string) Choice {
+	return p.check(context.Background(), h, prefer)
+}
+
+// check is Check, stopping when ctx ends.
+func (p *Picker) check(parent context.Context, h config.Host, prefer string) Choice {
 	cands := h.Candidates()
 	for i, rt := range cands {
 		if rt.Name == prefer && i > 0 {
@@ -227,9 +256,12 @@ func (p *Picker) Check(h config.Host, prefer string) Choice {
 		if p.Avoid.has(h.Name, rt.Name) {
 			continue
 		}
+		if parent.Err() != nil {
+			break
+		}
 		hop := FirstHop(p.cfg.ResolveVia(h, &rt))
 		pr := Probe{Route: rt.Name, Hop: hop}
-		ctx, cancel := context.WithTimeout(context.Background(), p.Timeout)
+		ctx, cancel := context.WithTimeout(parent, p.Timeout)
 		err := p.Dial(ctx, hop)
 		cancel()
 		if err != nil {

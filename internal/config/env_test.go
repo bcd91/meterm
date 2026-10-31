@@ -137,3 +137,46 @@ func TestEnvYAMLRoundTrip(t *testing.T) {
 		t.Errorf("env lost: host %q, group %q", again.Hosts[0].Env, again.Groups["g"].Env)
 	}
 }
+
+func TestTouchesProduction(t *testing.T) {
+	c := &Config{
+		Groups: map[string]Group{"via": {ProxyJump: "live"}, "prod": {Env: EnvProduction}},
+		Hosts: []Host{
+			{Name: "live", Address: "10.0.0.1", Env: EnvProduction, Port: 2222, Routes: []Route{{Name: "pub", Address: "203.0.113.5"}}},
+			{Name: "ok", Address: "10.0.0.9"},
+		},
+	}
+	for name, tc := range map[string]struct {
+		h    Host
+		want bool
+	}{
+		"plain":            {Host{Name: "a", Address: "10.0.0.2"}, false},
+		"through ok":       {Host{Name: "a", Address: "10.0.0.2", ProxyJump: "ok"}, false},
+		"raw elsewhere":    {Host{Name: "a", Address: "10.0.0.2", ProxyJump: "u@198.51.100.1:22"}, false},
+		"other port":       {Host{Name: "a", Address: "10.0.0.2", ProxyJump: "10.0.0.1:22"}, false},
+		"own env":          {Host{Name: "a", Address: "10.0.0.2", Env: EnvProduction}, true},
+		"group env":        {Host{Name: "a", Address: "10.0.0.2", Group: "prod"}, true},
+		"group jump":       {Host{Name: "a", Address: "10.0.0.2", Group: "via"}, true},
+		"name":             {Host{Name: "a", Address: "10.0.0.2", ProxyJump: "live"}, true},
+		"user@name":        {Host{Name: "a", Address: "10.0.0.2", ProxyJump: "root@live"}, true},
+		"name:port":        {Host{Name: "a", Address: "10.0.0.2", ProxyJump: "live:22"}, true},
+		"address":          {Host{Name: "a", Address: "10.0.0.2", ProxyJump: "10.0.0.1"}, true},
+		"same port":        {Host{Name: "a", Address: "10.0.0.2", ProxyJump: "10.0.0.1:2222"}, true},
+		"user@address":     {Host{Name: "a", Address: "10.0.0.2", ProxyJump: "u@10.0.0.1"}, true},
+		"its route's addr": {Host{Name: "a", Address: "10.0.0.2", ProxyJump: "203.0.113.5"}, true},
+		"second hop":       {Host{Name: "a", Address: "10.0.0.2", ProxyJump: "ok, live"}, true},
+		"saved route":      {Host{Name: "a", Address: "10.0.0.2", Routes: []Route{{Name: "r", ProxyJump: "live"}}}, true},
+		"route's address":  {Host{Name: "a", Address: "10.0.0.2", Routes: []Route{{Name: "r", Address: "10.0.0.1"}}}, true},
+		"same address":     {Host{Name: "a", Address: "10.0.0.1"}, true},
+		"upper case":       {Host{Name: "a", Address: "LIVE.example", ProxyJump: "x"}, false},
+	} {
+		if got := c.TouchesProduction(tc.h); got != tc.want {
+			t.Errorf("%s: %v", name, got)
+		}
+	}
+	// A loop of jumps ends.
+	loop := &Config{Hosts: []Host{{Name: "a", Address: "1.1.1.1", ProxyJump: "b"}, {Name: "b", Address: "1.1.1.2", ProxyJump: "a"}}}
+	if loop.TouchesProduction(loop.Hosts[0]) {
+		t.Error("loop")
+	}
+}

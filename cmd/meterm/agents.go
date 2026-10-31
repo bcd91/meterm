@@ -3,8 +3,6 @@ package main
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -15,7 +13,6 @@ import (
 	"os/signal"
 	"path/filepath"
 	"regexp"
-	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -27,8 +24,8 @@ import (
 
 	"meterm/internal/agents"
 	"meterm/internal/config"
+	"meterm/internal/route"
 	"meterm/internal/sshrun"
-	"meterm/internal/status"
 	"meterm/internal/termsafe"
 )
 
@@ -39,8 +36,10 @@ import (
 // a status bar asking every 30 seconds would bury everything else in there. There's
 // also little to record, because the command that runs is one constant that reads
 // and changes nothing (agents.RemoteCommand), with no user data in it. So this also
-// doesn't touch history or team sync. What still shows is the host's own: sshd logs
-// each login there. Anything else on a host belongs to `meterm exec`, which records.
+// doesn't touch history or team sync. A look leaves nothing on this machine: no route
+// remembered, no host key carried. What still shows is the host's own: sshd logs every
+// look as a login, since none is reused, and a revoked key stops working at once.
+// Anything else on a host belongs to `meterm exec`, which records.
 
 const (
 	// Exit codes of `meterm agents`. 1 is any error from before a host was asked,
@@ -62,8 +61,10 @@ func newAgentsCmd() *cobra.Command {
 		Short: "List the Claude Code sessions running on hosts (read-only, not logged)",
 		Long: "Asks each selected host for `claude agents --json`, and nothing else: the\n" +
 			"command is fixed and read-only. Hosts have to be chosen, by name, --tag or\n" +
-			"--group; there's no way to ask all of them. A production host answers only\n" +
-			"when named: picked up by a tag or group, it's listed as refused.\n\n" +
+			"--group; there's no way to ask all of them. A production host, or one reached\n" +
+			"through a production host, answers only when named: picked up by a tag or\n" +
+			"group, it's listed as refused. So is a host whose extra_args could do more than\n" +
+			"this command should.\n\n" +
 			"It writes no activity entry, so it's safe to poll: that log is permanent and\n" +
 			"shared with the team. What shows instead is each login in the host's sshd log.\n\n" +
 			"--format json prints {\"schema\":1,\"hosts\":[{\"host\",\"reachable\",\"error\",\"agents\"}]}.\n" +
@@ -86,7 +87,11 @@ func newAgentsCmd() *cobra.Command {
 			if len(args) == 0 && len(tags) == 0 && len(groups) == 0 {
 				return fmt.Errorf("say which hosts: name them, or use --tag or --group; `agents` won't go to every host")
 			}
-			cfg, err := loadConfig()
+			path, err := resolveCfgPath()
+			if err != nil {
+				return err
+			}
+			cfg, err := config.Load(path) // not loadConfig: its route picker writes
 			if err != nil {
 				return err
 			}
@@ -94,10 +99,15 @@ func newAgentsCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			sshConfig, removeSSHConfig, err := writeAgentSSHConfig()
+			if err != nil {
+				return err
+			}
 			// Its ssh processes have no terminal, so Ctrl-C has to reach them from here.
 			ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 			defer stop()
-			rep := runAgents(ctx, jobs, sshAgentQuery(timeout), timeout, parallel)
+			rep := runAgents(ctx, jobs, sshAgentQuery(sshConfig, timeout), timeout, parallel)
+			removeSSHConfig()
 			if err := writeAgents(os.Stdout, rep, format); err != nil {
 				return err
 			}
@@ -120,14 +130,15 @@ func newAgentsCmd() *cobra.Command {
 type agentJob struct {
 	label   string
 	host    config.Host
-	resolve func() config.Resolved
+	resolve func(context.Context) config.Resolved
 	refused string
 }
 
-const agentsRefusedProduction = "refused: production host; name it to include it"
+const agentsRefusedProduction = "refused: production host or route; name it to include it"
 
-// selectAgentHosts picks the hosts, and says which production hosts weren't asked
-// for by name. Those stay in the list, refused, so the report shows they're missing.
+// selectAgentHosts picks the hosts, and says which ones that are production, or are
+// reached through production, weren't asked for by name. Those stay in the list,
+// refused, so the report shows they're missing.
 func selectAgentHosts(cfg *config.Config, names, tags, groups []string) ([]agentJob, error) {
 	hosts, err := selectHosts(cfg, names, tags, groups, false)
 	if err != nil {
@@ -142,14 +153,17 @@ func selectAgentHosts(cfg *config.Config, names, tags, groups []string) ([]agent
 			named[h.User+"@"+h.Name] = true
 		}
 	}
+	look := route.NewLook(cfg, filepath.Join(filepath.Dir(cfg.Path()), "routes.json"))
 	jobs := make([]agentJob, 0, len(hosts))
 	for _, h := range hosts {
 		label := h.Name
 		if saved, i := cfg.Find(h.Name); i >= 0 && saved.User != h.User {
 			label = h.User + "@" + h.Name // deploy@API and API are two logins
 		}
-		job := agentJob{label: label, host: h, resolve: func() config.Resolved { return cfg.Resolve(h) }}
-		if cfg.IsProduction(h) && !named[h.User+"@"+h.Name] {
+		job := agentJob{label: label, host: h, resolve: func(ctx context.Context) config.Resolved {
+			return cfg.WithRoutePicker(look.Look(ctx)).Resolve(h)
+		}}
+		if cfg.TouchesProduction(h) && !named[h.User+"@"+h.Name] {
 			job.refused = agentsRefusedProduction
 		}
 		jobs = append(jobs, job)
@@ -197,13 +211,21 @@ func askAgents(ctx context.Context, job agentJob, query agentQuery, timeout time
 		out.Error = job.refused
 		return out
 	}
-	r := job.resolve()
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	r := job.resolve(ctx)
 	if r.Err != nil {
 		out.Error = "not asked: " + termsafe.Text(r.Err.Error())
 		return out
 	}
-	ctx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
+	if err := checkAgentExtraArgs(r.ExtraArgs); err != nil {
+		out.Error = "not asked: " + termsafe.Text(err.Error())
+		return out
+	}
+	if ctx.Err() == context.DeadlineExceeded {
+		out.Error = "timed out after " + timeout.String()
+		return out
+	}
 	stdout, stderr, overflow, err := query(ctx, r)
 	var exit *exec.ExitError
 	switch {
@@ -265,11 +287,12 @@ func sshFailureText(stderr string) string {
 	return "unreachable: ssh couldn't connect"
 }
 
-// sshAgentQuery runs agents.RemoteCommand over ssh.
-func sshAgentQuery(timeout time.Duration) agentQuery {
+// sshAgentQuery runs agents.RemoteCommand over ssh. r.ExtraArgs have passed
+// checkAgentExtraArgs by now.
+func sshAgentQuery(sshConfig string, timeout time.Duration) agentQuery {
 	return func(ctx context.Context, r config.Resolved) ([]byte, string, bool, error) {
 		r.Forwards = nil
-		r.ExtraArgs = agentSSHArgs(r, timeout, agentControlPath(r))
+		r.ExtraArgs = agentSSHArgs(r, sshConfig, timeout)
 		ctx, cancel := context.WithCancel(ctx)
 		defer cancel()
 		c := sshrun.SSHContext(ctx, r, agents.RemoteCommand)
@@ -277,107 +300,167 @@ func sshAgentQuery(timeout time.Duration) agentQuery {
 		stdout := &cappedBuffer{max: agents.MaxOutput, over: cancel}
 		stderr := &sshrun.Tail{Max: 16 << 10}
 		c.Stdout, c.Stderr = stdout, stderr
-		// A master that stays behind, or -J's ssh, can hold stderr open after this
-		// ssh has ended. There's nothing more to wait for by then.
+		// -J's ssh can hold stderr open after this ssh has ended. There's nothing more
+		// to wait for by then.
 		c.WaitDelay = time.Second
 		err := c.Run()
 		return stdout.b, stderr.String(), stdout.overflow, err
 	}
 }
 
+// agentFixedOptions make a look one login that runs one command and leaves nothing
+// behind. No master: every look is a login of its own, which sshd sees, and which a
+// revoked key can't get past. A key that isn't trusted is an error and not a question,
+// and known_hosts stays as it is.
+var agentFixedOptions = []string{
+	"BatchMode=yes",
+	"StrictHostKeyChecking=yes",
+	"UpdateHostKeys=no",
+	"ControlMaster=no",
+	"ControlPath=none",
+	"LogLevel=ERROR",
+	"RemoteCommand=none",
+	"RequestTTY=no",
+	"ClearAllForwardings=yes",
+	"ForwardAgent=no",
+	"ForwardX11=no",
+	"PermitLocalCommand=no",
+}
+
 // agentSSHArgs are the options for one run, on its command line alone: nothing is
 // written to anyone's ssh config. ssh keeps the first value it sees of an option, so
-// meterm's come before the host's extra args, which may include a teammate's
-// BatchMode=no. -T comes after them because of the two tty flags the last one wins.
-//
-// Forwards from the user's ssh config are cleared and a RemoteCommand there is
-// overridden: this login is for the one command.
-func agentSSHArgs(r config.Resolved, timeout time.Duration, controlPath string) []string {
-	args := []string{"-n",
-		"-o", "BatchMode=yes",
-		"-o", "ConnectTimeout=" + strconv.Itoa(int(math.Ceil(timeout.Seconds()))),
-		"-o", "ConnectionAttempts=1",
-		"-o", "LogLevel=ERROR",
-		"-o", "RemoteCommand=none",
-		"-o", "RequestTTY=no",
-		"-o", "ClearAllForwardings=yes",
-		"-o", "ForwardAgent=no",
-		"-o", "ForwardX11=no",
-		"-o", "PermitLocalCommand=no",
-		// A dead master has to go soon, or every look waits on it until its timeout.
-		"-o", "ServerAliveInterval=5",
-		"-o", "ServerAliveCountMax=2",
+// meterm's come before the host's extra args. That alone isn't enough, as a flag beats
+// any -o and a bare word becomes the destination, which is why those have to pass
+// checkAgentExtraArgs. -T comes after them because of the two tty flags the last one
+// wins. sshConfig carries the same options to jump hops, where -o doesn't reach.
+func agentSSHArgs(r config.Resolved, sshConfig string, timeout time.Duration) []string {
+	args := []string{"-n"}
+	if sshConfig != "" {
+		args = append(args, "-F", sshConfig)
 	}
-	if controlPath == "" {
-		args = append(args, "-o", "ControlMaster=no", "-o", "ControlPath=none")
-	} else {
-		args = append(args, "-o", "ControlMaster=auto", "-o", "ControlPath="+controlPath, "-o", "ControlPersist="+agentControlPersist)
+	for _, o := range agentFixedOptions {
+		args = append(args, "-o", o)
 	}
+	args = append(args, "-o", "ConnectTimeout="+strconv.Itoa(int(math.Ceil(timeout.Seconds()))), "-o", "ConnectionAttempts=1")
 	args = append(args, r.ExtraArgs...)
 	return append(args, "-T")
 }
 
-const (
-	// agentControlPersist has one poll's login carry over to the next one, at a
-	// status bar's 30 seconds, and then it's gone.
-	agentControlPersist = "60"
-	// agentControlPathMax is macOS's 104 bytes for a socket's path, less the
-	// terminating NUL, less the 18 bytes of the random suffix ssh binds it under
-	// first. Linux allows 108, and the smaller limit does there too.
-	agentControlPathMax = 104 - 1 - 18
-)
-
-// agentControlPathRE is what may go into ssh's option without a thought: no %
-// tokens, spaces or quotes from a $TMPDIR.
-var agentControlPathRE = regexp.MustCompile(`^[A-Za-z0-9._/-]+$`)
-
-// agentControlPath is where this host's short-lived master lives, or "" for none.
-// None for production, for any host on the way there, and wherever it can't be
-// done safely: then every look is a login of its own, which works just the same.
-//
-// `dev` and `tunnel up` are out of its reach. Those set ControlPath=none, and this
-// path is known only to this command, so neither can land on this master or lose
-// anything when it goes.
-func agentControlPath(r config.Resolved) string {
-	if runtime.GOOS == "windows" || usesProduction(r) {
-		return ""
+// writeAgentSSHConfig writes the file behind ssh's -F for this run, and returns how to
+// remove it. -J starts an ssh for each hop that gets none of the -o options, but it
+// does get -F, so this is how a hop comes to obey them. The first value of an option
+// wins here too, and the two Includes are what ssh would have read anyway. The path goes
+// unquoted into the command ssh builds for a hop, so it has to be a plain one.
+func writeAgentSSHConfig() (string, func(), error) {
+	var b strings.Builder
+	for _, o := range agentFixedOptions {
+		key, val, _ := strings.Cut(o, "=")
+		fmt.Fprintf(&b, "%s %s\n", key, val)
 	}
-	return controlPathIn(r, []string{os.Getenv("XDG_RUNTIME_DIR"), os.TempDir(), "/tmp"}, status.EnsureDir)
-}
-
-func usesProduction(r config.Resolved) bool {
-	if r.IsProduction() {
-		return true
-	}
-	for _, hop := range r.ProxyJump {
-		if usesProduction(hop) {
-			return true
-		}
-	}
-	return false
-}
-
-// controlPathIn picks the first base that gives a short enough path, in a directory
-// that's this user's own. The file's name covers everything about the connection, so
-// another route or login never lands on this one's master.
-func controlPathIn(r config.Resolved, bases []string, ensure func(string) error) string {
-	r.Forwards = nil
-	sum := sha256.Sum256([]byte(strings.Join(sshrun.BuildArgs(r), "\x00")))
-	name := hex.EncodeToString(sum[:8])
-	for _, base := range bases {
-		if base == "" {
+	b.WriteString("Include ~/.ssh/config\nInclude /etc/ssh/ssh_config\n")
+	for _, base := range []string{os.TempDir(), "/tmp"} {
+		if !agentPlainPathRE.MatchString(base) {
 			continue
 		}
-		dir := filepath.Join(base, "meterm-cm-"+strconv.Itoa(os.Getuid()))
-		p := filepath.Join(dir, name)
-		if !filepath.IsAbs(p) || len(p) > agentControlPathMax || !agentControlPathRE.MatchString(p) {
+		dir, err := os.MkdirTemp(base, "meterm-agents-")
+		if err != nil {
 			continue
 		}
-		if ensure(dir) == nil {
-			return p
+		remove := func() { _ = os.RemoveAll(dir) }
+		p := filepath.Join(dir, "ssh_config")
+		if err := os.WriteFile(p, []byte(b.String()), 0o600); err != nil {
+			remove()
+			continue
+		}
+		return p, remove, nil
+	}
+	return "", nil, errors.New("no temp directory with a plain path to work in")
+}
+
+var agentPlainPathRE = regexp.MustCompile(`^[A-Za-z0-9._/-]+$`)
+
+// agentSafeOptions are the -o options a host's extra_args may carry into a look: where
+// and as whom to connect, and connection tuning. Nothing that runs a program, forwards
+// anything, changes the destination, shares a connection or decides which host keys
+// count. HostName is out for that reason, while Port and User aren't: the host it goes
+// to is still the one whose production label and route were looked at.
+var agentSafeOptions = map[string]bool{
+	"port": true, "user": true, "identityfile": true, "identitiesonly": true,
+	"connecttimeout": true, "connectionattempts": true,
+	"serveraliveinterval": true, "serveralivecountmax": true, "tcpkeepalive": true,
+	"compression": true, "addressfamily": true, "ipqos": true, "rekeylimit": true,
+	"kexalgorithms": true, "ciphers": true, "macs": true, "hostkeyalgorithms": true,
+	"pubkeyacceptedalgorithms": true, "pubkeyacceptedkeytypes": true,
+	"preferredauthentications": true, "numberofpasswordprompts": true,
+	"loglevel": true, "checkhostip": true, "visualhostkey": true, "batchmode": true,
+	"requesttty": true, "escapechar": true,
+}
+
+// agentSafeFlags stay harmless with what agentSSHArgs does. -t is here because -T
+// comes after it.
+var agentSafeFlags = map[string]bool{"-4": true, "-6": true, "-C": true, "-q": true, "-T": true, "-t": true, "-tt": true, "-v": true, "-vv": true, "-vvv": true}
+
+// checkAgentExtraArgs lets through what can't change what a look is. It's an allowlist
+// and has to stay one: a bare word would become ssh's destination, with the real target
+// and the fixed command as a remote command on it; -o ProxyCommand runs a program here;
+// and -A -X -M -S override the options set above. The same args stay fine for commands
+// that make their own record.
+func checkAgentExtraArgs(args []string) error {
+	refuse := func(a string) error {
+		return fmt.Errorf("its extra_args have %q, and `agents` runs only with -p, -i, -l, connection flags and connection -o options", a)
+	}
+	value := func(i *int, a, flag string) (string, bool) {
+		if a != flag {
+			return a[len(flag):], true
+		}
+		*i++
+		if *i >= len(args) {
+			return "", false
+		}
+		return args[*i], true
+	}
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		switch {
+		case agentSafeFlags[a]:
+		case strings.HasPrefix(a, "-p"):
+			v, ok := value(&i, a, "-p")
+			if n, err := strconv.Atoi(v); !ok || err != nil || n < 1 || n > 65535 {
+				return refuse(a)
+			}
+		case strings.HasPrefix(a, "-l"):
+			v, ok := value(&i, a, "-l")
+			if !ok || v == "" || config.CheckUser(v) != nil {
+				return refuse(a)
+			}
+		case strings.HasPrefix(a, "-i"):
+			v, ok := value(&i, a, "-i")
+			if !ok || !agentSafeValue(v) {
+				return refuse(a)
+			}
+		case strings.HasPrefix(a, "-o"):
+			v, ok := value(&i, a, "-o")
+			if !ok {
+				return refuse(a)
+			}
+			key, val, found := strings.Cut(v, "=")
+			if !found {
+				key, val, found = strings.Cut(v, " ")
+			}
+			if !found || !agentSafeOptions[strings.ToLower(strings.TrimSpace(key))] || !agentSafeValue(strings.TrimSpace(val)) {
+				return refuse(v)
+			}
+		default:
+			return refuse(a)
 		}
 	}
-	return ""
+	return nil
+}
+
+// agentSafeValue is one plain word: no tokens for ssh to expand, nothing for its config
+// parser to split, and nothing to pass for a flag.
+func agentSafeValue(v string) bool {
+	return v != "" && !strings.HasPrefix(v, "-") && !termsafe.Unsafe(v) && !strings.ContainsAny(v, " \t%$`\"'\\;&|<>()")
 }
 
 // cappedBuffer keeps up to max bytes. Past that it stops keeping, and calls over.

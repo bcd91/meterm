@@ -9,9 +9,6 @@ W=$(mktemp -d /tmp/mta.XXXXXX)
 W=$(cd "$W" && pwd -P)
 SSHD_PID=""
 cleanup() {
-  for s in "$W"/tmp/meterm-cm-*/* "$W"/long*/meterm-cm-*/*; do
-    [ -S "$s" ] && ssh -F "$W/ssh_config" -o ControlPath="$s" -O exit x 2>/dev/null || true
-  done
   [ -z "$SSHD_PID" ] || kill "$SSHD_PID" 2>/dev/null || true
   rm -rf "$W"
 }
@@ -24,7 +21,7 @@ M=$W/meterm
 export METERM_CONFIG=$W/hosts.yaml METERM_ACTIVITY_DIR=$W/activity METERM_HISTORY=$W/history.json
 export METERM_TEAM_DIR=$W/team METERM_RUNTIME_DIR=$W/run METERM_NO_AUTOSYNC=1
 export TMPDIR=$W/tmp XDG_RUNTIME_DIR=
-mkdir -p "$TMPDIR" "$W/home/.local/bin"
+mkdir -p "$TMPDIR" "$W/home/.local/bin" "$W/bin"
 
 PORT=$(free_port); DEAD=$(free_port)
 ssh-keygen -q -t ed25519 -N '' -f "$W/hostkey"
@@ -45,21 +42,37 @@ SetEnv HOME=$W/home PATH=/usr/bin:/bin
 CONF
 /usr/sbin/sshd -D -f "$W/sshd_config" -E "$W/sshd.log" &
 SSHD_PID=$!
-printf '[127.0.0.1]:%s %s\n' "$PORT" "$(cut -d' ' -f1,2 "$W/hostkey.pub")" >"$W/known_hosts"
-cat >"$W/ssh_config" <<CONF
-UserKnownHostsFile $W/known_hosts
-StrictHostKeyChecking yes
-IdentityFile $W/key
-IdentitiesOnly yes
+KNOWN=$W/known_hosts
+printf '[127.0.0.1]:%s %s\n[localhost]:%s %s\n' "$PORT" "$(cut -d' ' -f1,2 "$W/hostkey.pub")" "$PORT" "$(cut -d' ' -f1,2 "$W/hostkey.pub")" >"$KNOWN"
+# meterm runs the ssh on PATH, and -J's hop runs the ssh that argv[0] says, so this holds
+# for hops too. It keeps known_hosts out of the real home. `agents` has no -F to spare and
+# won't take these options from extra_args, which is the point.
+cat >"$W/bin/ssh" <<CONF
+#!/bin/bash
+exec -a ssh /usr/bin/ssh -o UserKnownHostsFile=$KNOWN -o IdentityFile=$W/key -o IdentitiesOnly=yes "\$@"
 CONF
+chmod +x "$W/bin/ssh"
+export PATH=$W/bin:$PATH
 for i in $(seq 1 50); do grep -q 'Server listening' "$W/sshd.log" 2>/dev/null && break; sleep 0.1; done
 
 cat >"$METERM_CONFIG" <<CONF
 version: 1
 hosts:
-- {name: box, address: 127.0.0.1, port: $PORT, tags: [t], extra_args: [-F, $W/ssh_config]}
-- {name: live, address: 127.0.0.1, port: $PORT, tags: [t], env: production, extra_args: [-F, $W/ssh_config]}
-- {name: dead, address: 127.0.0.1, port: $DEAD, extra_args: [-F, $W/ssh_config]}
+- {name: box, address: 127.0.0.1, port: $PORT, tags: [t]}
+- {name: live, address: localhost, port: $PORT, tags: [t], env: production}
+- {name: dead, address: 127.0.0.1, port: $DEAD}
+- {name: x-bare, address: 127.0.0.1, port: $PORT, extra_args: [127.0.0.1]}
+- {name: x-proxy, address: 127.0.0.1, port: $PORT, extra_args: [-o, "ProxyCommand=touch $W/pwned"]}
+- {name: x-agent, address: 127.0.0.1, port: $PORT, extra_args: [-A]}
+- {name: x-master, address: 127.0.0.1, port: $PORT, extra_args: [-M, -S, $W/sock]}
+- {name: x-ok, address: 127.0.0.1, port: $PORT, extra_args: [-o, ConnectTimeout=5, -C]}
+- {name: via-live, address: 127.0.0.1, port: $PORT, tags: [j], proxy_jump: live}
+- {name: via-user, address: 127.0.0.1, port: $PORT, tags: [j], proxy_jump: "bcd@live"}
+- {name: via-addr, address: 127.0.0.1, port: $PORT, tags: [j], proxy_jump: "localhost:$PORT"}
+- {name: via-route, address: 127.0.0.1, port: $DEAD, tags: [j], routes: [{name: r, proxy_jump: live}]}
+- {name: hop, address: 127.0.0.1, port: $PORT}
+- {name: via-hop, address: localhost, port: $PORT, proxy_jump: hop}
+- {name: routed, address: 127.0.0.1, port: $DEAD, routes: [{name: r, address: 127.0.0.1, port: $PORT}]}
 CONF
 
 fake() { # what the fake claude does
@@ -79,23 +92,39 @@ run 0 box --format json
 [ "$OUT" = '{"schema":1,"hosts":[{"host":"box","reachable":true,"error":"","agents":[{"cwd":"/src","kind":"interactive","startedAt":1793311202058,"pid":7,"status":"busy","sessionId":"s","name":"n"}]}]}' ] || fail "got $OUT"
 echo ok
 
-echo "== nothing is written, and a second look uses the same login"
-[ ! -e "$METERM_ACTIVITY_DIR" ] && [ ! -e "$METERM_HISTORY" ] && [ ! -e "$METERM_TEAM_DIR" ] || fail "something was recorded"
+echo "== nothing is written, and every look is a login of its own (M1)"
+[ ! -e "$METERM_ACTIVITY_DIR" ] && [ ! -e "$METERM_HISTORY" ] && [ ! -e "$METERM_TEAM_DIR" ] && [ ! -e "$W/routes.json" ] || fail "something was recorded"
 before=$(logins)
 run 0 box
 run 0 box
-[ "$(logins)" = "$before" ] || fail "logins went from $before to $(logins)"
-SOCK=$(ls "$TMPDIR"/meterm-cm-*/*)
-[ -S "$SOCK" ] || fail "no master socket: $SOCK"
-[ "$(stat -f '%Lp' "$(dirname "$SOCK")" 2>/dev/null || stat -c '%a' "$(dirname "$SOCK")")" = 700 ] || fail "the directory isn't private"
-echo "ok: one login for three looks, socket of ${#SOCK} bytes"
+[ "$(logins)" = "$((before + 2))" ] || fail "logins went from $before to $(logins), wanted two more"
+pgrep -f "^ssh .*$W/key" >/dev/null && fail "an ssh stayed behind"
+[ -z "$(ls "$TMPDIR")" ] || fail "left in TMPDIR: $(ls "$TMPDIR")"
+echo "ok: two looks, two logins, nothing left running or on disk"
 
-echo "== production: named it's asked, on a login of its own; by tag it's refused"
-before=$(logins); n=$(ls "$TMPDIR"/meterm-cm-*/ | wc -l)
+echo "== a revoked key stops working at the next look (M1)"
+mv "$W/authorized_keys" "$W/authorized_keys.off"
+run 2 box --format json
+python3 -I -c 'import json,sys; h=json.loads(sys.argv[1])["hosts"][0]; assert h["agents"] is None and "refused the key" in h["error"], h' "$OUT" || fail "$OUT"
+mv "$W/authorized_keys.off" "$W/authorized_keys"
+echo ok
+
+echo "== extra_args can't make it something else (H1)"
+before=$(logins)
+for h in x-bare x-proxy x-agent x-master; do
+  run 2 $h --format json
+  python3 -I -c 'import json,sys; h=json.loads(sys.argv[1])["hosts"][0]; assert h["reachable"] is False and h["agents"] is None and "extra_args" in h["error"], h' "$OUT" || fail "$h: $OUT"
+  echo "   $h: $(python3 -I -c 'import json,sys; print(json.loads(sys.argv[1])["hosts"][0]["error"][:70])' "$OUT")"
+done
+[ "$(logins)" = "$before" ] || fail "ssh ran for a host with hostile extra_args"
+[ ! -e "$W/pwned" ] || fail "ProxyCommand ran"
+run 0 x-ok
+echo ok
+
+echo "== production: named it's asked; by tag it's refused, by any route (H2)"
+before=$(logins)
 run 0 live
-run 0 live
-[ "$(logins)" = "$((before + 2))" ] || fail "reused a login for production"
-[ "$(ls "$TMPDIR"/meterm-cm-*/ | wc -l)" = "$n" ] || fail "a master for production"
+[ "$(logins)" = "$((before + 1))" ] || fail "named production wasn't asked"
 before=$(logins)
 run 2 --tag t --format json
 python3 -I -c '
@@ -104,7 +133,61 @@ h = {x["host"]: x for x in json.loads(sys.argv[1])["hosts"]}
 assert h["box"]["error"] == "" and h["box"]["agents"]
 assert h["live"]["reachable"] is False and h["live"]["agents"] is None and "refused" in h["live"]["error"]
 ' "$OUT" || fail "got $OUT"
-[ "$(logins)" = "$before" ] || fail "something logged in"
+[ "$(logins)" = "$((before + 1))" ] || fail "something else logged in"
+before=$(logins)
+run 2 --tag j --format json
+python3 -I -c '
+import json, sys
+hs = json.loads(sys.argv[1])["hosts"]
+assert len(hs) == 4
+for h in hs:
+    assert "refused" in h["error"] and h["agents"] is None, h
+' "$OUT" || fail "got $OUT"
+[ "$(logins)" = "$before" ] || fail "logged in through production on a poll"
+run 0 via-live
+echo "ok: refused by tag through name, user@name, address and saved route; via-live named still works"
+
+echo "== a look writes no state, and an unknown host key is an error (M5)"
+sum=$(shasum "$KNOWN")
+: >"$W/empty_known"
+cp "$KNOWN" "$W/known.keep"; : >"$KNOWN"
+run 2 box --format json
+python3 -I -c 'import json,sys; h=json.loads(sys.argv[1])["hosts"][0]; assert h["agents"] is None and "trusted" in h["error"], h' "$OUT" || fail "$OUT"
+[ ! -s "$KNOWN" ] || fail "a key was accepted into known_hosts"
+cp "$W/known.keep" "$KNOWN"
+[ "$(shasum "$KNOWN")" = "$sum" ] || fail "known_hosts changed"
+run 0 routed
+[ ! -e "$W/routes.json" ] || fail "routes.json was written"
+[ "$(shasum "$KNOWN")" = "$sum" ] || fail "known_hosts changed through a route"
+t0=$(python3 -I -c 'import time; print(time.time())')
+python3 -I - "$W" <<'PY' &
+import socket, sys, time
+s = socket.socket(); s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1); s.bind(("127.0.0.1", 0)); s.listen(50)
+open(sys.argv[1] + "/silent.port", "w").write(str(s.getsockname()[1]))
+keep = []
+while True: keep.append(s.accept())
+PY
+SILENT_PID=$!
+for i in $(seq 1 50); do [ -s "$W/silent.port" ] && break; sleep 0.1; done
+SP=$(cat "$W/silent.port")
+cat >>"$METERM_CONFIG" <<CONF
+- {name: silent, address: 127.0.0.1, port: $SP, routes: [{name: a, address: 127.0.0.1, port: $SP}, {name: b, address: 127.0.0.1, port: $SP}, {name: c, address: 127.0.0.1, port: $SP}]}
+CONF
+run 2 silent --format json --timeout 1s
+dt=$(python3 -I -c "import time; print(round(time.time()-$t0, 1))")
+kill "$SILENT_PID" 2>/dev/null || true
+python3 -I -c "import sys; assert $dt < 3, $dt" || fail "--timeout 1s took ${dt}s with routes that never greet"
+echo "ok: no known_hosts or routes.json change; --timeout 1s took ${dt}s through silent routes"
+
+echo "== options reach a jump hop (L2)"
+before=$(logins)
+run 0 via-hop
+[ "$(logins)" = "$((before + 2))" ] || fail "wanted a login for the hop and one for the host"
+# The hop's key unknown: an error, and nothing added, with BatchMode from the -F file.
+: >"$KNOWN"
+run 2 via-hop --format json
+[ ! -s "$KNOWN" ] || fail "the hop's key was accepted"
+cp "$W/known.keep" "$KNOWN"
 echo ok
 
 echo "== every failure is reported per host, and never as zero agents"

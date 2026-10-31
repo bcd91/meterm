@@ -17,6 +17,7 @@ import (
 
 	"meterm/internal/agents"
 	"meterm/internal/config"
+	"meterm/internal/sshrun"
 )
 
 // exitErr is a real *exec.ExitError with this code.
@@ -34,7 +35,7 @@ func exitErr(t *testing.T, code int) error {
 }
 
 func agentJobFor(name string) agentJob {
-	return agentJob{label: name, resolve: func() config.Resolved {
+	return agentJob{label: name, resolve: func(context.Context) config.Resolved {
 		return config.Resolved{Name: name, Address: "192.0.2.1"}
 	}}
 }
@@ -126,7 +127,7 @@ func TestAskAgentsEmptyIsAnAnswer(t *testing.T) {
 }
 
 func TestAskAgentsDoesntRunForAnUnsafeHost(t *testing.T) {
-	job := agentJob{label: "bad", resolve: func() config.Resolved {
+	job := agentJob{label: "bad", resolve: func(context.Context) config.Resolved {
 		return config.Resolved{Err: errors.New("bad\x1b[2J: address \"-oProxyCommand=x\"")}
 	}}
 	got := askAgents(context.Background(), job, func(context.Context, config.Resolved) ([]byte, string, bool, error) {
@@ -178,11 +179,32 @@ func hostsForAgents(t *testing.T, yaml string) *config.Config {
 }
 
 const agentsHosts = `version: 1
+groups:
+  live-group: {env: production}
+  via-live: {proxy_jump: live}
 hosts:
 - {name: dev1, address: 192.0.2.1, tags: [web]}
 - {name: dev2, address: 192.0.2.2, group: g}
 - {name: live, address: 192.0.2.3, env: production, tags: [web]}
 - {name: live2, address: 192.0.2.4, env: production, group: g}
+- {name: inherit, address: 192.0.2.5, group: live-group, tags: [inh]}
+- {name: typo, address: 192.0.2.6, env: prodution, tags: [inh]}
+- {name: j-name, address: 192.0.2.10, proxy_jump: live, tags: [j]}
+- {name: j-user, address: 192.0.2.11, proxy_jump: "deploy@live", tags: [j]}
+- {name: j-port, address: 192.0.2.12, proxy_jump: "live:2222", tags: [j]}
+- {name: j-addr, address: 192.0.2.13, proxy_jump: "192.0.2.3", tags: [j]}
+- {name: j-useraddr, address: 192.0.2.14, proxy_jump: "root@192.0.2.3:22", tags: [j]}
+- {name: j-chain, address: 192.0.2.15, proxy_jump: "dev3", tags: [j]}
+- {name: j-second, address: 192.0.2.16, proxy_jump: "dev1,live", tags: [j]}
+- {name: j-group, address: 192.0.2.17, group: via-live, tags: [j]}
+- {name: j-route, address: 192.0.2.18, tags: [j], routes: [{name: r, proxy_jump: live}]}
+- {name: j-routeaddr, address: 192.0.2.19, tags: [j], routes: [{name: r, address: 192.0.2.3}]}
+- {name: j-alias, address: 192.0.2.3, tags: [j]}
+- {name: j-liveroute, address: 192.0.2.30, tags: [j], proxy_jump: "198.51.100.7"}
+- {name: live3, address: 192.0.2.31, env: production, routes: [{name: pub, address: 198.51.100.7}]}
+- {name: dev3, address: 192.0.2.20, proxy_jump: live}
+- {name: ok-jump, address: 192.0.2.21, proxy_jump: dev1, tags: [ok]}
+- {name: ok-port, address: 192.0.2.3, port: 2222, tags: [never]}
 `
 
 func TestSelectAgentHostsProduction(t *testing.T) {
@@ -198,6 +220,12 @@ func TestSelectAgentHostsProduction(t *testing.T) {
 		{"named", []string{"live"}, nil, nil, map[string]bool{"live": false}},
 		{"named and by tag", []string{"live"}, []string{"web"}, nil, map[string]bool{"dev1": false, "live": false}},
 		{"named with a login", []string{"root@live"}, nil, nil, map[string]bool{"root@live": false}},
+		{"env from the group, or a typo", nil, []string{"inh"}, nil, map[string]bool{"inherit": true, "typo": true}},
+		{"a jump through a good host", nil, []string{"ok"}, nil, map[string]bool{"ok-jump": false}},
+		{"named, through production", []string{"j-name"}, nil, nil, map[string]bool{"j-name": false}},
+		{"every way through production", nil, []string{"j"}, nil, map[string]bool{
+			"j-name": true, "j-user": true, "j-port": true, "j-addr": true, "j-useraddr": true, "j-chain": true, "j-second": true,
+			"j-group": true, "j-route": true, "j-routeaddr": true, "j-alias": true, "j-liveroute": true}},
 	} {
 		jobs, err := selectAgentHosts(cfg, tc.names, tc.tags, tc.groups)
 		if err != nil {
@@ -276,121 +304,177 @@ func TestHostileLoginAndAddressDontReachSSH(t *testing.T) {
 	}
 }
 
-func TestAgentSSHArgs(t *testing.T) {
-	r := config.Resolved{Address: "192.0.2.1", ExtraArgs: []string{"-o", "BatchMode=no", "-t", "-o", "ControlPath=/tmp/theirs"}}
-	args := agentSSHArgs(r, 8*time.Second, "/tmp/meterm-cm-501/abc")
-	at := func(s string) int { return slices.Index(args, s) }
-	for _, want := range []string{"BatchMode=yes", "ConnectTimeout=8", "RemoteCommand=none", "ClearAllForwardings=yes", "ControlMaster=auto", "ControlPath=/tmp/meterm-cm-501/abc", "ControlPersist=60"} {
-		if at(want) < 0 {
-			t.Errorf("no %q in %v", want, args)
-		}
+// What real ssh makes of the arguments: the options that matter hold against everything
+// the allowlist lets through, and against what's in the generated config.
+func TestAgentSSHArgsAsSSHReadsThem(t *testing.T) {
+	if _, err := exec.LookPath("ssh"); err != nil {
+		t.Skip("no ssh")
 	}
-	// ssh keeps the first value of an option, and the last of -t and -T.
-	if at("BatchMode=yes") > at("BatchMode=no") || at("ControlPath=/tmp/meterm-cm-501/abc") > at("ControlPath=/tmp/theirs") {
-		t.Errorf("the host's options come first: %v", args)
+	sshConfig, remove, err := writeAgentSSHConfig()
+	if err != nil {
+		t.Fatal(err)
 	}
-	if args[len(args)-1] != "-T" {
-		t.Errorf("-T isn't last: %v", args)
+	defer remove()
+	want := map[string]string{
+		"batchmode": "yes", "stricthostkeychecking": "true", "updatehostkeys": "false",
+		"controlmaster": "false", "controlpersist": "no",
+		"requesttty": "false", "clearallforwardings": "yes", "forwardagent": "no",
+		"forwardx11": "no", "permitlocalcommand": "no", "connecttimeout": "8",
 	}
-	args = agentSSHArgs(config.Resolved{}, 1500*time.Millisecond, "")
-	if slices.Contains(args, "ControlMaster=auto") || !slices.Contains(args, "ControlPath=none") || !slices.Contains(args, "ControlMaster=no") || !slices.Contains(args, "ConnectTimeout=2") {
-		t.Errorf("no master: %v", args)
-	}
-}
-
-func TestAgentControlPathNeverForProduction(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("no masters on Windows")
-	}
-	t.Setenv("XDG_RUNTIME_DIR", "")
-	t.Setenv("TMPDIR", t.TempDir())
-	for _, tc := range []struct {
-		name string
-		r    config.Resolved
-		none bool
-	}{
-		{"plain", config.Resolved{Address: "a", Env: "dev"}, false},
-		{"unlabelled", config.Resolved{Address: "a"}, false},
-		{"production", config.Resolved{Address: "a", Env: config.EnvProduction}, true},
-		{"through production", config.Resolved{Address: "a", ProxyJump: []config.Resolved{{Address: "j", Env: config.EnvProduction}}}, true},
-		{"two hops in", config.Resolved{Address: "a", ProxyJump: []config.Resolved{{Address: "j", ProxyJump: []config.Resolved{{Address: "k", Env: config.EnvProduction}}}}}, true},
+	for name, extra := range map[string][]string{
+		"none":             nil,
+		"their BatchMode":  {"-o", "BatchMode=no"},
+		"their tty":        {"-t"},
+		"their tty, twice": {"-tt"},
+		"glued":            {"-oBatchMode=no", "-p2222", "-iid"},
 	} {
-		if got := agentControlPath(tc.r); (got == "") != tc.none {
-			t.Errorf("%s: %q", tc.name, got)
+		if err := checkAgentExtraArgs(extra); err != nil {
+			t.Fatalf("%s: %v", name, err)
 		}
-	}
-}
-
-func TestControlPathInFitsAndIsPlain(t *testing.T) {
-	ok := func(string) error { return nil }
-	r := config.Resolved{Address: "192.0.2.1", User: "u"}
-	long := "/var/folders/1s/" + strings.Repeat("n", 90) + "/T"
-	for _, tc := range []struct {
-		name  string
-		bases []string
-		want  string // the prefix it must have; "" for none
-	}{
-		{"short", []string{"/tmp"}, "/tmp/"},
-		{"macOS TMPDIR", []string{"/var/folders/1s/n4lg_d252s5_wtsdqyww7p2h0000gn/T/"}, "/var/folders/1s/"},
-		{"too long falls through", []string{long, "/tmp"}, "/tmp/"},
-		{"too long and nothing else", []string{long}, ""},
-		{"a space", []string{"/tmp/a b", "/tmp"}, "/tmp/meterm-cm"},
-		{"a token", []string{"/tmp/%h", "/tmp"}, "/tmp/meterm-cm"},
-		{"a quote", []string{"/tmp/a'b", "/tmp"}, "/tmp/meterm-cm"},
-		{"a newline", []string{"/tmp/a\nb", "/tmp"}, "/tmp/meterm-cm"},
-		{"relative", []string{"tmp"}, ""},
-		{"empty", []string{"", "/tmp"}, "/tmp/"},
-	} {
-		got := controlPathIn(r, tc.bases, ok)
-		if tc.want == "" {
-			if got != "" {
-				t.Errorf("%s: %q", tc.name, got)
+		r := config.Resolved{Address: "192.0.2.1", ExtraArgs: extra}
+		args := append([]string{"-G"}, sshrun.BuildArgs(config.Resolved{Address: "192.0.2.1", ExtraArgs: agentSSHArgs(r, sshConfig, 8*time.Second)})...)
+		out, err := exec.Command("ssh", args...).Output()
+		if err != nil {
+			t.Fatalf("%s: ssh -G %v: %v", name, args, err)
+		}
+		got := map[string]string{}
+		for _, line := range strings.Split(string(out), "\n") {
+			if k, v, ok := strings.Cut(line, " "); ok {
+				got[k] = v
 			}
-			continue
 		}
-		if !strings.HasPrefix(got, tc.want) {
-			t.Errorf("%s: %q", tc.name, got)
+		for k, v := range want {
+			if got[k] != v {
+				t.Errorf("%s: %s = %q, want %q", name, k, got[k], v)
+			}
 		}
-		if len(got) > agentControlPathMax {
-			t.Errorf("%s: %d bytes", tc.name, len(got))
+		if got["hostname"] != "192.0.2.1" {
+			t.Errorf("%s: goes to %s", name, got["hostname"])
 		}
-		// What ssh binds at first: the path, a dot, 16 random characters and a NUL.
-		if len(got)+18+1 > 104 {
-			t.Errorf("%s: won't fit in sun_path: %d", tc.name, len(got))
+		if p, there := got["controlpath"]; there { // ssh -G leaves "none" out
+			t.Errorf("%s: controlpath %s", name, p)
 		}
-	}
-	if got := controlPathIn(r, []string{"/nope", "/tmp"}, func(d string) error {
-		if strings.HasPrefix(d, "/nope") {
-			return errors.New("someone else's")
-		}
-		return nil
-	}); !strings.HasPrefix(got, "/tmp/") {
-		t.Errorf("a directory that isn't safe was used: %q", got)
-	}
-	if got := controlPathIn(r, []string{"/nope"}, func(string) error { return errors.New("no") }); got != "" {
-		t.Errorf("got %q", got)
-	}
-	other := r
-	other.Address = "192.0.2.2"
-	if controlPathIn(r, []string{"/tmp"}, ok) == controlPathIn(other, []string{"/tmp"}, ok) {
-		t.Error("two destinations share a master")
-	}
-	routed := r
-	routed.ProxyJumpRaw = "bastion"
-	if controlPathIn(r, []string{"/tmp"}, ok) == controlPathIn(routed, []string{"/tmp"}, ok) {
-		t.Error("two routes share a master")
 	}
 }
 
-// `dev` stays off every master, whatever `agents` does.
-func TestDevStaysOffMasters(t *testing.T) {
-	if !slices.Contains(devSSHOptions, "ControlPath=none") {
-		t.Errorf("dev: %v", devSSHOptions)
+// The reason for the allowlist, as real ssh shows it: each of these does what the
+// options set before it say shouldn't happen.
+func TestRefusedExtraArgsReallyAreDangerous(t *testing.T) {
+	if _, err := exec.LookPath("ssh"); err != nil {
+		t.Skip("no ssh")
 	}
-	for _, o := range devSSHOptions {
-		if strings.Contains(o, "ControlPersist") || strings.Contains(o, "meterm-cm") {
-			t.Errorf("dev: %v", devSSHOptions)
+	for name, tc := range map[string]struct {
+		extra     []string
+		key, want string
+	}{
+		"-A beats ForwardAgent=no": {[]string{"-A"}, "forwardagent", "yes"},
+		"-X beats ForwardX11=no":   {[]string{"-X"}, "forwardx11", "yes"},
+		"-M beats ControlMaster":   {[]string{"-M"}, "controlmaster", "true"},
+		"-S beats ControlPath":     {[]string{"-S", "/tmp/x"}, "controlpath", "/tmp/x"},
+		"a bare word is the host":  {[]string{"evil.example"}, "hostname", "evil.example"},
+	} {
+		if err := checkAgentExtraArgs(tc.extra); err == nil {
+			t.Errorf("%s: allowed", name)
 		}
+		r := config.Resolved{Address: "192.0.2.1", ExtraArgs: tc.extra}
+		args := append([]string{"-G"}, sshrun.BuildArgs(config.Resolved{Address: "192.0.2.1", ExtraArgs: agentSSHArgs(r, "", time.Second)})...)
+		out, err := exec.Command("ssh", args...).Output()
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if !strings.Contains(string(out), "\n"+tc.key+" "+tc.want+"\n") {
+			t.Errorf("%s: ssh didn't do that, so the test's reason is out of date", name)
+		}
+	}
+}
+
+func TestCheckAgentExtraArgs(t *testing.T) {
+	for _, ok := range [][]string{
+		nil,
+		{"-p", "2222"}, {"-p2222"},
+		{"-i", "~/.ssh/key"}, {"-i/home/a/key"},
+		{"-l", "deploy"},
+		{"-4"}, {"-6"}, {"-C"}, {"-q"}, {"-T"}, {"-t"}, {"-v"},
+		{"-o", "Port=22"}, {"-oPort=22"}, {"-o", "Port 22"}, {"-o", "PORT=22"},
+		{"-o", "User=deploy"}, {"-o", "IdentityFile=~/.ssh/k"}, {"-o", "IdentitiesOnly=yes"},
+		{"-o", "ConnectTimeout=5"}, {"-o", "ServerAliveInterval=15"}, {"-o", "BatchMode=no"},
+	} {
+		if err := checkAgentExtraArgs(ok); err != nil {
+			t.Errorf("%q: %v", ok, err)
+		}
+	}
+	for _, bad := range [][]string{
+		{"evil.example"}, {"-p", "22", "evil.example"}, {"sudo", "rm"},
+		{"--"}, {"--", "evil.example"},
+		{"-A"}, {"-X"}, {"-Y"}, {"-M"}, {"-S", "/tmp/x"}, {"-f"}, {"-N"}, {"-n"}, {"-s"}, {"-G"}, {"-V"},
+		{"-L", "1:a:2"}, {"-R", "1:a:2"}, {"-D", "1080"}, {"-W", "a:1"}, {"-w", "1"}, {"-J", "evil"}, {"-F", "/tmp/c"},
+		{"-E", "/tmp/log"}, {"-e", "x"}, {"-b", "1.1.1.1"}, {"-c", "aes"}, {"-m", "x"}, {"-I", "x"}, {"-P", "x"}, {"-Q", "x"}, {"-O", "exit"}, {"-B", "en0"},
+		{"-AX"}, {"-qA"}, {"-pfoo"}, {"-p", "0"}, {"-p", "99999"}, {"-p"}, {"-i"}, {"-o"}, {"-l"},
+		{"-l", "-oProxyCommand=x"}, {"-l", "a b"},
+		{"-i", "-oProxyCommand=x"}, {"-i", "a b"}, {"-i", "%d/k"}, {"-i", "$(x)"}, {"-i", "a\nb"},
+		{"-o", "ProxyCommand=touch /tmp/x"}, {"-oProxyCommand=x"}, {"-o", "proxycommand x"}, {"-o", "ProxyJump=evil"},
+		{"-o", "LocalCommand=x"}, {"-o", "PermitLocalCommand=yes"}, {"-o", "KnownHostsCommand=x"}, {"-o", "Match=exec x"},
+		{"-o", "PKCS11Provider=x"}, {"-o", "SecurityKeyProvider=x"}, {"-o", "SendEnv=*"}, {"-o", "SetEnv=A=b"},
+		{"-o", "HostName=evil"}, {"-o", "Include=/tmp/c"}, {"-o", "RemoteCommand=x"}, {"-o", "RemoteForward=1 a:2"}, {"-o", "LocalForward=1 a:2"},
+		{"-o", "DynamicForward=1"}, {"-o", "ForwardAgent=yes"}, {"-o", "ForwardX11=yes"}, {"-o", "Tunnel=yes"}, {"-o", "ControlMaster=yes"}, {"-o", "ControlPath=/tmp/x"},
+		{"-o", "StrictHostKeyChecking=no"}, {"-o", "UserKnownHostsFile=/dev/null"}, {"-o", "GlobalKnownHostsFile=/dev/null"}, {"-o", "UpdateHostKeys=yes"},
+		{"-o", "IdentityAgent=/tmp/s"}, {"-o", "CertificateFile=/tmp/c"},
+		{"-o", "Port=22 ProxyCommand=x"}, {"-o", "User=$(x)"}, {"-o", "IdentityFile=%d/x"}, {"-o", "Port"}, {"-o", "Port="}, {"-o", "User=-x"},
+		{"-o", "\"ProxyCommand\"=x"},
+		{"\x1b]0;x\x07"},
+	} {
+		err := checkAgentExtraArgs(bad)
+		if err == nil {
+			t.Errorf("%q: allowed", bad)
+		}
+	}
+}
+
+// Through askAgents: a host with one of these is a per-host error, and ssh doesn't run.
+func TestAgentsDontRunWithHostileExtraArgs(t *testing.T) {
+	const bad = "evil\x1b]0;x\x07"
+	job := agentJob{label: "x", resolve: func(context.Context) config.Resolved {
+		return config.Resolved{Address: "192.0.2.1", ExtraArgs: []string{bad}}
+	}}
+	got := askAgents(context.Background(), job, func(context.Context, config.Resolved) ([]byte, string, bool, error) {
+		t.Error("ssh ran")
+		return nil, "", false, nil
+	}, time.Second)
+	if got.Reachable || got.Agents != nil || !strings.Contains(got.Error, "extra_args") || strings.ContainsAny(got.Error, "\x1b\x07") {
+		t.Errorf("got %+v", got)
+	}
+}
+
+// A look stops at --timeout even while it's picking a route, and writes neither file.
+func TestAgentsLookBoundedAndLeavesNoState(t *testing.T) {
+	dir := t.TempDir()
+	cfgFile := filepath.Join(dir, "hosts.yaml")
+	// Port 1 of a TEST-NET address never answers, so only the context ends the dial.
+	yaml := "version: 1\nhosts:\n- name: a\n  address: 192.0.2.1\n  routes:\n  - {name: r1, address: 192.0.2.2}\n  - {name: r2, address: 192.0.2.3}\n  - {name: r3, address: 192.0.2.4}\n"
+	if err := os.WriteFile(cfgFile, []byte(yaml), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(cfgFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	jobs, err := selectAgentHosts(cfg, []string{"a"}, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now()
+	got := askAgents(context.Background(), jobs[0], func(ctx context.Context, _ config.Resolved) ([]byte, string, bool, error) {
+		t.Error("ssh ran past the deadline")
+		return nil, "", false, ctx.Err()
+	}, 200*time.Millisecond)
+	if d := time.Since(start); d > 1500*time.Millisecond {
+		t.Errorf("took %s", d)
+	}
+	if !strings.Contains(got.Error, "timed out") {
+		t.Errorf("got %+v", got)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "routes.json")); !os.IsNotExist(err) {
+		t.Errorf("routes.json: %v", err)
 	}
 }
 
@@ -428,12 +512,10 @@ func fakeSSHScript(t *testing.T, body string) (argvFile string) {
 // and it's the last argument, whatever the host is called.
 func TestSSHAgentQueryRunsTheOneCommand(t *testing.T) {
 	argvFile := fakeSSHScript(t, `echo '[{"pid":1,"cwd":"/a"}]'`)
-	t.Setenv("TMPDIR", t.TempDir())
-	t.Setenv("XDG_RUNTIME_DIR", "")
-	job := agentJob{label: "x", resolve: func() config.Resolved {
+	job := agentJob{label: "x", resolve: func(context.Context) config.Resolved {
 		return config.Resolved{Name: "$(touch /tmp/x)", Address: "192.0.2.1", Forwards: []config.Forward{{Type: "L", LocalPort: 1, RemoteHost: "a", RemotePort: 2}}}
 	}}
-	got := askAgents(context.Background(), job, sshAgentQuery(30*time.Second), 30*time.Second)
+	got := askAgents(context.Background(), job, sshAgentQuery("", 30*time.Second), 30*time.Second)
 	if got.Error != "" || !got.Reachable || len(got.Agents) != 1 {
 		t.Fatalf("got %+v", got)
 	}
@@ -452,10 +534,8 @@ func TestSSHAgentQueryRunsTheOneCommand(t *testing.T) {
 
 func TestSSHAgentQueryStopsAtTheLimit(t *testing.T) {
 	fakeSSHScript(t, `head -c 3000000 /dev/zero; sleep 30`)
-	t.Setenv("TMPDIR", t.TempDir())
-	t.Setenv("XDG_RUNTIME_DIR", "")
 	start := time.Now()
-	got := askAgents(context.Background(), agentJobFor("x"), sshAgentQuery(20*time.Second), 20*time.Second)
+	got := askAgents(context.Background(), agentJobFor("x"), sshAgentQuery("", 20*time.Second), 20*time.Second)
 	if !strings.Contains(got.Error, "more than meterm reads") {
 		t.Errorf("got %+v", got)
 	}
@@ -477,8 +557,6 @@ func TestAgentsWritesNoActivityOrHistory(t *testing.T) {
 	t.Setenv("METERM_ACTIVITY_DIR", activity)
 	t.Setenv("METERM_HISTORY", history)
 	t.Setenv("METERM_TEAM_DIR", team)
-	t.Setenv("TMPDIR", dir)
-	t.Setenv("XDG_RUNTIME_DIR", "")
 	c := newAgentsCmd()
 	c.SetArgs([]string{"dev1", "--format", "json"})
 	if err := c.Execute(); err != nil {
