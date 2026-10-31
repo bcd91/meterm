@@ -161,7 +161,7 @@ func TestLaunchdEnableAndDisable(t *testing.T) {
 	if err := runEnable("box/web"); err != nil {
 		t.Fatal(err)
 	}
-	want = []string{dom, "print " + target, "bootout " + target, "bootstrap " + launchdDomain() + " " + plist, "kickstart " + target, "getenv SSH_AUTH_SOCK"}
+	want = []string{dom, "print " + target, "bootout " + target, "print " + target, "bootstrap " + launchdDomain() + " " + plist, "kickstart " + target, "getenv SSH_AUTH_SOCK"}
 	if !slices.Equal(f.calls, want) {
 		t.Errorf("launchctl: %q", f.calls)
 	}
@@ -173,7 +173,7 @@ func TestLaunchdEnableAndDisable(t *testing.T) {
 	if _, err := os.Stat(plist); !os.IsNotExist(err) {
 		t.Errorf("job still there: %v", err)
 	}
-	if !slices.Equal(f.calls, []string{"print " + target, "bootout " + target}) {
+	if !slices.Equal(f.calls, []string{"print " + target, "bootout " + target, "print " + target}) {
 		t.Errorf("launchctl: %q", f.calls)
 	}
 }
@@ -337,6 +337,47 @@ func TestLaunchdDisableGoesByWhetherItStopped(t *testing.T) {
 	}
 	if err := runDisable("box/web"); err != nil {
 		t.Errorf("err = %v", err)
+	}
+}
+
+// bootout returning 0 isn't enough: the job can still be on its way out, and Disabled
+// is only said once it's gone.
+func TestLaunchdDisableWaitsForTheJobToGo(t *testing.T) {
+	f, home := launchdEnv(t)
+	if err := runEnable("box/web"); err != nil {
+		t.Fatal(err)
+	}
+	target := launchdDomain() + "/" + launchdLabel("box/web")
+	inner := launchctl
+	prints := 0
+	stuck := false
+	launchctl = func(args ...string) (string, error) {
+		if args[0] == "bootout" {
+			return "", nil
+		}
+		if args[0] == "print" && args[1] == target {
+			if prints++; prints > 4 && !stuck {
+				delete(f.loaded, target)
+			}
+		}
+		return inner(args...)
+	}
+	if err := runDisable("box/web"); err != nil {
+		t.Errorf("err = %v", err)
+	}
+	if prints <= 4 {
+		t.Errorf("said Disabled after %d looks", prints)
+	}
+
+	if err := runEnable("box/web"); err != nil {
+		t.Fatal(err)
+	}
+	stuck = true
+	if err := runDisable("box/web"); err == nil || !strings.Contains(err.Error(), "still loaded") {
+		t.Errorf("err = %v", err)
+	}
+	if _, err := os.Stat(jobFile(home, "box/web")); err != nil {
+		t.Errorf("job file: %v", err)
 	}
 }
 

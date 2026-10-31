@@ -301,19 +301,24 @@ func parseLaunchdJob(out string) launchdJob {
 }
 
 // launchdBootout stops the job. launchctl can say "Operation now in progress" on
-// its way, so what counts is whether the job is gone afterwards.
+// its way, and can return with the job still shutting down ("SIGTERMed"), so what
+// counts is whether the job is gone afterwards.
 func launchdBootout(target string) error {
 	var last error
 	for try := 0; try < 3; try++ {
 		out, err := launchctl("bootout", target)
 		if err == nil {
-			return nil
+			last = fmt.Errorf("launchctl bootout: %s is still loaded", target)
+		} else {
+			last = launchctlError("bootout", out, err)
 		}
-		last = launchctlError("bootout", out, err)
-		if st, _, ierr := launchdInspect(target); ierr == nil && st == jobNotLoaded {
-			return nil
+		// meterm takes a moment over its ssh: up to its WaitDelay, and some.
+		for wait := 0; wait < 10; wait++ {
+			if st, _, ierr := launchdInspect(target); ierr == nil && st == jobNotLoaded {
+				return nil
+			}
+			time.Sleep(launchctlRetryDelay)
 		}
-		time.Sleep(launchctlRetryDelay)
 	}
 	return last
 }
