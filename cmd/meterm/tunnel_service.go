@@ -127,7 +127,7 @@ func newTunnelDisableCmd() *cobra.Command {
 			if err := checkServiceSupport(); err != nil {
 				return err
 			}
-			spec, err := serviceSpec(args[0])
+			spec, err := serviceSpecShape(args[0])
 			if err != nil {
 				return err
 			}
@@ -138,7 +138,7 @@ func newTunnelDisableCmd() *cobra.Command {
 			if err := svc.disable(spec); err != nil {
 				return err
 			}
-			fmt.Printf("Disabled %s.\n", spec)
+			fmt.Printf("Disabled %s.\n", termsafe.Text(spec))
 			return nil
 		},
 	}
@@ -191,11 +191,13 @@ func (systemdService) disable(spec string) error {
 	unit := serviceUnitName(spec)
 	path := filepath.Join(dir, unit)
 	if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("%s isn't enabled (no %s)", spec, path)
+		return fmt.Errorf("%s isn't enabled (no %s)", termsafe.Text(spec), path)
 	}
 	if err := systemctlUser("disable", "--now", unit); err != nil {
 		return fmt.Errorf("systemctl disable %s: %w", unit, err)
 	}
+	// The SIGTERM exit code of --service counts as a failure, which would stay listed.
+	_ = systemctlUser("reset-failed", unit)
 	if err := os.Remove(path); err != nil {
 		return err
 	}
@@ -210,12 +212,21 @@ func (systemdService) disable(spec string) error {
 // job's command line and on the terminal, and no saved host can need a leading - or
 // an escape sequence to be turned on or off.
 func serviceSpec(arg string) (string, error) {
-	host, name, ok := strings.Cut(arg, "/")
-	if !ok || host == "" || name == "" {
-		return "", fmt.Errorf("%q: give one tunnel as <host>/<tunnel>", arg)
+	if _, err := serviceSpecShape(arg); err != nil {
+		return "", err
 	}
 	if strings.HasPrefix(arg, "-") || termsafe.Unsafe(arg) {
 		return "", fmt.Errorf("%q: not a name a tunnel can be enabled under", arg)
+	}
+	return arg, nil
+}
+
+// serviceSpecShape is all that disable asks of a name: one that an older meterm let
+// through, or one that a team has since changed, can still be turned off.
+func serviceSpecShape(arg string) (string, error) {
+	host, name, ok := strings.Cut(arg, "/")
+	if !ok || host == "" || name == "" {
+		return "", fmt.Errorf("%q: give one tunnel as <host>/<tunnel>", arg)
 	}
 	return arg, nil
 }

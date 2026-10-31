@@ -1,9 +1,12 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"encoding/xml"
 	"errors"
+	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -32,7 +35,14 @@ type fakeLaunchd struct {
 	calls  []string
 	loaded map[string]bool
 	fail   map[string]error
+	print  string // what print says of a loaded job
 }
+
+// exitCode is an error with an exit code, like *exec.ExitError.
+type exitCode int
+
+func (e exitCode) Error() string { return "exit status " + strconv.Itoa(int(e)) }
+func (e exitCode) ExitCode() int { return int(e) }
 
 func (f *fakeLaunchd) run(args ...string) (string, error) {
 	f.calls = append(f.calls, strings.Join(args, " "))
@@ -41,9 +51,13 @@ func (f *fakeLaunchd) run(args ...string) (string, error) {
 	}
 	switch args[0] {
 	case "print":
-		if !f.loaded[args[1]] {
-			return "", errors.New("exit status 113")
+		if args[1] == launchdDomain() {
+			return "", nil
 		}
+		if !f.loaded[args[1]] {
+			return "", exitCode(launchctlNoService)
+		}
+		return f.print, nil
 	case "bootstrap":
 		f.loaded[launchdDomain()+"/"+strings.TrimSuffix(filepath.Base(args[2]), ".plist")] = true
 	case "bootout":
@@ -127,16 +141,27 @@ func TestLaunchdEnableAndDisable(t *testing.T) {
 	if st, err := os.Stat(plist); err != nil || st.Mode().Perm() != 0o644 {
 		t.Errorf("job file (launchd refuses a writable one): %v %v", st, err)
 	}
-	want := []string{"print " + target, "bootstrap " + launchdDomain() + " " + plist, "kickstart " + target, "getenv SSH_AUTH_SOCK"}
+	dom := "print " + launchdDomain()
+	want := []string{dom, "print " + target, "bootstrap " + launchdDomain() + " " + plist, "kickstart " + target, "getenv SSH_AUTH_SOCK"}
 	if !slices.Equal(f.calls, want) {
 		t.Errorf("launchctl: %q", f.calls)
 	}
 
 	f.calls = nil
-	if err := runEnable("box/web"); err != nil { // again: from the file as it is now
+	if err := runEnable("box/web"); err != nil { // the same again: the tunnel isn't dropped
 		t.Fatal(err)
 	}
-	want = []string{"print " + target, "bootout " + target, "bootstrap " + launchdDomain() + " " + plist, "kickstart " + target, "getenv SSH_AUTH_SOCK"}
+	want = []string{dom, "print " + target, "kickstart " + target, "getenv SSH_AUTH_SOCK"}
+	if !slices.Equal(f.calls, want) {
+		t.Errorf("launchctl: %q", f.calls)
+	}
+
+	f.calls = nil
+	t.Setenv("METERM_TEAM_DIR", "/changed") // now the job differs, so it starts over
+	if err := runEnable("box/web"); err != nil {
+		t.Fatal(err)
+	}
+	want = []string{dom, "print " + target, "bootout " + target, "bootstrap " + launchdDomain() + " " + plist, "kickstart " + target, "getenv SSH_AUTH_SOCK"}
 	if !slices.Equal(f.calls, want) {
 		t.Errorf("launchctl: %q", f.calls)
 	}
@@ -174,24 +199,109 @@ func TestLaunchdRefusals(t *testing.T) {
 	if err := runDisable("box/web\x1b[2J"); err == nil || strings.Contains(err.Error(), "\x1b") {
 		t.Errorf("err = %q", err)
 	}
-	if len(f.calls) != 0 {
+	// disable may ask, as a job can be loaded with its file gone, and nothing more.
+	if len(f.calls) != countPrefix(f.calls, "print ") {
 		t.Errorf("launchctl was called: %v", f.calls)
 	}
 }
 
-// A failure is reported, with the job file left for the next login, as on systemd.
-func TestLaunchdEnableReportsBootstrap(t *testing.T) {
+func jobFile(home, spec string) string {
+	return filepath.Join(home, "Library", "LaunchAgents", launchdLabel(spec)+".plist")
+}
+
+// A failed enable leaves no job behind to start at the next login, and says so.
+func TestLaunchdEnableFailureRemovesTheNewFile(t *testing.T) {
 	f, home := launchdEnv(t)
-	f.fail["bootstrap"] = errors.New("exit status 125")
+	f.fail["bootstrap"] = exitCode(125)
 	err := runEnable("box/web")
-	if err == nil || !strings.Contains(err.Error(), "launchd says no") {
+	if err == nil || !strings.Contains(err.Error(), "launchd says no") || !strings.Contains(err.Error(), "nothing is enabled") {
 		t.Errorf("err = %v", err)
 	}
 	if n := countPrefix(f.calls, "bootstrap "); n != 3 {
 		t.Errorf("%d tries: %q", n, f.calls)
 	}
-	if _, err := os.Stat(filepath.Join(home, "Library", "LaunchAgents", launchdLabel("box/web")+".plist")); err != nil {
+	if _, err := os.Stat(jobFile(home, "box/web")); !os.IsNotExist(err) {
 		t.Errorf("job file: %v", err)
+	}
+}
+
+// A failed re-enable of a working job brings that job back, from its old file.
+func TestLaunchdReEnableFailureRestoresTheOldJob(t *testing.T) {
+	f, home := launchdEnv(t)
+	if err := runEnable("box/web"); err != nil {
+		t.Fatal(err)
+	}
+	old, err := os.ReadFile(jobFile(home, "box/web"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("METERM_TEAM_DIR", "/changed")
+	inner := launchctl
+	tries := 0
+	launchctl = func(args ...string) (string, error) {
+		if args[0] == "bootstrap" {
+			if tries++; tries <= 3 {
+				f.calls = append(f.calls, "failed bootstrap")
+				return "launchd says no", exitCode(125)
+			}
+		}
+		return inner(args...)
+	}
+	err = runEnable("box/web")
+	if err == nil || !strings.Contains(err.Error(), "the previous job is back") {
+		t.Errorf("err = %v", err)
+	}
+	if now, _ := os.ReadFile(jobFile(home, "box/web")); string(now) != string(old) {
+		t.Errorf("file not restored:\n%s", now)
+	}
+	if !f.loaded[launchdDomain()+"/"+launchdLabel("box/web")] {
+		t.Error("the old job isn't loaded again")
+	}
+}
+
+// With no gui domain, or a launchctl that can't say, a working job isn't touched.
+func TestLaunchdEnablePreflightTouchesNothing(t *testing.T) {
+	f, home := launchdEnv(t)
+	if err := runEnable("box/web"); err != nil {
+		t.Fatal(err)
+	}
+	old, _ := os.ReadFile(jobFile(home, "box/web"))
+	t.Setenv("METERM_TEAM_DIR", "/changed")
+	f.calls = nil
+	f.fail["print"] = exitCode(112)
+	err := runEnable("box/web")
+	if err == nil || !strings.Contains(err.Error(), "nothing was changed") {
+		t.Errorf("err = %v", err)
+	}
+	if countPrefix(f.calls, "bootout") != 0 || countPrefix(f.calls, "bootstrap") != 0 {
+		t.Errorf("calls: %q", f.calls)
+	}
+	if now, _ := os.ReadFile(jobFile(home, "box/web")); string(now) != string(old) {
+		t.Error("file changed")
+	}
+}
+
+// kickstart failing means failure only if the job isn't running.
+func TestLaunchdKickstartFailure(t *testing.T) {
+	f, home := launchdEnv(t)
+	f.fail["kickstart"] = exitCode(1)
+	err := runEnable("box/web")
+	if err == nil || !strings.Contains(err.Error(), "launchctl kickstart") || !strings.Contains(err.Error(), "nothing is enabled") {
+		t.Errorf("err = %v", err)
+	}
+	if _, serr := os.Stat(jobFile(home, "box/web")); !os.IsNotExist(serr) {
+		t.Errorf("job file: %v", serr)
+	}
+	if f.loaded[launchdDomain()+"/"+launchdLabel("box/web")] {
+		t.Error("still loaded")
+	}
+
+	f.print = "x = {\n\tstate = running\n\tpid = 5\n}\n"
+	if err := runEnable("box/web"); err != nil {
+		t.Errorf("it's running: %v", err)
+	}
+	if _, serr := os.Stat(jobFile(home, "box/web")); serr != nil {
+		t.Errorf("job file: %v", serr)
 	}
 }
 
@@ -200,11 +310,11 @@ func TestLaunchdDisableKeepsTheFileIfItCantStop(t *testing.T) {
 	if err := runEnable("box/web"); err != nil {
 		t.Fatal(err)
 	}
-	f.fail["bootout"] = errors.New("exit status 1")
+	f.fail["bootout"] = exitCode(1)
 	if err := runDisable("box/web"); err == nil {
 		t.Error("no error")
 	}
-	if _, err := os.Stat(filepath.Join(home, "Library", "LaunchAgents", launchdLabel("box/web")+".plist")); err != nil {
+	if _, err := os.Stat(jobFile(home, "box/web")); err != nil {
 		t.Errorf("job file: %v", err)
 	}
 }
@@ -215,7 +325,7 @@ func TestLaunchdDisableGoesByWhetherItStopped(t *testing.T) {
 	if err := runEnable("box/web"); err != nil {
 		t.Fatal(err)
 	}
-	f.fail["bootout"] = errors.New("exit status 36")
+	f.fail["bootout"] = exitCode(36)
 	target := launchdDomain() + "/" + launchdLabel("box/web")
 	inner := launchctl
 	launchctl = func(args ...string) (string, error) {
@@ -227,6 +337,79 @@ func TestLaunchdDisableGoesByWhetherItStopped(t *testing.T) {
 	}
 	if err := runDisable("box/web"); err != nil {
 		t.Errorf("err = %v", err)
+	}
+}
+
+// By label, with the file gone.
+func TestLaunchdDisableWithTheFileDeleted(t *testing.T) {
+	f, home := launchdEnv(t)
+	if err := runEnable("box/web"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(jobFile(home, "box/web")); err != nil {
+		t.Fatal(err)
+	}
+	if err := runDisable("box/web"); err != nil {
+		t.Errorf("err = %v", err)
+	}
+	if f.loaded[launchdDomain()+"/"+launchdLabel("box/web")] {
+		t.Error("still loaded")
+	}
+}
+
+// launchctl failing isn't "not loaded", and nothing is called Disabled on that.
+func TestLaunchdDisableWhenLaunchctlCantSay(t *testing.T) {
+	f, home := launchdEnv(t)
+	if err := runEnable("box/web"); err != nil {
+		t.Fatal(err)
+	}
+	f.fail["print"] = exitCode(112)
+	err := runDisable("box/web")
+	if err == nil || !strings.Contains(err.Error(), "can't tell") {
+		t.Errorf("err = %v", err)
+	}
+	if _, serr := os.Stat(jobFile(home, "box/web")); serr != nil {
+		t.Errorf("job file: %v", serr)
+	}
+	// A plain error, with no code to go by, is the same.
+	f.fail["print"] = errors.New("launchctl isn't there")
+	if err := runDisable("gone/web"); err == nil || !strings.Contains(err.Error(), "can't tell") {
+		t.Errorf("err = %v", err)
+	}
+}
+
+// A name the stricter check of enable would refuse can still be turned off.
+func TestLaunchdDisableAcceptsOldNames(t *testing.T) {
+	f, home := launchdEnv(t)
+	for _, spec := range []string{"-old/web", "bo\x1bx/web", "box/we\u202eb"} {
+		if err := os.MkdirAll(filepath.Dir(jobFile(home, spec)), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(jobFile(home, spec), []byte("<plist/>"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		f.loaded[launchdDomain()+"/"+launchdLabel(spec)] = true
+		c := newTunnelDisableCmd()
+		c.SetArgs([]string{"--", spec})
+		c.SilenceUsage, c.SilenceErrors = true, true
+		if err := c.Execute(); err != nil {
+			t.Errorf("%q: %v", spec, err)
+		}
+		if f.loaded[launchdDomain()+"/"+launchdLabel(spec)] {
+			t.Errorf("%q: still loaded", spec)
+		}
+		if _, err := os.Stat(jobFile(home, spec)); !os.IsNotExist(err) {
+			t.Errorf("%q: %v", spec, err)
+		}
+	}
+}
+
+// parseLaunchdJob on what launchctl print really looks like, nested states included.
+func TestParseLaunchdJob(t *testing.T) {
+	const out = "gui/501/x = {\n\tactive count = 1\n\tpath = /a\n\ttype = LaunchAgent\n\tstate = spawn scheduled\n\n\tprogram = /m\n\truns = 2\n\tlast exit code = 78: EX_CONFIG\n\n\tspawn type = daemon\n\tendpoints = {\n\t\tstate = active\n\t}\n\tpid = 9\n}\n"
+	j := parseLaunchdJob(out)
+	if j.state != "spawn scheduled" || j.running || j.lastExit != "78: EX_CONFIG" || j.pid != 9 {
+		t.Errorf("got %+v", j)
 	}
 }
 
@@ -276,6 +459,8 @@ var hostileNames = []string{
 	"box/" + strings.Repeat("a", 5000),
 	"üñí/日本語",
 	"box/web.plist",
+	"box/we\nb",
+	"box/x\nExecStartPost=/bin/evil\n<key>Program</key>",
 	"a/b/c/d",
 	"--config=/tmp/evil/x",
 	"-oProxyCommand=x/y",
@@ -393,7 +578,7 @@ func TestServiceSupport(t *testing.T) {
 
 // A tunnel that gave up has no process and no state file, so this is all that shows it.
 func TestStatusShowsEnabledAndStopped(t *testing.T) {
-	_, home := launchdEnv(t)
+	f, home := launchdEnv(t)
 	old := enabledServices
 	enabledServices = launchdEnabled
 	defer func() { enabledServices = old }()
@@ -401,35 +586,110 @@ func TestStatusShowsEnabledAndStopped(t *testing.T) {
 	if err := runEnable("box/web"); err != nil {
 		t.Fatal(err)
 	}
-	rep, err := readStatus()
-	if err != nil {
-		t.Fatal(err)
+	one := func() status.Row {
+		t.Helper()
+		rep, err := readStatus()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(rep.Entries) != 1 {
+			t.Fatalf("entries: %+v", rep.Entries)
+		}
+		return rep.Entries[0]
 	}
-	if len(rep.Entries) != 1 || rep.Entries[0].State != stoppedStatus || rep.Entries[0].Host != "box" || rep.Entries[0].Name != "web" || rep.Entries[0].PID != 0 || !strings.Contains(rep.Entries[0].Detail, ".log") {
-		t.Fatalf("entries: %+v", rep.Entries)
+	f.print = "x = {\n\tstate = not running\n\tlast exit code = 0\n}\n"
+	r := one()
+	if r.State != stoppedStatus || r.Host != "box" || r.Name != "web" || r.PID != 0 || !strings.Contains(r.Detail, ".log") {
+		t.Errorf("gave up: %+v", r)
 	}
+	// No state file doesn't mean stopped: launchd is what says so.
+	f.print = "x = {\n\tstate = running\n\tpid = 77\n\tlast exit code = (never exited)\n}\n"
+	if r := one(); r.State != runningStatus || r.PID != 77 {
+		t.Errorf("running with no file: %+v", r)
+	}
+	f.print = "x = {\n\tstate = spawn scheduled\n\tlast exit code = 1\n}\n"
+	if r := one(); r.State != stoppedStatus || !strings.Contains(r.Detail, "tries again") {
+		t.Errorf("failing: %+v", r)
+	}
+	f.loaded = map[string]bool{}
+	if r := one(); r.State != stoppedStatus || !strings.Contains(r.Detail, "not loaded") {
+		t.Errorf("not loaded: %+v", r)
+	}
+	f.fail["print"] = exitCode(112)
+	if r := one(); r.State != unknownStatus {
+		t.Errorf("launchctl can't say: %+v", r)
+	}
+	delete(f.fail, "print")
 
 	reg := status.Open()
 	defer reg.Close()
 	reg.Add(status.KindTunnel, "box", "web").Set(status.Connected, "")
-	rep, err = readStatus()
-	if err != nil {
-		t.Fatal(err)
+	if r := one(); r.State != status.Connected || r.PID != os.Getpid() {
+		t.Errorf("a running tunnel: %+v", r)
 	}
-	if len(rep.Entries) != 1 || rep.Entries[0].State != status.Connected || rep.Entries[0].PID != os.Getpid() {
-		t.Errorf("a running tunnel: %+v", rep.Entries)
-	}
-
 	reg.Close()
+	f.loaded[launchdDomain()+"/"+launchdLabel("box/web")] = true
 	if err := runDisable("box/web"); err != nil {
 		t.Fatal(err)
 	}
-	rep, err = readStatus()
+	rep, err := readStatus()
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(rep.Entries) != 0 {
 		t.Errorf("after disable: %+v", rep.Entries)
+	}
+}
+
+// The binary moved: launchd can't start it, and the row says that rather than "see the
+// log", which has nothing in it about this.
+func TestStatusSaysWhenLaunchdCantSpawn(t *testing.T) {
+	f, _ := launchdEnv(t)
+	target := launchdDomain() + "/x"
+	f.loaded[target] = true
+	f.print = "x = {\n\tstate = spawn scheduled\n\tlast exit code = 78: EX_CONFIG\n}\n"
+	exe := filepath.Join(t.TempDir(), "meterm")
+	state, _, detail := launchdRowState(enabledService{exe: exe, target: target, log: "/l"})
+	if state != stoppedStatus || !strings.Contains(detail, "can't start it") || !strings.Contains(detail, exe) {
+		t.Errorf("missing binary: %s, %s", state, detail)
+	}
+	if err := os.WriteFile(exe, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, detail := launchdRowState(enabledService{exe: exe, target: target, log: "/l"}); !strings.Contains(detail, "78: EX_CONFIG") {
+		t.Errorf("not runnable: %s", detail)
+	}
+}
+
+// A job file holding what XML allows but a terminal shouldn't see. &#x1b; wouldn't do:
+// that isn't XML, so such a file never gets as far as the sanitizer.
+func TestServiceRowsCleanNamesFromJobFiles(t *testing.T) {
+	f, home := launchdEnv(t)
+	dir := filepath.Join(home, "Library", "LaunchAgents")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	const job = "<plist><dict><key>ProgramArguments</key><array><string>/x\u202e</string><string>--</string><string>h\u202eost\u0085/t\u2066un\u009b2J</string></array></dict></plist>"
+	if err := os.WriteFile(filepath.Join(dir, launchdLabelPrefix+"esc-1.plist"), []byte(job), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	f.loaded[launchdDomain()+"/"+launchdLabelPrefix+"esc-1"] = true
+	f.print = "x = {\n\tstate = not running\n}\n"
+	old := enabledServices
+	enabledServices = launchdEnabled
+	defer func() { enabledServices = old }()
+	rows := serviceRows(nil)
+	if len(rows) != 1 {
+		t.Fatalf("the fixture didn't reach the sanitizer: %+v", rows)
+	}
+	r := rows[0]
+	if !strings.HasPrefix(r.Host, "h") || !strings.HasPrefix(r.Name, "t") {
+		t.Errorf("row: %+v", r)
+	}
+	for _, s := range []string{r.Host, r.Name, r.Detail} {
+		if strings.ContainsAny(s, "\u202e\u0085\u2066\u009b") {
+			t.Errorf("got through: %s", strconv.Quote(s))
+		}
 	}
 }
 
@@ -440,34 +700,109 @@ func TestLaunchdEnabledSkipsWhatIsntOurs(t *testing.T) {
 		t.Fatal(err)
 	}
 	for name, content := range map[string]string{
-		"com.example.other.plist":          "<plist/>",
-		launchdLabelPrefix + "a-1.plist":   "not xml <<<",
-		launchdLabelPrefix + "b-1.plist":   "<plist><dict><key>ProgramArguments</key><array><string>/x</string></array></dict></plist>",
-		launchdLabelPrefix + "c-1.txt":     "x",
-		launchdLabelPrefix + "e-1.plist":   strings.Repeat(" ", 1<<17),
-		launchdLabelPrefix + "good.plist":  "<plist><dict><key>ProgramArguments</key><array><string>/x</string><string>--</string><string>h/t</string></array></dict></plist>",
-		launchdLabelPrefix + "esc-1.plist": "<plist><dict><key>ProgramArguments</key><array><string>--</string><string>h&#x1b;[2J/t&#x202e;</string></array></dict></plist>",
+		"com.example.other.plist":         "<plist/>",
+		launchdLabelPrefix + "a-1.plist":  "not xml <<<",
+		launchdLabelPrefix + "b-1.plist":  "<plist><dict><key>ProgramArguments</key><array><string>/x</string></array></dict></plist>",
+		launchdLabelPrefix + "c-1.txt":    "x",
+		launchdLabelPrefix + "e-1.plist":  strings.Repeat(" ", 1<<17),
+		launchdLabelPrefix + "good.plist": "<plist><dict><key>ProgramArguments</key><array><string>/x</string><string>--</string><string>h/t</string></array></dict></plist>",
 	} {
 		if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o644); err != nil {
 			t.Fatal(err)
 		}
 	}
 	got := launchdEnabled()
-	specs := []string{}
-	for _, s := range got {
-		specs = append(specs, s.spec)
+	if len(got) != 1 || got[0].spec != "h/t" || got[0].exe != "/x" {
+		t.Errorf("got %+v", got)
 	}
-	if !slices.Contains(specs, "h/t") {
-		t.Errorf("specs: %q", specs)
+}
+
+// How each way of ending comes out as an exit code, through the real command and
+// finish. Only a verdict from a config that parsed may stop a job for good.
+func TestTunnelUpServiceExitCodes(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix only")
 	}
-	old := enabledServices
-	enabledServices = func() []enabledService { return got }
-	defer func() { enabledServices = old }()
-	for _, r := range serviceRows(nil) {
-		for _, s := range []string{r.Host, r.Name, r.Detail} {
-			if strings.ContainsAny(s, "\x1b‮") {
-				t.Errorf("got through: %s", strconv.Quote(s))
-			}
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	run := func(cfg string, args ...string) int {
+		t.Helper()
+		p := filepath.Join(t.TempDir(), "hosts.yaml")
+		if err := os.WriteFile(p, []byte(cfg), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		c := exec.Command(self)
+		c.Env = append(os.Environ(), runTunnelUpEnv+"="+strings.Join(args, "\x1f"), "METERM_CONFIG="+p,
+			"METERM_ACTIVITY_DIR="+filepath.Join(filepath.Dir(p), "a"), "METERM_NO_AUTOSYNC=1", "METERM_RUNTIME_DIR="+filepath.Join(filepath.Dir(p), "r"))
+		_ = c.Run()
+		return c.ProcessState.ExitCode()
+	}
+	launchd := []string{"--keep", "--service", "--gave-up-exit", "0", "--", "box/web"}
+	systemd := []string{"--keep", "--service", "--", "box/web"}
+	const good = "version: 1\nhosts:\n- {name: other, address: 192.0.2.1}\n"
+	const unsafe = "version: 1\nhosts:\n- name: box\n  address: \"-oProxyCommand=x\"\n  forwards:\n  - {name: web, type: L, local_port: 1, remote_host: a, remote_port: 2}\n"
+	for name, tc := range map[string]struct {
+		cfg              string
+		launchd, systemd int
+	}{
+		"tunnel removed":      {good, 0, tunnelGaveUp},
+		"host turned unsafe":  {unsafe, 0, tunnelGaveUp},
+		"config won't parse":  {"hosts: [ {{{ not yaml", 1, 1},
+		"config has no hosts": {"version: 1\nhosts: []\n", 1, 1},
+		"config is empty":     {"", 1, 1},
+	} {
+		if got := run(tc.cfg, launchd...); got != tc.launchd {
+			t.Errorf("%s, launchd: exit %d, want %d", name, got, tc.launchd)
+		}
+		if got := run(tc.cfg, systemd...); got != tc.systemd {
+			t.Errorf("%s, systemd: exit %d, want %d", name, got, tc.systemd)
+		}
+	}
+}
+
+func TestTunnelServiceExit(t *testing.T) {
+	boom := errors.New("boom")
+	for _, tc := range []struct {
+		err  error
+		want int
+	}{
+		{nil, 0},
+		{tunnelVerdict{boom}, 5},
+		{fmt.Errorf("wrapped: %w", tunnelVerdict{boom}), 5},
+		{errTunnelSignalled, tunnelSignalled},
+		{boom, 1},
+	} {
+		if got := tunnelServiceExit(tc.err, 5); got != tc.want {
+			t.Errorf("%v: %d, want %d", tc.err, got, tc.want)
+		}
+	}
+}
+
+// What ssh printed never ends a service, whatever it says: that includes the server's
+// banner, sent before authentication.
+func TestHoldTunnelServiceOutlivesWhatSSHSays(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("needs sh")
+	}
+	for _, said := range []string{"Unable to negotiate with x", "Bad configuration option: x", "Bad owner or permissions on x", "Permission denied (publickey).", "REMOTE HOST IDENTIFICATION HAS CHANGED"} {
+		dir := t.TempDir()
+		script := "#!/bin/sh\necho '" + said + "' >&2\nexit 255\n"
+		if err := os.WriteFile(filepath.Join(dir, "ssh"), []byte(script), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+		ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+		err := holdTunnel(ctx, "h", func() ([]string, error) { return nil, nil }, tunnelHold{keep: true, service: true}, io.Discard)
+		cancel()
+		if err != nil {
+			t.Errorf("%q ended it: %v", said, err)
+		}
+		// A person at a terminal still hears about it at once.
+		err = holdTunnel(context.Background(), "h", func() ([]string, error) { return nil, nil }, tunnelHold{keep: true, stopOnFailure: true}, io.Discard)
+		if strings.HasPrefix(said, "Unable") && err == nil {
+			t.Errorf("%q: not stopped without service", said)
 		}
 	}
 }
@@ -482,5 +817,30 @@ func TestWriteStatusTextCleans(t *testing.T) {
 	}
 	if strings.ContainsAny(b.String(), "\x1b\x07‮") || strings.Count(b.String(), "\n") != 2 {
 		t.Errorf("%q", b.String())
+	}
+}
+
+// Both formats: a status bar shows JSON strings as they come.
+func TestReadStatusCleansForJSON(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "run")
+	t.Setenv("METERM_RUNTIME_DIR", dir)
+	reg := status.Open()
+	defer reg.Close()
+	bad := "x\x1b]52;c;aGk=\x07\u202e\u2028y"
+	h := reg.Add(status.KindTunnel, bad, bad)
+	h.SetRoute(bad)
+	h.Set(status.Failing, bad)
+	rep, err := readStatus()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var b strings.Builder
+	if err := writeStatus(&b, rep, "json"); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []string{`\u001b`, `\u0007`, "\u202e", `\u2028`, "\x1b"} {
+		if strings.Contains(b.String(), c) {
+			t.Errorf("%q in %s", c, b.String())
+		}
 	}
 }

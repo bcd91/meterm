@@ -310,3 +310,34 @@ func TestDirOnMacIgnoresWhatDiffersBetweenProcesses(t *testing.T) {
 		}
 	}
 }
+
+func TestDirOnMacUnderSudoLeavesThatHomeAlone(t *testing.T) {
+	if runtime.GOOS != "darwin" || os.Getuid() == 0 {
+		t.Skip("macOS, not as root")
+	}
+	t.Setenv("METERM_RUNTIME_DIR", "")
+	t.Setenv("HOME", "/") // owned by someone else, as a user's home is to root
+	if got, want := Dir(), filepath.Join(os.TempDir(), "meterm-"+strconv.Itoa(os.Getuid())); got != want {
+		t.Errorf("got %s, want %s", got, want)
+	}
+}
+
+// Caches get purged while a tunnel runs for months.
+func TestSaveRecreatesAPurgedDirectory(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "run")
+	t.Setenv("METERM_RUNTIME_DIR", dir)
+	r := Open()
+	defer r.Close()
+	h := r.Add(KindTunnel, "box", "web")
+	if err := os.RemoveAll(dir); err != nil {
+		t.Fatal(err)
+	}
+	h.Set(Connected, "")
+	rows, _, err := List()
+	if err != nil || len(rows) != 1 || rows[0].State != Connected {
+		t.Errorf("rows %+v, %v", rows, err)
+	}
+	if st, err := os.Stat(dir); err != nil || st.Mode().Perm() != 0o700 {
+		t.Errorf("%v %v", st, err)
+	}
+}

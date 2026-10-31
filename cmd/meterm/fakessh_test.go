@@ -16,7 +16,19 @@ import (
 // than a script, so it runs on Windows too.
 const fakeSSHEnv = "METERM_TEST_FAKE_SSH"
 
+// runTunnelUpEnv makes the test binary act as `meterm tunnel up`, with the real exit.
+const runTunnelUpEnv = "METERM_TEST_TUNNEL_UP"
+
 func TestMain(m *testing.M) {
+	if args := os.Getenv(runTunnelUpEnv); args != "" {
+		c := newTunnelUpCmd()
+		c.SetArgs(strings.Split(args, "\x1f"))
+		c.SilenceUsage, c.SilenceErrors = true, true
+		if err := c.Execute(); err != nil {
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
 	if runs := os.Getenv(fakeSSHEnv); runs != "" {
 		f, err := os.OpenFile(runs, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
 		if err != nil {

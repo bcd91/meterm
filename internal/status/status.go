@@ -85,7 +85,7 @@ func Dir() string {
 		return d
 	}
 	if runtime.GOOS == "darwin" {
-		if d, err := os.UserCacheDir(); err == nil {
+		if d, err := os.UserCacheDir(); err == nil && homeIsMine() {
 			return filepath.Join(d, "meterm", "run")
 		}
 		return filepath.Join(os.TempDir(), "meterm-"+strconv.Itoa(os.Getuid()))
@@ -99,8 +99,16 @@ func Dir() string {
 	return filepath.Join(os.TempDir(), "meterm-"+strconv.Itoa(os.Getuid()))
 }
 
-// EnsureDir is ensureDir, for other private directories of the same kind.
-func EnsureDir(dir string) error { return ensureDir(dir) }
+// homeIsMine is false under sudo with HOME kept: state files of root's in that user's
+// Caches would be in the way of that user's own, and they'd never be seen by status.
+func homeIsMine() bool {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return false
+	}
+	st, err := os.Stat(home)
+	return err == nil && ownedByMe(st)
+}
 
 // ensureDir makes dir, and refuses one that someone else could have prepared:
 // under a shared /tmp, the name alone proves nothing.
@@ -188,6 +196,10 @@ func (r *Registry) save() {
 		return
 	}
 	f, err := os.CreateTemp(r.dir, tempPrefix+"*")
+	if errors.Is(err, os.ErrNotExist) && ensureDir(r.dir) == nil {
+		// Caches get purged, and this process may run for months.
+		f, err = os.CreateTemp(r.dir, tempPrefix+"*")
+	}
 	if err != nil {
 		return
 	}

@@ -74,7 +74,7 @@ func TestTunnelEnableAndDisable(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(unitDir, unit)); !os.IsNotExist(err) {
 		t.Errorf("unit still there: %v", err)
 	}
-	if got := strings.Join(*calls, "; "); got != "disable --now "+unit+"; daemon-reload" {
+	if got := strings.Join(*calls, "; "); got != "disable --now "+unit+"; reset-failed "+unit+"; daemon-reload" {
 		t.Errorf("systemctl: %s", got)
 	}
 }

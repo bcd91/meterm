@@ -292,9 +292,25 @@ func TestFreshTunnelArgsFollowsTheSavedHost(t *testing.T) {
 		t.Errorf("removed tunnel: %v", err)
 	}
 
-	save(func(c *config.Config) { c.Remove("web") })
-	if _, err := freshTunnelArgs(cfg, s); err == nil || !strings.Contains(err.Error(), "isn't a saved host") {
+	var verdict tunnelVerdict
+	if _, err := freshTunnelArgs(cfg, s); !errors.As(err, &verdict) {
+		t.Errorf("a removed tunnel is a decision: %v", err)
+	}
+
+	save(func(c *config.Config) { c.Remove("web"); c.Upsert(config.Host{Name: "other", Address: "192.0.2.2"}) })
+	_, err = freshTunnelArgs(cfg, s)
+	if err == nil || !strings.Contains(err.Error(), "isn't a saved host") {
 		t.Errorf("removed host: %v", err)
+	}
+	if !errors.As(err, &verdict) {
+		t.Errorf("a removed host is a decision: %v", err)
+	}
+
+	// Nothing in the file at all says nothing about this host, so it isn't for good.
+	save(func(c *config.Config) { c.Remove("other") })
+	_, err = freshTunnelArgs(cfg, s)
+	if err == nil || errors.As(err, &verdict) {
+		t.Errorf("an empty file: %v", err)
 	}
 }
 

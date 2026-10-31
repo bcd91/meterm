@@ -36,8 +36,9 @@ func newStatusCmd() *cobra.Command {
 		Short: "Show the sessions and tunnels meterm is holding open right now",
 		Long: "Lists what running `meterm dev` and `meterm tunnel up` processes hold open:\n" +
 			"which host, which route, and whether it's connected, connecting, reconnecting\n" +
-			"or failing. On macOS it also shows a tunnel from `tunnel enable` that has stopped.\n" +
-			"It reads local files only and never touches the network.\n\n" +
+			"or failing. On macOS it also shows a tunnel from `tunnel enable` that isn't holding\n" +
+			"anything, as launchd sees it. It stays on this machine and never touches the\n" +
+			"network.\n\n" +
 			"--format json is for status bars and scripts. With --watch it prints one line\n" +
 			"of JSON at the start and one for every change.",
 		Args: cobra.NoArgs,
@@ -78,6 +79,12 @@ func readStatus() (statusReport, error) {
 	rows = serviceRows(rows)
 	if rows == nil {
 		rows = []status.Row{}
+	}
+	// Here, for both formats: a status bar shows the JSON's strings as they come.
+	for i := range rows {
+		e := &rows[i].Entry
+		e.Host, e.Kind, e.Name = termsafe.Text(e.Host), termsafe.Text(e.Kind), termsafe.Text(e.Name)
+		e.State, e.Route, e.Detail = termsafe.Text(e.State), termsafe.Text(e.Route), termsafe.Text(e.Detail)
 	}
 	return statusReport{Schema: status.SchemaVersion, Entries: rows, Skipped: skipped}, nil
 }

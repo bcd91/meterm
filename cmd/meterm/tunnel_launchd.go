@@ -121,6 +121,16 @@ func (launchdService) enable(spec, exe, config string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	// Everything that can be found out before a working job is touched.
+	domain := launchdDomain()
+	if out, err := launchctl("print", domain); err != nil {
+		return "", fmt.Errorf("%w; nothing was changed", launchctlError("print "+domain, out, err))
+	}
+	target := domain + "/" + label
+	before, _, err := launchdInspect(target)
+	if err != nil {
+		return "", fmt.Errorf("%w; nothing was changed", err)
+	}
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return "", err
 	}
@@ -133,25 +143,77 @@ func (launchdService) enable(spec, exe, config string) (string, error) {
 		return "", err
 	}
 	f.Close()
+
 	path := filepath.Join(dir, label+".plist")
+	old, err := os.ReadFile(path)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return "", err
+	}
+	hadFile := err == nil
+	loaded := before == jobLoaded
+	if loaded && hadFile && string(old) == plist {
+		// Already this job. Starting one that's running does nothing, so a tunnel
+		// that's up isn't dropped, and one that gave up gets another go.
+		if out, err := launchctl("kickstart", target); err != nil {
+			return "", fmt.Errorf("%w; the job stays loaded as it was", launchctlError("kickstart", out, err))
+		}
+		warnLaunchdAgent()
+		return label, nil
+	}
 	if err := writeUnit(path, plist); err != nil {
 		return "", err
 	}
-	target := launchdDomain() + "/" + label
-	if launchdLoaded(target) {
-		// Enabled before: start over, from the file as it is now.
-		_ = launchdBootout(target)
+	// Whatever goes wrong from here puts back what was there, as a job file left behind
+	// would start at the next login although this said it failed.
+	restore := func(why error) error {
+		what := "nothing is enabled"
+		var problems []string
+		if st, _, ierr := launchdInspect(target); ierr != nil || st == jobLoaded {
+			if err := launchdBootout(target); err != nil {
+				problems = append(problems, err.Error())
+			}
+		}
+		if hadFile {
+			what = "the job file is as it was"
+			if err := writeUnit(path, string(old)); err != nil {
+				problems = append(problems, err.Error())
+			}
+			if loaded {
+				what = "the previous job is back"
+				if err := launchctlTries("bootstrap", domain, path); err != nil {
+					problems = append(problems, err.Error())
+				}
+			}
+		} else if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			problems = append(problems, err.Error())
+		}
+		if len(problems) > 0 {
+			return fmt.Errorf("%w; and putting things back failed too, so check %s: %s", why, path, strings.Join(problems, "; "))
+		}
+		return fmt.Errorf("%w; %s", why, what)
 	}
-	if err := launchctlTries("bootstrap", launchdDomain(), path); err != nil {
-		return "", err
+	if loaded {
+		if err := launchdBootout(target); err != nil {
+			return "", restore(err)
+		}
+	}
+	if err := launchctlTries("bootstrap", domain, path); err != nil {
+		return "", restore(err)
 	}
 	if out, err := launchctl("kickstart", target); err != nil {
-		return "", launchctlError("kickstart", out, err)
+		// RunAtLoad may have started it already, so only the job's state can say.
+		if st, info, ierr := launchdInspect(target); ierr == nil && st == jobLoaded && info.running {
+			fmt.Fprintf(os.Stderr, "meterm: warning: %v; the job is running anyway\n", launchctlError("kickstart", out, err))
+		} else {
+			return "", restore(launchctlError("kickstart", out, err))
+		}
 	}
 	warnLaunchdAgent()
 	return label, nil
 }
 
+// disable goes by the label, so a job whose file has been deleted can still be stopped.
+// It says Disabled only if launchd said the job is gone.
 func (launchdService) disable(spec string) error {
 	dir, err := launchdAgentsDir()
 	if err != nil {
@@ -159,21 +221,83 @@ func (launchdService) disable(spec string) error {
 	}
 	label := launchdLabel(spec)
 	path := filepath.Join(dir, label+".plist")
-	if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
+	_, statErr := os.Stat(path)
+	target := launchdDomain() + "/" + label
+	st, _, err := launchdInspect(target)
+	if err != nil {
+		return fmt.Errorf("can't tell whether %s is running, so it's left as it is: %w", termsafe.Text(spec), err)
+	}
+	if st != jobLoaded && errors.Is(statErr, os.ErrNotExist) {
 		return fmt.Errorf("%s isn't enabled (no %s)", termsafe.Text(spec), path)
 	}
-	target := launchdDomain() + "/" + label
-	if launchdLoaded(target) {
+	if st == jobLoaded {
 		if err := launchdBootout(target); err != nil {
 			return err
 		}
 	}
-	return os.Remove(path)
+	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return nil
 }
 
-func launchdLoaded(target string) bool {
-	_, err := launchctl("print", target)
-	return err == nil
+type jobState int
+
+const (
+	jobNotLoaded jobState = iota
+	jobLoaded
+)
+
+// launchctlNoService is launchctl print's exit code for a job that isn't there. Any
+// other failure, such as 112 for a domain that isn't there, says nothing about the job.
+const launchctlNoService = 113
+
+// launchdJob is what launchctl print says of a loaded job.
+type launchdJob struct {
+	running  bool
+	pid      int
+	state    string
+	lastExit string
+}
+
+// launchdInspect tells a job that isn't loaded apart from a launchctl that couldn't say,
+// which comes back as an error.
+func launchdInspect(target string) (jobState, launchdJob, error) {
+	out, err := launchctl("print", target)
+	if err != nil {
+		var coded interface{ ExitCode() int }
+		if errors.As(err, &coded) && coded.ExitCode() == launchctlNoService {
+			return jobNotLoaded, launchdJob{}, nil
+		}
+		return jobNotLoaded, launchdJob{}, launchctlError("print", out, err)
+	}
+	return jobLoaded, parseLaunchdJob(out), nil
+}
+
+// parseLaunchdJob reads the job's own lines of launchctl print, which come before any
+// nested block and are indented by one tab. Its format isn't documented, so what isn't
+// recognised stays empty, and shows as a job that isn't known to be running.
+func parseLaunchdJob(out string) launchdJob {
+	var j launchdJob
+	for _, line := range strings.Split(out, "\n") {
+		if !strings.HasPrefix(line, "\t") || strings.HasPrefix(line, "\t\t") {
+			continue
+		}
+		key, val, ok := strings.Cut(strings.TrimSpace(line), " = ")
+		if !ok {
+			continue
+		}
+		switch key {
+		case "state":
+			j.state = val
+			j.running = val == "running"
+		case "pid":
+			j.pid, _ = strconv.Atoi(val)
+		case "last exit code":
+			j.lastExit = val
+		}
+	}
+	return j
 }
 
 // launchdBootout stops the job. launchctl can say "Operation now in progress" on
@@ -182,10 +306,13 @@ func launchdBootout(target string) error {
 	var last error
 	for try := 0; try < 3; try++ {
 		out, err := launchctl("bootout", target)
-		if err == nil || !launchdLoaded(target) {
+		if err == nil {
 			return nil
 		}
 		last = launchctlError("bootout", out, err)
+		if st, _, ierr := launchdInspect(target); ierr == nil && st == jobNotLoaded {
+			return nil
+		}
 		time.Sleep(launchctlRetryDelay)
 	}
 	return last
@@ -230,8 +357,8 @@ func warnLaunchdAgent() {
 
 // renderLaunchAgent is the job for spec. KeepAlive brings it back unless it exited
 // with 0, and launchd has no list of exit codes to stay away from as systemd has, so
-// the job is told to give up with 0 (see tunnelUp's --gave-up-exit). That's what
-// keeps it from restarting forever into a tunnel that's gone. RunAtLoad brings it
+// the job is told to give up with 0 (see tunnelUp's --gave-up-exit, and tunnelVerdict for
+// what counts). That's what keeps it from restarting forever into a tunnel that's gone. RunAtLoad brings it
 // back at each login. Everything variable goes through plistString, and the option
 // parser stops at --, so no name can become anything else.
 func renderLaunchAgent(label, exe, config, spec, logPath string, env map[string]string) (string, error) {
@@ -362,8 +489,8 @@ func plistStrings(data []byte, key string) []string {
 
 // launchdEnabled is every tunnel enabled here: its spec, and the file to read about it.
 type enabledService struct {
-	spec, log string
-	since     time.Time
+	spec, log, exe, target string
+	since                  time.Time
 }
 
 func launchdEnabled() []enabledService {
@@ -397,7 +524,8 @@ func launchdEnabled() []enabledService {
 		if len(argv) < 2 || argv[len(argv)-2] != "--" {
 			continue
 		}
-		s := enabledService{spec: argv[len(argv)-1], log: filepath.Join(logDir, strings.TrimSuffix(name, ".plist")+".log"), since: info.ModTime()}
+		label := strings.TrimSuffix(name, ".plist")
+		s := enabledService{spec: argv[len(argv)-1], exe: argv[0], target: launchdDomain() + "/" + label, log: filepath.Join(logDir, label+".log"), since: info.ModTime()}
 		if st, err := os.Stat(s.log); err == nil {
 			s.since = st.ModTime()
 		}
@@ -414,12 +542,18 @@ var enabledServices = func() []enabledService {
 	return nil
 }
 
-// stoppedStatus is the state of a tunnel that's enabled with nothing holding it: it
-// gave up, or launchd is about to bring it back. On Linux systemctl says so.
-const stoppedStatus = "stopped"
+// States of a tunnel that's enabled with no state file, as launchd sees it. Running is
+// a job whose file has gone, which Caches can do; stopped is one that isn't running, and
+// unknown means launchctl couldn't say.
+const (
+	runningStatus = "running"
+	stoppedStatus = "stopped"
+	unknownStatus = "unknown"
+)
 
-// serviceRows adds the tunnels that are enabled and not running. It's what makes a
-// tunnel that gave up show at all, as a process that has ended leaves no state file.
+// serviceRows adds the tunnels that are enabled and have no state file. That's what
+// makes one that gave up show at all, as a process that has ended leaves none. A missing
+// file proves nothing either way, so launchd is what's asked.
 func serviceRows(rows []status.Row) []status.Row {
 	for _, s := range enabledServices() {
 		hostPart, name, ok := strings.Cut(s.spec, "/")
@@ -435,10 +569,34 @@ func serviceRows(rows []status.Row) []status.Row {
 		}) {
 			continue
 		}
-		rows = append(rows, status.Row{Entry: status.Entry{
-			Kind: status.KindTunnel, Host: termsafe.Text(host), Name: termsafe.Text(name), State: stoppedStatus,
-			Detail: "enabled, not running; see " + termsafe.Text(s.log), Since: s.since.UTC(),
+		state, pid, detail := launchdRowState(s)
+		rows = append(rows, status.Row{PID: pid, Entry: status.Entry{
+			Kind: status.KindTunnel, Host: termsafe.Text(host), Name: termsafe.Text(name), State: state,
+			Detail: termsafe.Text(detail), Since: s.since.UTC(),
 		}})
 	}
 	return rows
+}
+
+func launchdRowState(s enabledService) (state string, pid int, detail string) {
+	see := "; see " + s.log
+	st, job, err := launchdInspect(s.target)
+	switch {
+	case err != nil:
+		return unknownStatus, 0, "launchctl couldn't say how it is" + see
+	case st == jobNotLoaded:
+		return stoppedStatus, 0, "enabled, not loaded; it starts at the next login or `tunnel enable`" + see
+	case job.running:
+		return runningStatus, job.pid, "running, with no state to read yet" + see
+	}
+	if _, err := os.Stat(s.exe); err != nil {
+		return stoppedStatus, 0, "launchd can't start it: " + s.exe + " isn't there"
+	}
+	if strings.HasPrefix(job.lastExit, "78") {
+		return stoppedStatus, 0, "launchd can't start it (last exit " + job.lastExit + "); is " + s.exe + " still runnable?"
+	}
+	if job.state == "spawn scheduled" {
+		return stoppedStatus, 0, "failing, launchd tries again soon (last exit " + job.lastExit + ")" + see
+	}
+	return stoppedStatus, 0, "not running, and it won't restart by itself" + see
 }

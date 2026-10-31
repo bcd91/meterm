@@ -63,7 +63,11 @@ KbdInteractiveAuthentication no
 UsePAM no
 StrictModes no
 PidFile $W/sshd.pid
+Banner $W/banner
 CONF
+# What a hostile server can say before authentication: something ssh would read as a
+# failure that can't pass, and an escape sequence for whoever cats the log.
+printf 'Unable to negotiate with you\n\033]52;c;aGk=\007\n' >"$W/banner"
 /usr/sbin/sshd -D -f "$W/sshd_config" -E "$W/sshd.log" &
 SSHD_PID=$!
 (cd "$W/www" && exec python3 -I -m http.server "$WEB_REMOTE" --bind 127.0.0.1 >/dev/null 2>&1) &
@@ -121,6 +125,7 @@ fi
 [ -n "$(ls "$METERM_ACTIVITY_DIR" 2>/dev/null)" ] || fail "the job's activity went somewhere else"
 
 echo "== a killed meterm comes back"
+wait_for 20 "a state file saying connected" is_state connected
 PID=$(job_pid)
 kill -9 "$PID"
 back() { p=$(job_pid); [ -n "$p" ] && [ "$p" != "$PID" ]; }
@@ -128,7 +133,96 @@ wait_for 50 "launchd to restart it" back
 wait_for 10 "the tunnel to carry traffic again" through
 echo "ok: pid $PID was killed and pid $(job_pid) took over"
 
+echo "== a hostile banner neither stops it nor reaches the log (H3, L8)"
+grep -q 'Unable to negotiate' "$HOME"/Library/Logs/meterm/*.log || fail "the banner wasn't seen, so this proves nothing"
+is_state connected || fail "the banner stopped it"
+if LC_ALL=C grep -q "$(printf '\033')" "$HOME"/Library/Logs/meterm/*.log; then fail "an escape sequence reached the log"; fi
+echo ok
+
+echo "== SIGTERM from outside: it comes back (L7)"
+wait_for 20 "a state file saying connected" is_state connected
+PID=$(job_pid)
+kill -TERM "$PID"
+back() { p=$(job_pid); [ -n "$p" ] && [ "$p" != "$PID" ]; }
+wait_for 50 "launchd to restart it" back
+wait_for 10 "the tunnel to carry traffic" through
+echo "ok: pid $PID got SIGTERM and pid $(job_pid) took over"
+
+echo "== a broken config, across launchd's restarts, then fixed: it comes back (H3)"
+wait_for 20 "a state file saying connected" is_state connected
+PID=$(job_pid)
+printf 'hosts: [ {{{ not yaml' >"$METERM_CONFIG"
+kill -9 "$PID"
+echo "   waiting past launchd's 30 seconds with the file broken"
+sleep 36
+failing() { launchctl print "$TARGET" | grep -q 'last exit code = 1'; }
+wait_for 40 "a failed start" failing
+launchctl print "$TARGET" | grep -q 'last exit code = 0' && fail "it exited 0 on a broken file"
+if through; then fail "traffic with a broken config?"; fi
+"$M" status 2>&1 | grep -q 'stopped' && echo "   status: $("$M" status 2>&1 | tail -1 | cut -c1-110)" || true
+write_hosts with
+wait_for 50 "the tunnel to return once the file is fixed" through
+echo "ok: exit 1 while broken, and back on its own once fixed"
+
+echo "== the same with a file that's empty at login (H3)"
+wait_for 20 "a state file saying connected" is_state connected
+PID=$(job_pid)
+printf 'version: 1\nhosts: []\n' >"$METERM_CONFIG"
+kill -9 "$PID"
+sleep 36
+wait_for 40 "a failed start" failing
+write_hosts with
+wait_for 50 "the tunnel to return" through
+echo ok
+
+echo "== the status directory purged: launchd says it's running (M2)"
+wait_for 20 "a state file saying connected" is_state connected
+PID=$(job_pid)
+mv "$METERM_RUNTIME_DIR" "$METERM_RUNTIME_DIR.gone"
+through || fail "the tunnel should be untouched"
+is_state running || fail "status doesn't say it's running: $("$M" status | tail -1)"
+pkill -9 -P "$PID" ssh
+wait_for 20 "the directory to come back" test -d "$METERM_RUNTIME_DIR"
+wait_for 20 "a state file saying connected" is_state connected
+echo ok
+
+echo "== the binary moved: status says launchd can't start it (L8)"
+wait_for 20 "a state file saying connected" is_state connected
+PID=$(job_pid)
+mv "$M" "$M.moved"
+kill -9 "$PID"
+sleep 3
+"$M.moved" status | grep -q "isn't there" || fail "status: $("$M.moved" status | tail -1)"
+echo "   status: $("$M.moved" status | tail -1 | cut -c1-110)"
+mv "$M.moved" "$M"
+wait_for 50 "the tunnel to return with the binary" through
+echo ok
+
+echo "== a failed re-enable brings the old job back, and a job with its file gone still stops (M3, M4)"
+wait_for 20 "a state file saying connected" is_state connected
+PID=$(job_pid)
+cp "$PLIST" "$W/plist.keep"
+rm -f "$PLIST"
+"$M" tunnel disable "$SPEC" || fail "disable with the file gone"
+gone() { ! launchctl print "$TARGET" >/dev/null 2>&1; }
+wait_for 10 "launchd to let go of the job" gone
+wait_for 10 "the port to close" sh -c "! curl -s --max-time 1 http://127.0.0.1:$WEB_LOCAL/ok.txt"
+"$M" tunnel enable "$SPEC" 2>/dev/null
+wait_for 20 "the tunnel" through
+# Something launchd will refuse, with a job running: a read-only place for the new file
+# can't be used, so this goes through a job file launchd won't take after a changed env.
+wait_for 20 "a state file saying connected" is_state connected
+PID=$(job_pid)
+chmod 500 "$HOME/Library/LaunchAgents"
+rc=0; METERM_TEAM_DIR=$W/team2 "$M" tunnel enable "$SPEC" 2>"$W/enable.err" || rc=$?
+chmod 700 "$HOME/Library/LaunchAgents"
+[ "$rc" != 0 ] || fail "enable should have failed: nowhere to write"
+[ "$(job_pid)" = "$PID" ] || fail "a failed enable disturbed the running job"
+through || fail "a failed enable took the tunnel down"
+echo "ok: $(cut -c1-110 "$W/enable.err")"
+
 echo "== a tunnel that's gone stops for good"
+wait_for 20 "a state file saying connected" is_state connected
 PID=$(job_pid)
 write_hosts without
 pkill -9 -P "$PID" ssh
@@ -147,12 +241,15 @@ write_hosts with
 "$M" tunnel enable "$SPEC"
 wait_for 20 "the tunnel to connect" is_state connected
 wait_for 10 "the tunnel to carry traffic" through
+wait_for 20 "a state file saying connected" is_state connected
+PID=$(job_pid)
+"$M" tunnel enable "$SPEC" 2>/dev/null
+[ "$(job_pid)" = "$PID" ] || fail "enabling what's already enabled dropped the tunnel"
 echo "ok"
 
 echo "== disable"
 "$M" tunnel disable "$SPEC"
 [ ! -e "$PLIST" ] || fail "the job file stayed"
-gone() { ! launchctl print "$TARGET" >/dev/null 2>&1; }
 wait_for 10 "launchd to let go of the job" gone
 wait_for 10 "the port to close" sh -c "! curl -s --max-time 1 http://127.0.0.1:$WEB_LOCAL/ok.txt"
 [ "$("$M" status --format json)" = '{"schema":1,"entries":[]}' ] || fail "status isn't empty: $("$M" status --format json)"

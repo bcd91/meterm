@@ -287,7 +287,7 @@ meterm exec --all --timeout 30s --format json -- uptime   # for scripts and CI
 
 On a terminal, escape sequences other than colours are dropped from what hosts send,
 in `exec`, `logs` and `stats` alike, so a line of output can't set your clipboard or
-move your cursor. `--raw` shows them as they are; pipes and `--format json` always get
+move your cursor. Bidi controls go too, so it can't reorder what you read. `--raw` shows them as they are; pipes and `--format json` always get
 what was sent. An interactive session (`connect`, `dev`) isn't filtered, since
 full-screen programs are made of those sequences.
 
@@ -389,8 +389,11 @@ stops it and removes the job.
 The unit runs the binary you enabled it with, by its full path, so a warning appears
 if that isn't `/usr/bin/meterm`. It logs in with no terminal, so the key has to be
 in your agent or have no passphrase; until then it keeps trying. If the tunnel or its
-host has been removed or turned unsafe, it stops and stays stopped, and `systemctl
---user status` shows why. The tunnel's start
+host has been removed or turned unsafe in a host file that can be read, it stops and stays
+stopped, and `systemctl --user status` shows why. Anything else is retried: a host file that
+can't be parsed or has no hosts in it, anything ssh said (a server can say what it likes
+before login), and a SIGTERM from outside. Being stopped with `systemctl --user stop` isn't
+restarted, though it shows as failed. The tunnel's start
 is one entry in the activity log, however long that takes. A tunnel on a production host,
 or whose name or note mentions production, warns you when enabled.
 
@@ -403,6 +406,9 @@ differences:
   success. So a job that has nothing left to hold exits with 0, and stays stopped until
   the next login or `tunnel enable`. The log says why, and `meterm status` lists it as
   `stopped`.
+- `enable` puts back what was there if it fails: a new job file is removed, or the previous
+  job returns. Enabling what's already enabled doesn't drop the tunnel. `disable` works with
+  the job file gone, and won't say Disabled unless launchd says so.
 - It runs the binary by the path you started it with and not through symlinks, so
   Homebrew's `/opt/homebrew/bin/meterm` keeps working through an upgrade. A binary in a
   temp directory gets a warning.
@@ -416,7 +422,8 @@ differences:
   as a systemd user unit does without lingering. With nobody logged in at the screen,
   `enable` fails. macOS may show a "background item added" notice, and the job can be
   switched off under Login Items in System Settings, which `enable` then reports.
-- The log file isn't rotated. A tunnel failing for months adds some tens of megabytes.
+- The log file isn't rotated, and meterm won't: a tunnel failing for months adds some tens of
+  megabytes, and it's safe to empty. What ssh prints goes in with escape sequences removed.
 
 ## Routes: more than one way in
 
@@ -727,7 +734,11 @@ set, or a directory of your own under the temp directory without either) and rem
 it when it ends. On macOS it's `~/Library/Caches/meterm/run` whatever those say, so a
 tunnel started by launchd and a `status` typed in a terminal always find each other. A
 process killed outright is dropped by the next `meterm status`. On macOS a tunnel from
-`tunnel enable` that isn't running shows too, in the state `stopped`, with `pid` 0.
+`tunnel enable` with no state file shows too, as launchd sees it: `running` (with its pid; the
+file was purged and comes back at the next change), `stopped`, saying why if it knows, such as a
+binary that has moved, or `unknown` if launchctl couldn't say. Under `sudo` with `HOME` kept,
+the directory is one of root's own under the temp directory, not the user's. All the strings
+in both formats have control, bidi and invisible characters replaced.
 Tunnels and sessions learn they got in through ssh's `LocalCommand`, so one set in your
 own ssh config is replaced while they run.
 
@@ -745,7 +756,14 @@ It runs one fixed, read-only command, `claude agents --json`, and looks for `cla
 `~/.local/bin` and the other usual places too, since a non-login ssh often hasn't got them
 on `PATH`. Nothing you type or that's saved about a host goes into that command. You have to
 say which hosts; with none it's an error, and there's no `--all`. A production host is asked
-only when you name it: picked up by `--tag` or `--group`, it's listed as refused.
+only when you name it: picked up by `--tag` or `--group`, it's listed as refused. The same goes
+for a host reached through production, by any of its routes, whether a hop is a saved name,
+`user@name` or just a production host's address.
+
+A host's `extra_args` have to pass an allowlist, or that host is reported as an error and
+no ssh runs: `-p`, `-i`, `-l`, a few plain flags, and `-o` with connection settings such as
+`Port`, `User`, `IdentityFile` or `ConnectTimeout`. A bare word in there would become ssh's
+destination, and `-o ProxyCommand`, `-A` or `-M` would make this more than one fixed command.
 
 ```json
 {"schema":1,"hosts":[{"host":"t480","reachable":true,"error":"","agents":[
@@ -761,8 +779,8 @@ only when you name it: picked up by `--tag` or `--group`, it's listed as refused
   quotes the host. When it's set, `agents` is `null`, so a host that can't say doesn't read
   as a host with no agents. That covers no connection, a refused key, a timeout, no `claude`,
   output that isn't what's expected, and more than 1 MiB of it.
-- Every string has control, C1, bidi and format characters replaced by U+FFFD, in both
-  formats, and is cut at 1024 characters.
+- Every string has control, C1, bidi, format and other invisible characters replaced by
+  U+FFFD, in both formats, and is cut at 1024 characters.
 
 | Exit code | Meaning | stdout |
 |---|---|---|
@@ -773,16 +791,19 @@ only when you name it: picked up by `--tag` or `--group`, it's listed as refused
 **It isn't in the activity log.** That log is tamper-evident and shared with the team, so
 nothing can be taken out later, and a status bar asking every 30 seconds would bury
 everything else in it. So `agents` writes no activity entry and no history, and doesn't
-start a team sync. What shows instead is on each host:
-sshd logs the login there. There's nothing about it in meterm's own files, and
-`meterm exec` remains the command that's recorded.
+start a team sync. What shows instead is on each host: every look is a login of its own,
+which sshd logs. Sharing a connection between looks would have hidden those, and let a
+revoked key keep working, so none is shared, on any host. `meterm exec` remains the command
+that's recorded.
 
-Logins are `BatchMode`, so it can't stop to ask for anything. Between polls one login is
-reused through a short-lived `ControlMaster` that ends 60 seconds after the last look, set
-on the command line for that run only and kept in a private directory under `$TMPDIR` or
-`/tmp` at a path short enough for macOS's 104 bytes. Production hosts, and hosts reached
-through one, get a new login every time. `meterm dev` and `tunnel up` stay off it, with
-`ControlPath=none` as always. `$XDG_RUNTIME_DIR` is tried first where it's set.
+A look leaves nothing on this machine. It doesn't remember which route worked or carry a
+host key to a route's address as other commands do, and a host key that isn't trusted yet
+is that host's error rather than something to accept: run `meterm connect` once to trust
+it. `--timeout` covers picking a route as well as the login. For the length of the run
+there's one file in a private temp directory, the ssh config behind `-F` that hands the same
+options (`BatchMode`, strict host keys, no forwarding, no shared connection) to jump hops,
+which get none of a command line's `-o`. It includes your own ssh config after them, so
+`ProxyCommand` or `IdentityFile` there still apply: that file is yours to trust.
 
 ## Status and history
 
