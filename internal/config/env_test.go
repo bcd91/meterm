@@ -142,7 +142,7 @@ func TestTouchesProduction(t *testing.T) {
 	c := &Config{
 		Groups: map[string]Group{"via": {ProxyJump: "live"}, "prod": {Env: EnvProduction}},
 		Hosts: []Host{
-			{Name: "live", Address: "10.0.0.1", Env: EnvProduction, Port: 2222, Routes: []Route{{Name: "pub", Address: "203.0.113.5"}}},
+			{Name: "live", Address: "10.0.0.1", Env: EnvProduction, Port: 2222, Routes: []Route{{Name: "pub", Address: "203.0.113.5"}, {Name: "v6", Address: "2001:db8::1"}, {Name: "dns", Address: "prod.example.com"}}},
 			{Name: "ok", Address: "10.0.0.9"},
 		},
 	}
@@ -150,25 +150,58 @@ func TestTouchesProduction(t *testing.T) {
 		h    Host
 		want bool
 	}{
-		"plain":            {Host{Name: "a", Address: "10.0.0.2"}, false},
-		"through ok":       {Host{Name: "a", Address: "10.0.0.2", ProxyJump: "ok"}, false},
-		"raw elsewhere":    {Host{Name: "a", Address: "10.0.0.2", ProxyJump: "u@198.51.100.1:22"}, false},
-		"other port":       {Host{Name: "a", Address: "10.0.0.2", ProxyJump: "10.0.0.1:22"}, false},
-		"own env":          {Host{Name: "a", Address: "10.0.0.2", Env: EnvProduction}, true},
-		"group env":        {Host{Name: "a", Address: "10.0.0.2", Group: "prod"}, true},
-		"group jump":       {Host{Name: "a", Address: "10.0.0.2", Group: "via"}, true},
-		"name":             {Host{Name: "a", Address: "10.0.0.2", ProxyJump: "live"}, true},
-		"user@name":        {Host{Name: "a", Address: "10.0.0.2", ProxyJump: "root@live"}, true},
-		"name:port":        {Host{Name: "a", Address: "10.0.0.2", ProxyJump: "live:22"}, true},
-		"address":          {Host{Name: "a", Address: "10.0.0.2", ProxyJump: "10.0.0.1"}, true},
-		"same port":        {Host{Name: "a", Address: "10.0.0.2", ProxyJump: "10.0.0.1:2222"}, true},
-		"user@address":     {Host{Name: "a", Address: "10.0.0.2", ProxyJump: "u@10.0.0.1"}, true},
-		"its route's addr": {Host{Name: "a", Address: "10.0.0.2", ProxyJump: "203.0.113.5"}, true},
-		"second hop":       {Host{Name: "a", Address: "10.0.0.2", ProxyJump: "ok, live"}, true},
-		"saved route":      {Host{Name: "a", Address: "10.0.0.2", Routes: []Route{{Name: "r", ProxyJump: "live"}}}, true},
-		"route's address":  {Host{Name: "a", Address: "10.0.0.2", Routes: []Route{{Name: "r", Address: "10.0.0.1"}}}, true},
-		"same address":     {Host{Name: "a", Address: "10.0.0.1"}, true},
-		"upper case":       {Host{Name: "a", Address: "LIVE.example", ProxyJump: "x"}, false},
+		"plain":                   {Host{Name: "a", Address: "10.0.0.2"}, false},
+		"through ok":              {Host{Name: "a", Address: "10.0.0.2", ProxyJump: "ok"}, false},
+		"raw elsewhere":           {Host{Name: "a", Address: "10.0.0.2", ProxyJump: "u@198.51.100.1:22"}, false},
+		"own env":                 {Host{Name: "a", Address: "10.0.0.2", Env: EnvProduction}, true},
+		"group env":               {Host{Name: "a", Address: "10.0.0.2", Group: "prod"}, true},
+		"group jump":              {Host{Name: "a", Address: "10.0.0.2", Group: "via"}, true},
+		"name":                    {Host{Name: "a", Address: "10.0.0.2", ProxyJump: "live"}, true},
+		"user@name":               {Host{Name: "a", Address: "10.0.0.2", ProxyJump: "root@live"}, true},
+		"name:port":               {Host{Name: "a", Address: "10.0.0.2", ProxyJump: "live:22"}, true},
+		"address":                 {Host{Name: "a", Address: "10.0.0.2", ProxyJump: "10.0.0.1"}, true},
+		"same port":               {Host{Name: "a", Address: "10.0.0.2", ProxyJump: "10.0.0.1:2222"}, true},
+		"other port":              {Host{Name: "a", Address: "10.0.0.2", ProxyJump: "10.0.0.1:22"}, true},
+		"own address, other port": {Host{Name: "a", Address: "10.0.0.1", Port: 22}, true},
+		"ssh://name":              {Host{Name: "a", Address: "10.0.0.2", ProxyJump: "ssh://live"}, true},
+		"ssh://name:port":         {Host{Name: "a", Address: "10.0.0.2", ProxyJump: "ssh://live:22"}, true},
+		"ssh://user@name":         {Host{Name: "a", Address: "10.0.0.2", ProxyJump: "ssh://u@live:22"}, true},
+		"ssh://addr/":             {Host{Name: "a", Address: "10.0.0.2", ProxyJump: "ssh://10.0.0.1/"}, true},
+		"SSH:// isn't read":       {Host{Name: "a", Address: "10.0.0.2", ProxyJump: "SSH://198.51.100.1"}, true},
+		"ssh://[v6]:port":         {Host{Name: "a", Address: "10.0.0.2", ProxyJump: "ssh://[2001:DB8:0::1]:22"}, true},
+		"ssh:// elsewhere":        {Host{Name: "a", Address: "10.0.0.2", ProxyJump: "ssh://u@198.51.100.1:22"}, false},
+		"name in upper":           {Host{Name: "a", Address: "10.0.0.2", ProxyJump: "LIVE"}, true},
+		"name, dot":               {Host{Name: "a", Address: "10.0.0.2", ProxyJump: "live."}, true},
+		"hostname case":           {Host{Name: "a", Address: "10.0.0.2", ProxyJump: "PROD.Example.Com"}, true},
+		"hostname dot":            {Host{Name: "a", Address: "PROD.example.com."}, true},
+		"v6 spelled out":          {Host{Name: "a", Address: "10.0.0.2", ProxyJump: "[2001:0db8:0000::0001]"}, true},
+		"v6 bare":                 {Host{Name: "a", Address: "10.0.0.2", ProxyJump: "2001:db8::1"}, true},
+		"v6 own, brackets":        {Host{Name: "a", Address: "[2001:DB8::1]"}, true},
+		"v4 as mapped v6":         {Host{Name: "a", Address: "10.0.0.2", ProxyJump: "[::ffff:10.0.0.1]"}, true},
+		"other v6":                {Host{Name: "a", Address: "10.0.0.2", ProxyJump: "[2001:db8::2]"}, false},
+		"short v4 hop":            {Host{Name: "a", Address: "10.0.0.2", ProxyJump: "127.1"}, true},
+		"octal v4 hop":            {Host{Name: "a", Address: "10.0.0.2", ProxyJump: "010.0.0.1"}, true},
+		"hex v4 hop":              {Host{Name: "a", Address: "10.0.0.2", ProxyJump: "0x7f.0.0.1"}, true},
+		"decimal v4 hop":          {Host{Name: "a", Address: "10.0.0.2", ProxyJump: "2130706433"}, true},
+		"short v4 own":            {Host{Name: "a", Address: "127.1"}, true},
+		"zone":                    {Host{Name: "a", Address: "10.0.0.2", ProxyJump: "[fe80::1%en0]"}, true},
+		"other scheme":            {Host{Name: "a", Address: "10.0.0.2", ProxyJump: "http://198.51.100.1"}, true},
+		"uri with path":           {Host{Name: "a", Address: "10.0.0.2", ProxyJump: "ssh://198.51.100.1/x"}, true},
+		"uri %-encoded":           {Host{Name: "a", Address: "10.0.0.2", ProxyJump: "ssh://%6c%69%76%65"}, true},
+		"uri query":               {Host{Name: "a", Address: "10.0.0.2", ProxyJump: "ssh://198.51.100.1?x"}, true},
+		"bad port":                {Host{Name: "a", Address: "10.0.0.2", ProxyJump: "198.51.100.1:x"}, true},
+		"port too big":            {Host{Name: "a", Address: "10.0.0.2", ProxyJump: "198.51.100.1:70000"}, true},
+		"open bracket":            {Host{Name: "a", Address: "10.0.0.2", ProxyJump: "[2001:db8::1"}, true},
+		"bracketed name":          {Host{Name: "a", Address: "10.0.0.2", ProxyJump: "[live]"}, true},
+		"garbage after":           {Host{Name: "a", Address: "10.0.0.2", ProxyJump: "[::1]x"}, true},
+		"empty host":              {Host{Name: "a", Address: "10.0.0.2", ProxyJump: "u@"}, true},
+		"user@address":            {Host{Name: "a", Address: "10.0.0.2", ProxyJump: "u@10.0.0.1"}, true},
+		"its route's addr":        {Host{Name: "a", Address: "10.0.0.2", ProxyJump: "203.0.113.5"}, true},
+		"second hop":              {Host{Name: "a", Address: "10.0.0.2", ProxyJump: "ok, live"}, true},
+		"saved route":             {Host{Name: "a", Address: "10.0.0.2", Routes: []Route{{Name: "r", ProxyJump: "live"}}}, true},
+		"route's address":         {Host{Name: "a", Address: "10.0.0.2", Routes: []Route{{Name: "r", Address: "10.0.0.1"}}}, true},
+		"same address":            {Host{Name: "a", Address: "10.0.0.1"}, true},
+		"upper case":              {Host{Name: "a", Address: "LIVE.example", ProxyJump: "x"}, false},
 	} {
 		if got := c.TouchesProduction(tc.h); got != tc.want {
 			t.Errorf("%s: %v", name, got)
@@ -178,5 +211,33 @@ func TestTouchesProduction(t *testing.T) {
 	loop := &Config{Hosts: []Host{{Name: "a", Address: "1.1.1.1", ProxyJump: "b"}, {Name: "b", Address: "1.1.1.2", ProxyJump: "a"}}}
 	if loop.TouchesProduction(loop.Hosts[0]) {
 		t.Error("loop")
+	}
+}
+
+// A production host at an address that can't be compared could be anyone.
+func TestTouchesProductionUnreadableProductionAddress(t *testing.T) {
+	c := &Config{Hosts: []Host{{Name: "live", Address: "010.0.0.1", Env: EnvProduction}}}
+	if !c.TouchesProduction(Host{Name: "a", Address: "10.0.0.1"}) {
+		t.Error("not refused")
+	}
+}
+
+func TestHopHostAcceptsPlainForms(t *testing.T) {
+	for in, want := range map[string]string{
+		"web":              "web",
+		"u@web":            "web",
+		"web:22":           "web",
+		"u@web:22":         "web",
+		"ssh://web":        "web",
+		"ssh://u@web:22/":  "web",
+		"[::1]:22":         "::1",
+		"::1":              "::1",
+		"ssh://[::1]":      "::1",
+		"10.0.0.1":         "10.0.0.1",
+		"Web.Example.COM.": "Web.Example.COM.",
+	} {
+		if got, ok := hopHost(in); !ok || got != want {
+			t.Errorf("%q: %q, %v", in, got, ok)
+		}
 	}
 }

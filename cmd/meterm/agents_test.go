@@ -204,7 +204,7 @@ hosts:
 - {name: live3, address: 192.0.2.31, env: production, routes: [{name: pub, address: 198.51.100.7}]}
 - {name: dev3, address: 192.0.2.20, proxy_jump: live}
 - {name: ok-jump, address: 192.0.2.21, proxy_jump: dev1, tags: [ok]}
-- {name: ok-port, address: 192.0.2.3, port: 2222, tags: [never]}
+- {name: same-address, address: 192.0.2.3, port: 2222, tags: [never]}
 `
 
 func TestSelectAgentHostsProduction(t *testing.T) {
@@ -307,6 +307,9 @@ func TestHostileLoginAndAddressDontReachSSH(t *testing.T) {
 // What real ssh makes of the arguments: the options that matter hold against everything
 // the allowlist lets through, and against what's in the generated config.
 func TestAgentSSHArgsAsSSHReadsThem(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("agents refuses to run on Windows")
+	}
 	if _, err := exec.LookPath("ssh"); err != nil {
 		t.Skip("no ssh")
 	}
@@ -360,6 +363,9 @@ func TestAgentSSHArgsAsSSHReadsThem(t *testing.T) {
 // The reason for the allowlist, as real ssh shows it: each of these does what the
 // options set before it say shouldn't happen.
 func TestRefusedExtraArgsReallyAreDangerous(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("agents refuses to run on Windows")
+	}
 	if _, err := exec.LookPath("ssh"); err != nil {
 		t.Skip("no ssh")
 	}
@@ -608,5 +614,50 @@ func TestAskAgentsStopped(t *testing.T) {
 	}, time.Second)
 	if got.Reachable || got.Error == "" || got.Agents != nil {
 		t.Errorf("got %+v", got)
+	}
+}
+
+func TestAgentsRefusedOnWindows(t *testing.T) {
+	if err := checkAgentsClient("linux"); err != nil {
+		t.Error(err)
+	}
+	if err := checkAgentsClient("darwin"); err != nil {
+		t.Error(err)
+	}
+	dir := t.TempDir()
+	cfgFile := filepath.Join(dir, "hosts.yaml")
+	if err := os.WriteFile(cfgFile, []byte(agentsHosts), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("METERM_CONFIG", cfgFile)
+	old := agentsGOOS
+	agentsGOOS = "windows"
+	defer func() { agentsGOOS = old }()
+	c := newAgentsCmd()
+	c.SetArgs([]string{"dev1"})
+	c.SilenceUsage, c.SilenceErrors = true, true
+	if err := c.Execute(); err == nil || !strings.Contains(err.Error(), "Windows") {
+		t.Errorf("err = %v", err)
+	}
+}
+
+// A hop in the URI form, through the real selection.
+func TestSelectAgentHostsRefusesURIHop(t *testing.T) {
+	cfg := hostsForAgents(t, agentsHosts+`- {name: via-uri, address: 192.0.2.40, tags: [uri], proxy_jump: "ssh://192.0.2.3"}
+- {name: via-uri2, address: 192.0.2.41, tags: [uri], proxy_jump: "ssh://live"}
+- {name: via-other-port, address: 192.0.2.42, tags: [uri], proxy_jump: "192.0.2.3:2200"}
+- {name: alias-port, address: 192.0.2.3, port: 22, tags: [uri]}
+`)
+	jobs, err := selectAgentHosts(cfg, nil, []string{"uri"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(jobs) != 4 {
+		t.Fatalf("%d jobs", len(jobs))
+	}
+	for _, j := range jobs {
+		if j.refused == "" {
+			t.Errorf("%s wasn't refused", j.label)
+		}
 	}
 }

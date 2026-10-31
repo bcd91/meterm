@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"net"
 	"regexp"
 	"strconv"
 	"strings"
@@ -58,9 +59,11 @@ var prodRE = regexp.MustCompile(`(?i)(^|[^a-z])(prod|production)([^a-z]|$)`)
 func (f Forward) MentionsProduction() bool { return prodRE.MatchString(f.Name + " " + f.Note) }
 
 // TouchesProduction says whether reaching h, by any of its routes, goes to or through
-// a production host. A hop can name a saved host, as user@name or name:port as well,
-// or give the address of one; a host can also have a production host's address under
-// another name. It reads only what's saved.
+// a production host. A hop can name a saved host or give the address of one, in any of
+// the forms ssh reads; a host can also have a production host's address under another
+// name. A port never tells two apart: another port on the same address may be the same
+// machine. It reads only what's saved, resolving no names, and what it can't read counts
+// as production, as ssh or the resolver might read it as just that.
 func (c *Config) TouchesProduction(h Host) bool {
 	return c.touchesProduction(h, map[string]bool{})
 }
@@ -78,7 +81,7 @@ func (c *Config) touchesProduction(h Host, seen map[string]bool) bool {
 		if address == "" {
 			address = h.Address
 		}
-		if c.productionAddress(address, cand.Port) {
+		if c.productionAddress(address) {
 			return true
 		}
 		jump := cand.ProxyJump
@@ -95,50 +98,126 @@ func (c *Config) touchesProduction(h Host, seen map[string]bool) bool {
 }
 
 func (c *Config) hopTouchesProduction(hop string, seen map[string]bool) bool {
-	if saved, i := c.Find(hop); i >= 0 {
+	if saved := c.findFold(hop); saved != nil {
 		return c.touchesProduction(*saved, seen)
 	}
-	host := hop
-	if at := strings.LastIndex(host, "@"); at >= 0 {
-		host = host[at+1:]
+	host, ok := hopHost(hop)
+	if !ok {
+		return true
 	}
-	if saved, i := c.Find(host); i >= 0 {
+	if saved := c.findFold(host); saved != nil {
 		return c.touchesProduction(*saved, seen)
 	}
-	host, port := splitHopPort(host)
-	if saved, i := c.Find(host); i >= 0 {
-		return c.touchesProduction(*saved, seen)
-	}
-	return c.productionAddress(host, port)
+	return c.productionAddress(host)
 }
 
-// splitHopPort takes the port off host:port and [addr]:port, and the brackets off.
-func splitHopPort(s string) (string, int) {
-	host, port := s, ""
-	if strings.HasPrefix(s, "[") {
-		if j := strings.Index(s, "]"); j > 0 {
-			host = s[1:j]
-			port = strings.TrimPrefix(s[j+1:], ":")
+// findFold finds a saved host by name, as ssh's host names go: in any case, and with or
+// without a trailing dot. An exact match comes first, as names can differ only in case.
+func (c *Config) findFold(name string) *Host {
+	if h, i := c.Find(name); i >= 0 {
+		return h
+	}
+	name = strings.TrimSuffix(name, ".")
+	for i := range c.Hosts {
+		if strings.EqualFold(c.Hosts[i].Name, name) {
+			return &c.Hosts[i]
 		}
-	} else if strings.Count(s, ":") == 1 {
-		host, port, _ = strings.Cut(s, ":")
 	}
-	n, _ := strconv.Atoi(port)
-	return host, n
+	return nil
 }
 
-// productionAddress says whether a production host, by any of its routes, is at
-// addr. Ports only tell two apart when both are given: with one missing it could be
-// the same machine, and this errs on the side of it being so.
-func (c *Config) productionAddress(addr string, port int) bool {
-	addr = strings.Trim(addr, "[]")
+// hopHostRE is a host name that means one thing to everyone. Anything else, such as a
+// %-encoded name in a URI, isn't guessed at.
+var hopHostRE = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
+
+// hopHost is the host in a jump hop: [user@]host[:port], the same with [brackets] around
+// an address, or ssh://[user@]host[:port]. ok is false for anything else, a path after
+// a URI or another scheme, SSH:// among them, included.
+func hopHost(hop string) (host string, ok bool) {
+	rest := hop
+	if strings.HasPrefix(hop, "ssh://") {
+		rest = strings.TrimSuffix(hop[len("ssh://"):], "/")
+		if strings.ContainsAny(rest, "/?#%") {
+			return "", false
+		}
+	} else if strings.Contains(rest, "://") {
+		return "", false
+	}
+	if at := strings.LastIndex(rest, "@"); at >= 0 {
+		rest = rest[at+1:]
+	}
+	validPort := func(p string) bool {
+		n, err := strconv.Atoi(p)
+		return err == nil && n >= 1 && n <= 65535 && portRE.MatchString(p)
+	}
+	switch {
+	case strings.HasPrefix(rest, "["):
+		j := strings.Index(rest, "]")
+		if j < 0 {
+			return "", false
+		}
+		host = rest[1:j]
+		if tail := rest[j+1:]; tail != "" && !(strings.HasPrefix(tail, ":") && validPort(tail[1:])) {
+			return "", false
+		}
+		if net.ParseIP(host) == nil {
+			return "", false
+		}
+		return host, true
+	case strings.Count(rest, ":") > 1:
+		if net.ParseIP(rest) == nil { // a bare IPv6 address, or nothing readable
+			return "", false
+		}
+		return rest, true
+	case strings.Contains(rest, ":"):
+		h, p, _ := strings.Cut(rest, ":")
+		if !validPort(p) {
+			return "", false
+		}
+		rest = h
+	}
+	if rest == "" || !hopHostRE.MatchString(rest) {
+		return "", false
+	}
+	return rest, true
+}
+
+// sloppyNumberRE is what could be an IPv4 address to some resolver without being one to
+// net.ParseIP: 127.1, 010.0.0.1 (which inet_aton takes as octal), 0x7f.0.0.1, 2130706433.
+var sloppyNumberRE = regexp.MustCompile(`^(0[xX][0-9a-fA-F]*|[0-9]+)(\.(0[xX][0-9a-fA-F]*|[0-9]+))*\.?$`)
+
+// addressKey is addr in the one spelling that compares: an IP in its canonical form,
+// whatever brackets or IPv6 spelling it came in, and a name in lower case without a
+// trailing dot. ok is false for what can't be compared.
+func addressKey(addr string) (key string, ok bool) {
+	addr = strings.TrimSuffix(strings.TrimPrefix(addr, "["), "]")
+	if ip := net.ParseIP(addr); ip != nil {
+		return ip.String(), true
+	}
+	name := strings.TrimSuffix(addr, ".")
+	if name == "" || sloppyNumberRE.MatchString(addr) || !hopHostRE.MatchString(name) {
+		return "", false
+	}
+	return strings.ToLower(name), true
+}
+
+// productionAddress says whether a production host, by any of its routes, is at addr, or
+// whether that can't be told.
+func (c *Config) productionAddress(addr string) bool {
+	key, ok := addressKey(addr)
+	if !ok {
+		return true
+	}
 	for _, h := range c.Hosts {
 		if !c.IsProduction(h) {
 			continue
 		}
 		for _, cand := range h.Candidates() {
-			if cand.Address != "" && strings.EqualFold(strings.Trim(cand.Address, "[]"), addr) &&
-				(port == 0 || cand.Port == 0 || port == cand.Port) {
+			if cand.Address == "" {
+				continue
+			}
+			prod, ok := addressKey(cand.Address)
+			if !ok || prod == key {
 				return true
 			}
 		}

@@ -69,6 +69,7 @@ hosts:
 - {name: via-live, address: 127.0.0.1, port: $PORT, tags: [j], proxy_jump: live}
 - {name: via-user, address: 127.0.0.1, port: $PORT, tags: [j], proxy_jump: "bcd@live"}
 - {name: via-addr, address: 127.0.0.1, port: $PORT, tags: [j], proxy_jump: "localhost:$PORT"}
+- {name: via-uri, address: 127.0.0.1, port: $PORT, tags: [j], proxy_jump: "ssh://localhost:$PORT"}
 - {name: via-route, address: 127.0.0.1, port: $DEAD, tags: [j], routes: [{name: r, proxy_jump: live}]}
 - {name: hop, address: 127.0.0.1, port: $PORT}
 - {name: via-hop, address: localhost, port: $PORT, proxy_jump: hop}
@@ -92,7 +93,7 @@ run 0 box --format json
 [ "$OUT" = '{"schema":1,"hosts":[{"host":"box","reachable":true,"error":"","agents":[{"cwd":"/src","kind":"interactive","startedAt":1793311202058,"pid":7,"status":"busy","sessionId":"s","name":"n"}]}]}' ] || fail "got $OUT"
 echo ok
 
-echo "== nothing is written, and every look is a login of its own (M1)"
+echo "== nothing is written, and every look is a login of its own"
 [ ! -e "$METERM_ACTIVITY_DIR" ] && [ ! -e "$METERM_HISTORY" ] && [ ! -e "$METERM_TEAM_DIR" ] && [ ! -e "$W/routes.json" ] || fail "something was recorded"
 before=$(logins)
 run 0 box
@@ -102,14 +103,14 @@ pgrep -f "^ssh .*$W/key" >/dev/null && fail "an ssh stayed behind"
 [ -z "$(ls "$TMPDIR")" ] || fail "left in TMPDIR: $(ls "$TMPDIR")"
 echo "ok: two looks, two logins, nothing left running or on disk"
 
-echo "== a revoked key stops working at the next look (M1)"
+echo "== a revoked key stops working at the next look"
 mv "$W/authorized_keys" "$W/authorized_keys.off"
 run 2 box --format json
 python3 -I -c 'import json,sys; h=json.loads(sys.argv[1])["hosts"][0]; assert h["agents"] is None and "refused the key" in h["error"], h' "$OUT" || fail "$OUT"
 mv "$W/authorized_keys.off" "$W/authorized_keys"
 echo ok
 
-echo "== extra_args can't make it something else (H1)"
+echo "== extra_args can't make it something else"
 before=$(logins)
 for h in x-bare x-proxy x-agent x-master; do
   run 2 $h --format json
@@ -121,7 +122,7 @@ done
 run 0 x-ok
 echo ok
 
-echo "== production: named it's asked; by tag it's refused, by any route (H2)"
+echo "== production: named it's asked; by tag it's refused, by any route"
 before=$(logins)
 run 0 live
 [ "$(logins)" = "$((before + 1))" ] || fail "named production wasn't asked"
@@ -139,15 +140,15 @@ run 2 --tag j --format json
 python3 -I -c '
 import json, sys
 hs = json.loads(sys.argv[1])["hosts"]
-assert len(hs) == 4
+assert len(hs) == 5
 for h in hs:
     assert "refused" in h["error"] and h["agents"] is None, h
 ' "$OUT" || fail "got $OUT"
 [ "$(logins)" = "$before" ] || fail "logged in through production on a poll"
 run 0 via-live
-echo "ok: refused by tag through name, user@name, address and saved route; via-live named still works"
+echo "ok: refused by tag through name, user@name, address, ssh:// and saved route; via-live named still works"
 
-echo "== a look writes no state, and an unknown host key is an error (M5)"
+echo "== a look writes no state, and an unknown host key is an error"
 sum=$(shasum "$KNOWN")
 : >"$W/empty_known"
 cp "$KNOWN" "$W/known.keep"; : >"$KNOWN"
@@ -179,7 +180,7 @@ kill "$SILENT_PID" 2>/dev/null || true
 python3 -I -c "import sys; assert $dt < 3, $dt" || fail "--timeout 1s took ${dt}s with routes that never greet"
 echo "ok: no known_hosts or routes.json change; --timeout 1s took ${dt}s through silent routes"
 
-echo "== options reach a jump hop (L2)"
+echo "== options reach a jump hop"
 before=$(logins)
 run 0 via-hop
 [ "$(logins)" = "$((before + 2))" ] || fail "wanted a login for the hop and one for the host"

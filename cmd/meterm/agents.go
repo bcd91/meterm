@@ -13,6 +13,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -84,6 +85,9 @@ func newAgentsCmd() *cobra.Command {
 			if parallel < 1 || parallel > agentsMaxParallel {
 				return fmt.Errorf("-j must be between 1 and %d", agentsMaxParallel)
 			}
+			if err := checkAgentsClient(agentsGOOS); err != nil {
+				return err
+			}
 			if len(args) == 0 && len(tags) == 0 && len(groups) == 0 {
 				return fmt.Errorf("say which hosts: name them, or use --tag or --group; `agents` won't go to every host")
 			}
@@ -104,7 +108,7 @@ func newAgentsCmd() *cobra.Command {
 				return err
 			}
 			// Its ssh processes have no terminal, so Ctrl-C has to reach them from here.
-			ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+			ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
 			defer stop()
 			rep := runAgents(ctx, jobs, sshAgentQuery(sshConfig, timeout), timeout, parallel)
 			removeSSHConfig()
@@ -124,6 +128,20 @@ func newAgentsCmd() *cobra.Command {
 	cmd.Flags().DurationVar(&timeout, "timeout", agentsDefaultTimeout, "give up on a host after this long")
 	cmd.Flags().IntVarP(&parallel, "parallel", "j", agentsDefaultParallel, "maximum hosts asked at once")
 	return cmd
+}
+
+// agentsGOOS is the machine `agents` runs on; tests set it.
+var agentsGOOS = runtime.GOOS
+
+// checkAgentsClient refuses Windows as the machine asking. A look depends on a temp ssh
+// config reaching each jump hop: OpenSSH puts that path unquoted into the command it builds
+// for a hop, and a config's Include lines name Unix paths. Neither is known to hold for
+// Windows' ssh and C:\ paths, and a look that silently lost its options would be worse.
+func checkAgentsClient(goos string) error {
+	if goos == "windows" {
+		return errors.New("`agents` doesn't run on Windows yet, as it can't be sure its ssh options reach jump hops there; run it from Linux or macOS")
+	}
+	return nil
 }
 
 // agentJob is one host to ask. refused holds why not to, if so.
