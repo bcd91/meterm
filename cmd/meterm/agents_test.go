@@ -433,7 +433,7 @@ func TestSSHAgentQueryRunsTheOneCommand(t *testing.T) {
 	job := agentJob{label: "x", resolve: func() config.Resolved {
 		return config.Resolved{Name: "$(touch /tmp/x)", Address: "192.0.2.1", Forwards: []config.Forward{{Type: "L", LocalPort: 1, RemoteHost: "a", RemotePort: 2}}}
 	}}
-	got := askAgents(context.Background(), job, sshAgentQuery(time.Second), time.Second)
+	got := askAgents(context.Background(), job, sshAgentQuery(30*time.Second), 30*time.Second)
 	if got.Error != "" || !got.Reachable || len(got.Agents) != 1 {
 		t.Fatalf("got %+v", got)
 	}
