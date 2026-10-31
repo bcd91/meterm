@@ -36,8 +36,7 @@ import (
 //
 // It deliberately writes no activity entry, unlike `exec`. The activity log is
 // tamper-evident and shared with the team, so nothing can be taken out of it later:
-// a status bar asking every 30 seconds would bury everything else in there, and each
-// entry would tell the whole team what's in this user's working directories. There's
+// a status bar asking every 30 seconds would bury everything else in there. There's
 // also little to record, because the command that runs is one constant that reads
 // and changes nothing (agents.RemoteCommand), with no user data in it. So this also
 // doesn't touch history or team sync. What still shows is the host's own: sshd logs
