@@ -13,11 +13,15 @@ import (
 // would have gone to systemctl. Nothing reaches the real user manager.
 func serviceEnv(t *testing.T) (calls *[]string, unitDir string) {
 	t.Helper()
-	if runtime.GOOS != "linux" {
-		t.Skip("Linux only")
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix only")
 	}
 	dir := t.TempDir()
+	t.Setenv("HOME", dir) // where the OS's config dir is, on macOS
 	t.Setenv("XDG_CONFIG_HOME", dir)
+	oldOS := serviceGOOS
+	serviceGOOS = "linux"
+	t.Cleanup(func() { serviceGOOS = oldOS })
 	t.Setenv("METERM_CONFIG", filepath.Join(dir, "hosts.yaml"))
 	t.Setenv("METERM_ACTIVITY_DIR", filepath.Join(dir, "activity"))
 	t.Setenv("METERM_NO_AUTOSYNC", "1")
@@ -33,7 +37,11 @@ func serviceEnv(t *testing.T) (calls *[]string, unitDir string) {
 		return nil
 	}
 	t.Cleanup(func() { systemctlUser = old })
-	return &got, filepath.Join(dir, "systemd", "user")
+	unitDir, err := userUnitDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &got, unitDir
 }
 
 func TestTunnelEnableAndDisable(t *testing.T) {
@@ -158,6 +166,21 @@ func TestRenderUnitStaysOneSettingPerLine(t *testing.T) {
 	for _, want := range []string{`"/opt/my tools/meterm"`, `"--config" "/home/a b/hosts.yaml"`, "%%h"} {
 		if !strings.Contains(u, want) {
 			t.Errorf("no %q in:\n%s", want, u)
+		}
+	}
+}
+
+// The same list for systemd, whose file format has its own ways to be escaped from.
+func TestRenderUnitHostile(t *testing.T) {
+	for _, spec := range hostileNames {
+		u := renderTunnelUnit("/m", "", spec)
+		for _, l := range strings.Split(u, "\n") {
+			if strings.HasPrefix(l, "ExecStartPost") || strings.HasPrefix(l, "ExecStartPre") {
+				t.Errorf("%q: %q", spec, l)
+			}
+		}
+		if got := serviceUnitName(spec); strings.ContainsAny(got, "/ $`;\"'<>&%") {
+			t.Errorf("%q: %q", spec, got)
 		}
 	}
 }

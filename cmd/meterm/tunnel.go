@@ -37,7 +37,7 @@ func newTunnelCmd() *cobra.Command {
 			"  meterm tunnel add bastion socks -D 1080\n" +
 			"  meterm tunnel up prod-db/pg            # Ctrl-C to close\n" +
 			"  meterm tunnel up prod-db web1 --keep   # every tunnel on both, reconnecting\n" +
-			"  meterm tunnel enable prod-db/pg        # in the background from now on (Linux)",
+			"  meterm tunnel enable prod-db/pg        # in the background from now on (Linux, macOS)",
 	}
 	cmd.AddCommand(newTunnelAddCmd(), newTunnelListCmd(), newTunnelRmCmd(), newTunnelUpCmd(),
 		newTunnelEnableCmd(), newTunnelDisableCmd())
@@ -401,6 +401,7 @@ const tunnelGaveUp = 78
 
 func newTunnelUpCmd() *cobra.Command {
 	var keep, service bool
+	var gaveUpExit int
 	cmd := &cobra.Command{
 		Use:   "up <host>[/<tunnel>]...",
 		Short: "Open saved tunnels until Ctrl-C",
@@ -412,7 +413,7 @@ func newTunnelUpCmd() *cobra.Command {
 			err := runTunnelUp(args, keep, service)
 			if err != nil && service {
 				fmt.Fprintf(os.Stderr, "meterm: %v\n", err)
-				finish(tunnelGaveUp)
+				finish(gaveUpExit)
 			}
 			return err
 		},
@@ -422,6 +423,10 @@ func newTunnelUpCmd() *cobra.Command {
 	// key, wait for it to be unlocked rather than exit and be restarted.
 	cmd.Flags().BoolVar(&service, "service", false, "keep retrying on failures that need a person")
 	_ = cmd.Flags().MarkHidden("service")
+	// launchd can't be told to leave one exit code alone as systemd can, only every
+	// code but 0: see renderLaunchAgent.
+	cmd.Flags().IntVar(&gaveUpExit, "gave-up-exit", tunnelGaveUp, "exit code when --service gives up")
+	_ = cmd.Flags().MarkHidden("gave-up-exit")
 	return cmd
 }
 
