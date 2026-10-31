@@ -337,7 +337,12 @@ func TestSaveRecreatesAPurgedDirectory(t *testing.T) {
 	if err != nil || len(rows) != 1 || rows[0].State != Connected {
 		t.Errorf("rows %+v, %v", rows, err)
 	}
-	if st, err := os.Stat(dir); err != nil || st.Mode().Perm() != 0o700 {
-		t.Errorf("%v %v", st, err)
+	st, err := os.Stat(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Windows has no Unix mode to check: its files report 0777 or 0666.
+	if runtime.GOOS != "windows" && st.Mode().Perm() != 0o700 {
+		t.Errorf("mode %v", st.Mode().Perm())
 	}
 }
