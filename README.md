@@ -16,15 +16,16 @@ mv meterm /usr/local/bin/   # or anywhere on your $PATH
 
 **Pre-built binary** — every `vX.Y.Z` tag publishes macOS/Linux/Windows
 (amd64 + arm64) archives to GitHub Releases via goreleaser
-(`.github/workflows/release.yml`). This repo is private, so grab one with
-the `gh` CLI (needs read access to the repo) instead of a plain download
-link:
+(`.github/workflows/release.yml`). Download one from the
+[releases page](https://github.com/bcd91/meterm/releases), or:
 
 ```sh
-gh release download -R bcd91/meterm --pattern '*darwin_arm64*'   # pick the os_arch that matches your machine
-tar xzf meterm_*.tar.gz        # .zip on Windows instead
-mv meterm /usr/local/bin/
+sh skills/meterm/scripts/install.sh   # latest release, checksum checked, into ~/.local/bin
 ```
+
+**For AI agents** — [`skills/meterm`](skills/meterm/SKILL.md) is a skill that tells
+Claude Code when to use meterm, which commands need the user's approval, and how to
+install it. Copy that folder to `~/.claude/skills/meterm`.
 
 ## Quick start
 
