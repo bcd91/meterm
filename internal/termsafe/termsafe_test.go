@@ -99,3 +99,28 @@ func TestWriteReportsAllConsumed(t *testing.T) {
 		t.Errorf("n=%d err=%v", n, err)
 	}
 }
+
+func TestWriterDropsBidiControlsOnly(t *testing.T) {
+	for in, want := range map[string]string{
+		"a\u202eb\u202ac":    "abc",
+		"a\u2066b\u2069c":    "abc",
+		"a\u2067b\u2068c":    "abc",
+		"क\u200dष \u200cx":   "क\u200dष \u200cx", // joiners are real text
+		"\x1b[31mred\x1b[0m": "\x1b[31mred\x1b[0m",
+	} {
+		if got := String(in); got != want {
+			t.Errorf("%q: got %q, want %q", in, got, want)
+		}
+	}
+	// One byte at a time, as a stream can arrive.
+	var b strings.Builder
+	w := New(&b)
+	for _, c := range []byte("a\u202eb") {
+		if _, err := w.Write([]byte{c}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if b.String() != "ab" {
+		t.Errorf("split across writes: %q", b.String())
+	}
+}

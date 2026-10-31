@@ -17,19 +17,22 @@ import (
 const Replacement = '�'
 
 // unsafeRune is true of C0 and C1 controls, format characters (bidi controls,
-// zero-width ones, tag characters), line and paragraph separators, and
-// noncharacters.
+// zero-width ones, tag characters), line and paragraph separators, noncharacters, and
+// whatever else shows as nothing: the rest of Default_Ignorable_Code_Point (variation
+// selectors, Hangul fillers) and the blank braille pattern.
 func unsafeRune(r rune) bool {
-	return unicode.IsControl(r) || unicode.In(r, unicode.Cf, unicode.Zl, unicode.Zp) ||
-		(r >= 0xFDD0 && r <= 0xFDEF) || r&0xFFFE == 0xFFFE
+	return unicode.IsControl(r) || unicode.In(r, unicode.Cf, unicode.Zl, unicode.Zp,
+		unicode.Other_Default_Ignorable_Code_Point, unicode.Variation_Selector) ||
+		r == 0x2800 || (r >= 0xFDD0 && r <= 0xFDEF) || r&0xFFFE == 0xFFFE
 }
 
 // Text returns s on one line with everything unsafe replaced. Bytes that aren't
 // UTF-8 are replaced too: a raw 0x9B is a CSI to some terminals.
 func Text(s string) string { return clean(s, false) }
 
-// Lines is Text for messages of several lines: only \n survives.
-func Lines(s string) string { return clean(s, true) }
+// Lines is Text for messages of several lines: only \n and \t survive, and \r\n
+// counts as \n. A \r by itself could write over what's on its line, so it doesn't.
+func Lines(s string) string { return clean(strings.ReplaceAll(s, "\r\n", "\n"), true) }
 
 func clean(s string, lines bool) string {
 	var b strings.Builder
@@ -39,8 +42,8 @@ func clean(s string, lines bool) string {
 		switch {
 		case r == utf8.RuneError && n <= 1:
 			b.WriteRune(Replacement)
-		case lines && r == '\n':
-			b.WriteByte('\n')
+		case lines && (r == '\n' || r == '\t'):
+			b.WriteRune(r)
 		case unsafeRune(r):
 			b.WriteRune(Replacement)
 		default:

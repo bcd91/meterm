@@ -35,9 +35,28 @@ func TestText(t *testing.T) {
 	}
 }
 
-func TestLinesKeepsOnlyNewlines(t *testing.T) {
-	if got, want := Lines("a\nb\x1b[0m\r\n"), "a\nb�[0m�\n"; got != want {
-		t.Errorf("got %q, want %q", got, want)
+func TestLinesKeepsOnlyNewlinesAndTabs(t *testing.T) {
+	for in, want := range map[string]string{
+		"a\nb\x1b[0m\r\n": "a\nb\uFFFD[0m\n",
+		"a\tb":            "a\tb",
+		"a\rb":            "a\uFFFDb",
+		"a\r\r\nb":        "a\uFFFD\nb",
+	} {
+		if got := Lines(in); got != want {
+			t.Errorf("%q: got %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestTextDefaultIgnorableAndFillers(t *testing.T) {
+	for _, r := range []rune{0x034F, 0x115F, 0x1160, 0x17B4, 0x17B5, 0x180B, 0x180E, 0x2065, 0x2800, 0x3164,
+		0xFE00, 0xFE0F, 0xFFA0, 0xFFF0, 0xE0000, 0xE0100, 0xE0FFF} {
+		if got := Text("a" + string(r) + "b"); got != "a\uFFFDb" {
+			t.Errorf("U+%04X: %q", r, got)
+		}
+	}
+	if got := Text("日本語 ñ é 한글 ّ"); got != "日本語 ñ é 한글 ّ" {
+		t.Errorf("real text changed: %q", got)
 	}
 }
 

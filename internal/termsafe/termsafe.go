@@ -5,7 +5,8 @@
 //
 // Writer passes text, tabs and newlines and SGR (colour) sequences, and drops every
 // other escape sequence and control character, including the 8-bit forms: C1 bytes,
-// raw or UTF-8 encoded. It holds back nothing but an incomplete sequence, so a followed
+// raw or UTF-8 encoded, and the bidi controls that make text read in another order. Other
+// format characters stay: ZWJ and ZWNJ belong in real text. It holds back nothing but an incomplete sequence, so a followed
 // log still shows each line as it arrives.
 package termsafe
 
@@ -136,6 +137,9 @@ func (f *Writer) feedGround(b byte) {
 		}
 		if r >= 0x80 && r <= 0x9f {
 			f.c1(byte(r))
+			return
+		}
+		if (r >= 0x202a && r <= 0x202e) || (r >= 0x2066 && r <= 0x2069) {
 			return
 		}
 		f.out.Write(seq)
