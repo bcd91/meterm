@@ -73,11 +73,22 @@ type file struct {
 
 // Dir is where the state files live: $METERM_RUNTIME_DIR if set (tests,
 // alternate profiles), else $XDG_RUNTIME_DIR/meterm. Without one it's a directory
-// of this user's own under the temp directory, which is per-user on macOS and
-// Windows and checked by ensureDir everywhere else.
+// of this user's own under the temp directory, which is per-user on Windows and
+// checked by ensureDir everywhere else.
+//
+// macOS has its own answer, the same for every process of the user: a tunnel run by
+// launchd and a `meterm status` typed in a terminal have to find the same place,
+// and $TMPDIR and $XDG_RUNTIME_DIR can differ between those two (a nix shell, a
+// tmux started elsewhere, a line in .zshrc).
 func Dir() string {
 	if d := os.Getenv("METERM_RUNTIME_DIR"); d != "" {
 		return d
+	}
+	if runtime.GOOS == "darwin" {
+		if d, err := os.UserCacheDir(); err == nil {
+			return filepath.Join(d, "meterm", "run")
+		}
+		return filepath.Join(os.TempDir(), "meterm-"+strconv.Itoa(os.Getuid()))
 	}
 	if d := os.Getenv("XDG_RUNTIME_DIR"); d != "" {
 		return filepath.Join(d, "meterm")
@@ -87,6 +98,9 @@ func Dir() string {
 	}
 	return filepath.Join(os.TempDir(), "meterm-"+strconv.Itoa(os.Getuid()))
 }
+
+// EnsureDir is ensureDir, for other private directories of the same kind.
+func EnsureDir(dir string) error { return ensureDir(dir) }
 
 // ensureDir makes dir, and refuses one that someone else could have prepared:
 // under a shared /tmp, the name alone proves nothing.
@@ -298,7 +312,7 @@ func List() (rows []Row, skipped int, err error) {
 
 // alive says whether the process that wrote a file is still the one with that
 // PID. A process's start time tells it from a later one given the same number,
-// where the system says (only Linux does, cheaply).
+// where the system says (Linux and macOS do, cheaply).
 func alive(pid int, started string) bool {
 	if !processExists(pid) {
 		return false
@@ -311,6 +325,9 @@ func alive(pid int, started string) bool {
 // can't be read. comm can hold spaces and parentheses, so the fields are counted
 // from the last ")".
 func procStart(pid int) string {
+	if runtime.GOOS == "darwin" {
+		return darwinProcStart(pid)
+	}
 	if runtime.GOOS != "linux" {
 		return ""
 	}
@@ -330,3 +347,5 @@ func procStart(pid int) string {
 	}
 	return fields[19]
 }
+
+func fmtStart(sec, usec int64) string { return fmt.Sprintf("%d.%06d", sec, usec) }

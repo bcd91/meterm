@@ -270,3 +270,43 @@ func TestReadersSeeWholeFiles(t *testing.T) {
 	close(done)
 	wg.Wait()
 }
+
+func TestProcStartTellsProcessesApart(t *testing.T) {
+	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
+		t.Skip("no start time here")
+	}
+	me := procStart(os.Getpid())
+	if me == "" || me != procStart(os.Getpid()) {
+		t.Fatalf("own start time: %q", me)
+	}
+	if !alive(os.Getpid(), me) {
+		t.Error("alive says no to this process")
+	}
+	if alive(os.Getpid(), "1.000000") {
+		t.Error("a later process with the same PID passed as the one that wrote the file")
+	}
+}
+
+// A process started by launchd and one started in a terminal have different
+// surroundings, and still have to find each other.
+func TestDirOnMacIgnoresWhatDiffersBetweenProcesses(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("macOS only")
+	}
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("METERM_RUNTIME_DIR", "")
+	want := filepath.Join(home, "Library", "Caches", "meterm", "run")
+	for _, env := range [][2]string{
+		{"", ""},
+		{"/var/folders/xx/T/", ""},
+		{"/" + strings.Repeat("long/", 60), ""},
+		{"/tmp", "/run/user/501"},
+	} {
+		t.Setenv("TMPDIR", env[0])
+		t.Setenv("XDG_RUNTIME_DIR", env[1])
+		if got := Dir(); got != want {
+			t.Errorf("TMPDIR=%q XDG_RUNTIME_DIR=%q: %s", env[0], env[1], got)
+		}
+	}
+}
