@@ -1,0 +1,42 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: go vet ./...
+      - run: go test ./...
+      - name: copy-id --via against a real sshd
+        if: matrix.os == 'ubuntu-latest'
+        shell: bash
+        run: scripts/it-copyid-via.sh
+      - name: dev against a real sshd and tmux
+        if: matrix.os == 'ubuntu-latest'
+        shell: bash
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq tmux openssh-server
+          scripts/it-dev.sh
+      - name: cross-build
+        if: matrix.os == 'ubuntu-latest'
+        shell: bash
+        run: |
+          for t in linux/amd64 linux/arm64 darwin/arm64 windows/amd64; do
+            GOOS=${t%/*} GOARCH=${t#*/} go build -o /dev/null ./cmd/meterm
+          done

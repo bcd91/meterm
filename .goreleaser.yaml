@@ -1,0 +1,50 @@
+version: 2
+
+project_name: meterm
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: meterm
+    main: ./cmd/meterm
+    binary: meterm
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - darwin
+      - linux
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w -X main.version={{.Version}}
+
+archives:
+  - id: meterm
+    ids:
+      - meterm
+    # .zip for Windows (so it opens without extra tools), .tar.gz elsewhere.
+    formats: [tar.gz]
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+    name_template: >-
+      {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
+
+checksum:
+  name_template: "checksums.txt"
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+
+release:
+  github:
+    owner: bcd91
+    name: meterm

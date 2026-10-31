@@ -1,0 +1,8 @@
+/meterm
+/dist/
+*.tmp
+
+
+# Generated next to where meterm runs; they describe real machines.
+meterm-invite-*.sh
+meterm-report-*.html
