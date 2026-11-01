@@ -78,8 +78,10 @@ const lastTime = "Mon Jan _2 15:04:05 2006"
 
 var (
 	dateRE = `[A-Z][a-z]{2} [A-Z][a-z]{2} [ 0-9][0-9] [0-9]{2}:[0-9]{2}:[0-9]{2} [0-9]{4}`
-	// user, terminal, address, start, and how it ended.
-	lineRE  = regexp.MustCompile(`^(\S+)\s+(\S+|system boot)\s+(\S+)\s+(` + dateRE + `)\s+(?:(still logged in|still running|gone - no logout)|-\s+(` + dateRE + `|crash|down)\s+\([0-9+:]+\))\s*$`)
+	// user, terminal, address, start, and how it ended. util-linux prints 0.0.0.0 for a
+	// login with no address, and wtmpdb's last, as on Debian 13, prints nothing and puts
+	// a dash before "still logged in".
+	lineRE  = regexp.MustCompile(`^(\S+)\s+(\S+|system boot)\s+(?:(\S+)\s+)?(` + dateRE + `)\s+(?:(?:-\s+)?(still logged in|still running|gone - no logout)|-\s+(` + dateRE + `|crash|down)\s+\([0-9+:]+\))\s*$`)
 	beginRE = regexp.MustCompile(`^\S+ begins (` + dateRE + `)\s*$`)
 )
 
@@ -116,14 +118,23 @@ func Parse(raw []byte) Parsed {
 			out.Unparsed++
 			continue
 		}
-		addr, err := netip.ParseAddr(m[3])
-		if err != nil {
-			out.Unparsed++ // -i prints addresses: anything else isn't what it seems
-			continue
-		}
 		l := Login{Time: start, User: clean(m[1]), TTY: clean(m[2]), StillLoggedIn: m[5] == "still logged in"}
-		if !addr.IsUnspecified() {
-			l.Source = addr.WithZone("").String()
+		if m[3] == "" {
+			// Two fields could also be a user and an address with the terminal missing,
+			// which mustn't pass for a login at the console.
+			if _, err := netip.ParseAddr(m[2]); err == nil {
+				out.Unparsed++
+				continue
+			}
+		} else {
+			addr, err := netip.ParseAddr(m[3])
+			if err != nil {
+				out.Unparsed++ // -i prints addresses: anything else isn't what it seems
+				continue
+			}
+			if !addr.IsUnspecified() {
+				l.Source = addr.WithZone("").String()
+			}
 		}
 		if t, err := parseTime(m[6]); err == nil {
 			l.End = &t
@@ -143,10 +154,13 @@ func clean(s string) string { return termsafe.Clip(termsafe.Text(s), maxText) }
 const MatchWindow = 2 * time.Minute
 
 // Match fills in Matched and Event from events, for logins on host as account user ("" if
-// the event doesn't say). Whatever isn't about reaching the host is left out: an outcome
+// the event doesn't say). A local login is never matched. Whatever isn't about reaching the host is left out: an outcome
 // is the end of something, not a login.
 func Match(ls []Login, events []activity.Event, host string) {
 	for i := range ls {
+		if ls[i].Source == "" {
+			continue // at the console, so not something meterm's ssh did, whatever the time
+		}
 		var best *activity.Event
 		var bestGap time.Duration
 		for j := range events {

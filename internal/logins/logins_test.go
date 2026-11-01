@@ -47,6 +47,54 @@ func TestParseRealShape(t *testing.T) {
 	}
 }
 
+// From wtmpdb's last on Debian 13, which leaves the address out of a console login.
+const wtmpdbShape = `bcd      tty1                          Sat Oct 31 03:24:50 2026 - still logged in          
+reboot   system boot  6.12.113+deb13-amd64 Sat Oct 31 03:24:29 2026 - still running            
+bcd      tty1                          Sat Oct 31 02:51:49 2026 - Sat Oct 31 03:24:07 2026  (00:32)
+reboot   system boot  6.12.113+deb13-amd64 Sat Oct 31 02:49:32 2026 - Sat Oct 31 03:24:07 2026  (00:34)
+bcd      pts/2        192.168.1.36     Fri Oct 30 15:26:03 2026 - Fri Oct 30 15:26:29 2026  (00:00)
+
+wtmpdb begins Wed Oct 28 14:40:14 2026
+`
+
+func TestParseWtmpdbShape(t *testing.T) {
+	p := Parse([]byte(wtmpdbShape))
+	if p.Unparsed != 0 {
+		t.Errorf("unparsed %d", p.Unparsed)
+	}
+	if len(p.Logins) != 3 {
+		t.Fatalf("got %d logins: %+v", len(p.Logins), p.Logins)
+	}
+	if a := p.Logins[0]; a.TTY != "tty1" || a.Source != "" || !a.StillLoggedIn {
+		t.Errorf("%+v", a)
+	}
+	if a := p.Logins[1]; a.TTY != "tty1" || a.Source != "" || a.End == nil {
+		t.Errorf("%+v", a)
+	}
+	if a := p.Logins[2]; a.TTY != "pts/2" || a.Source != "192.168.1.36" {
+		t.Errorf("%+v", a)
+	}
+	if p.Since == nil || p.Since.Day() != 28 {
+		t.Errorf("since %v", p.Since)
+	}
+}
+
+func TestParseAddressWhereTerminalShouldBe(t *testing.T) {
+	p := Parse([]byte("bcd 203.0.113.9 Sat Oct 31 03:24:50 2026 - still logged in\n"))
+	if p.Unparsed != 1 || len(p.Logins) != 0 {
+		t.Errorf("read as a console login: %+v", p)
+	}
+}
+
+func TestMatchLeavesLocalLoginsAlone(t *testing.T) {
+	at := time.Date(2026, 10, 31, 20, 0, 0, 0, time.UTC)
+	ls := []Login{{Time: at, User: "bcd", TTY: "tty1"}}
+	Match(ls, []activity.Event{{Device: "d", Seq: 1, Action: "connect", Host: "web", Target: "bcd@1.2.3.4", Time: at}}, "web")
+	if ls[0].Matched || ls[0].Event != nil {
+		t.Errorf("a console login was matched: %+v", ls[0])
+	}
+}
+
 func TestParseHostileOutput(t *testing.T) {
 	for name, line := range map[string]string{
 		"escape in the user":   "a\x1b]0;x\x07b  pts/0  1.2.3.4  Sat Oct 31 20:11:03 2026   still logged in",
@@ -128,7 +176,7 @@ func TestMatch(t *testing.T) {
 		{"the closer one", []activity.Event{ev(1, "exec", "web", "bcd@1.2.3.4", -time.Minute), ev(2, "connect", "web", "bcd@1.2.3.4", time.Second)}, 2},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			ls := []Login{{Time: at, User: "bcd"}}
+			ls := []Login{{Time: at, User: "bcd", Source: "192.0.2.9"}}
 			Match(ls, c.events, "web")
 			if c.seq == 0 {
 				if ls[0].Matched || ls[0].Event != nil {
@@ -142,7 +190,7 @@ func TestMatch(t *testing.T) {
 		})
 	}
 	// An event from an edited log can't put escapes into the report.
-	ls := []Login{{Time: at, User: "bcd"}}
+	ls := []Login{{Time: at, User: "bcd", Source: "192.0.2.9"}}
 	Match(ls, []activity.Event{ev(1, "con\x1b[2Jnect", "web", "bcd@1", 0)}, "web")
 	if strings.Contains(ls[0].Event.Action, "\x1b") {
 		t.Errorf("%q", ls[0].Event.Action)
