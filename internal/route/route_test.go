@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"meterm/internal/config"
+	"meterm/internal/testenv"
 )
 
 // fakeNet answers for the addresses in up and records every dial.
@@ -183,7 +184,9 @@ func TestMain(m *testing.M) {
 		panic(err)
 	}
 	KnownHosts = func() string { return filepath.Join(dir, "known_hosts") } // never the real one
+	done := testenv.Setup()
 	code := m.Run()
+	done()
 	os.RemoveAll(dir)
 	os.Exit(code)
 }

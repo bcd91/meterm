@@ -5,7 +5,9 @@ description: Reach and work on remote machines with meterm, a CLI that keeps an 
 
 # meterm
 
-meterm knows the user's SSH machines by name, including their users, keys, jump hosts and alternative routes. Work through it instead of plain `ssh`, because it finds the route for you and records work on hosts in `meterm activity`, which a plain `ssh` bypasses. Not everything lands there: `agents` is left out on purpose, and looking at `list` or `status` touches no host.
+meterm knows the user's SSH machines by name, including their users, keys, jump hosts and alternative routes. Work through it instead of plain `ssh`, because it finds the route for you and records work on hosts in `meterm activity`, which a plain `ssh` bypasses. Not everything lands there: `agents` and `logins` are left out on purpose, and looking at `list` or `status` touches no host.
+
+It's a tool, not a guard. Production refusal and the activity log guide and record an honest agent, and aren't a boundary against a same-user process: `ssh` with a key from `~/.ssh` isn't stopped, and the log can be rewritten. What enforces is on the far side: remote accounts, `sudoers`, forced commands, network rules. Stay inside these rules because the user asked, not because you couldn't get round them. Each event says who's asking, from `CLAUDECODE` and the like, which you inherit: leave them set.
 
 ## First check
 
@@ -21,7 +23,7 @@ Find hosts with `meterm list --format json`: `name`, `target`, `group`, `tags`, 
 
 These reach real servers, so the split follows what can go wrong.
 
-**Fine without asking:** `list`, `history`, `status`, `activity --format json`, `route list`, `route check`, `tunnel list`, `stats <host>`, and `agents <host>` for a host you name that isn't production. That runs one fixed read-only command, lists Claude Code sessions, and isn't in the activity log.
+**Fine without asking:** `list`, `history`, `status`, `facts`, `activity --format json`, `activity --verify`, `team log --no-fetch`, `route list`, `route check`, `tunnel list`, `stats <host>`, and `agents`, `logins` or `auth-methods` for a host you name that isn't production. Those three run one fixed read-only look and aren't in the activity log. `logins` misses non-interactive logins, and a login with no matching event isn't an intruder: say what it shows and let the user judge.
 
 **Ask first, naming the host and the exact action:**
 
@@ -35,8 +37,9 @@ These reach real servers, so the split follows what can go wrong.
 | `keys`, `copy-id`, `keygen` | Change who can log in. |
 | `relay`, `audit`, `report` | Change hosts, or run checks across them. |
 | `add`, `edit`, `rm`, `rename`, `route add`, `route rm`, `group`, `team` | Change the inventory, which a team may share. |
+| `activity --repair` | Takes lines out of the log, and records that. Say what `--verify` said, and let the user decide. |
 
-**Needs approval of that exact command:** `exec --all`, `--tag` and `--group` selections (`agents` included), and anything aimed at production, `agents <host>` included.
+**Needs approval of that exact command:** `exec --all`, `--tag` and `--group` selections (the looks included), and anything aimed at production, the looks included.
 
 A host is production if its `env` is `production`. An unset `env` tells you nothing, so treat a host as production if its name, group or tags suggest it, or if you can't tell.
 

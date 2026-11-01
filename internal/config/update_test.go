@@ -10,6 +10,8 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"meterm/internal/testenv"
 )
 
 // When this variable is set, the test binary is one writer process: it adds
@@ -25,7 +27,7 @@ func TestMain(m *testing.M) {
 		}
 		os.Exit(0)
 	}
-	os.Exit(m.Run())
+	testenv.Main(m)
 }
 
 func addHost(path, name string) error {
@@ -301,5 +303,41 @@ func TestSavedFileIsPrivate(t *testing.T) {
 func TestUpdateWithoutAPath(t *testing.T) {
 	if err := (&Config{}).Update(func(*Config) error { return nil }); err == nil {
 		t.Fatal("no error for a config with no path")
+	}
+}
+
+// activity.sink has to survive every way the file gets rewritten, or an update would
+// quietly stop a copy someone is counting on.
+func TestActivitySinkSurvivesWrites(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "hosts.yaml")
+	if err := os.WriteFile(path, []byte("version: 1\nactivity:\n  sink: syslog\nhosts:\n- {name: a, address: 1.2.3.4}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Activity.Sink != "syslog" {
+		t.Fatalf("read %q", cfg.Activity.Sink)
+	}
+	if err := cfg.Update(func(c *Config) error { c.Upsert(Host{Name: "b", Address: "1.2.3.5"}); return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if err := cfg.Save(); err != nil {
+		t.Fatal(err)
+	}
+	again, err := Load(path)
+	if err != nil || again.Activity.Sink != "syslog" {
+		t.Fatalf("after writing: %q, %v", again.Activity.Sink, err)
+	}
+	// No setting, no key: a file nobody set this in doesn't change.
+	empty := filepath.Join(t.TempDir(), "hosts.yaml")
+	c := &Config{Version: 1}
+	c.path = empty
+	if err := c.write(); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(empty); strings.Contains(string(b), "activity") {
+		t.Fatalf("wrote %s", b)
 	}
 }

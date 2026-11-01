@@ -7,11 +7,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"strconv"
 	"strings"
 	"text/tabwriter"
 	"time"
+	"unicode"
 
 	"github.com/spf13/cobra"
 
@@ -19,6 +21,7 @@ import (
 	"meterm/internal/authkeys"
 	"meterm/internal/config"
 	"meterm/internal/team"
+	"meterm/internal/termsafe"
 )
 
 // teamCtx bundles what most team subcommands need.
@@ -121,6 +124,36 @@ func pickTeam(teams []team.Team, want string) (team.Team, error) {
 }
 
 func (tc *teamCtx) saveState() error { return team.SaveState(tc.dir, tc.state) }
+
+// openTeamLocal is openTeamAny with no network and no writes beyond what reading a
+// clone takes: it doesn't clone a team that's missing, or clear out old sign-ins.
+func openTeamLocal() (*teamCtx, error) {
+	dir, err := team.Dir()
+	if err != nil {
+		return nil, err
+	}
+	st, err := team.LoadState(dir)
+	if err != nil {
+		return nil, err
+	}
+	r := &team.Router{Git: map[string]*team.GitStore{}}
+	var firstErr error
+	for id, gt := range st.GitTeams {
+		g, err := team.OpenLocalGitStore(dir, gt)
+		if err != nil {
+			firstErr = err
+			continue
+		}
+		r.Git[id] = g
+	}
+	if len(r.Git) == 0 {
+		if firstErr != nil {
+			return nil, firstErr
+		}
+		return nil, team.ErrNotSignedIn
+	}
+	return &teamCtx{dir: dir, state: st, be: r}, nil
+}
 
 func newTeamCmd() *cobra.Command {
 	cmd := &cobra.Command{
@@ -363,24 +396,43 @@ func teamRemoveCmd(teamFlag *string) *cobra.Command {
 
 func teamLogCmd(teamFlag *string) *cobra.Command {
 	var (
-		host   string
-		user   string
-		limit  int
-		since  time.Duration
-		format string
+		host    string
+		user    string
+		limit   int
+		since   time.Duration
+		format  string
+		verify  bool
+		noFetch bool
 	)
 	cmd := &cobra.Command{
 		Use:   "log",
 		Short: "Show the team's activity log",
-		Args:  cobra.NoArgs,
+		Long: "Fetches the team's repository and lists what's in it. --no-fetch reads this\n" +
+			"machine's clone as it is, with no network: what it last saw.\n\n" +
+			"--verify checks the whole log instead of listing it, and compares this machine's\n" +
+			"activity log with the team's copy of it, which finds events removed or changed\n" +
+			"here even if the local chain was rebuilt to match. Exits 1 if anything's wrong.",
+		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			tc, err := openTeamAny()
+			if format != "text" && format != "json" && format != "csv" {
+				return fmt.Errorf("--format must be text, json or csv")
+			}
+			ctx := cmd.Context()
+			open := openTeamAny
+			if noFetch {
+				open = openTeamLocal
+				ctx = team.WithNoFetch(ctx)
+			}
+			tc, err := open()
 			if err != nil {
 				return err
 			}
-			t, err := tc.current(cmd.Context(), *teamFlag)
+			t, err := tc.current(ctx, *teamFlag)
 			if err != nil {
 				return err
+			}
+			if verify {
+				return verifyTeamLog(ctx, tc, t, format)
 			}
 			f := team.EventFilter{Host: host, Limit: limit}
 			if user != "" {
@@ -389,7 +441,7 @@ func teamLogCmd(teamFlag *string) *cobra.Command {
 			if since > 0 {
 				f.Since = time.Now().Add(-since)
 			}
-			events, err := tc.be.ListEvents(cmd.Context(), t.ID, f)
+			events, err := tc.be.ListEvents(ctx, t.ID, f)
 			if err != nil {
 				return err
 			}
@@ -412,14 +464,7 @@ func teamLogCmd(teamFlag *string) *cobra.Command {
 			broken := activity.VerifyShared(plain)
 
 			if format == "csv" {
-				w := csv.NewWriter(os.Stdout)
-				_ = w.Write([]string{"time", "who", "local_user", "action", "host", "target", "detail", "device", "seq", "hash", "verified"})
-				for _, e := range events {
-					_ = w.Write([]string{e.Time.UTC().Format(time.RFC3339), e.UploaderEmail, e.User, e.Action, e.Host, e.Target, e.Detail,
-						e.Device, strconv.FormatInt(e.Seq, 10), e.Hash, strconv.FormatBool(e.Valid())})
-				}
-				w.Flush()
-				if err := w.Error(); err != nil {
+				if err := writeTeamLogCSV(os.Stdout, events); err != nil {
 					return err
 				}
 				if broken != nil {
@@ -428,12 +473,7 @@ func teamLogCmd(teamFlag *string) *cobra.Command {
 				return nil
 			}
 			if format == "json" {
-				if events == nil {
-					events = []team.TeamEvent{}
-				}
-				enc := json.NewEncoder(os.Stdout)
-				enc.SetIndent("", "  ")
-				return enc.Encode(events)
+				return writeTeamLogJSON(os.Stdout, os.Stderr, events)
 			}
 			if len(events) == 0 {
 				fmt.Println("No activity yet.")
@@ -442,8 +482,9 @@ func teamLogCmd(teamFlag *string) *cobra.Command {
 			w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
 			fmt.Fprintln(w, "TIME\tWHO\tACTION\tHOST\tDETAIL")
 			for _, e := range events {
+				c := e.Event.Clean()
 				fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n",
-					e.Time.Local().Format("2006-01-02 15:04:05"), e.UploaderEmail, e.Action, e.Host, oneLine(e.Detail, 60))
+					e.Time.Local().Format("2006-01-02 15:04:05"), termsafe.Text(e.UploaderEmail), c.Action, c.Host, oneLine(c.Detail, 60))
 			}
 			if err := w.Flush(); err != nil {
 				return err
@@ -459,7 +500,199 @@ func teamLogCmd(teamFlag *string) *cobra.Command {
 	cmd.Flags().DurationVar(&since, "since", 0, "only the last duration, e.g. 24h or 720h")
 	cmd.Flags().StringVar(&user, "user", "", "only this person (their account email)")
 	cmd.Flags().StringVar(&format, "format", "text", "text, json or csv (csv: for spreadsheets and auditors)")
+	cmd.Flags().BoolVar(&verify, "verify", false, "check the whole log, and this machine's log against the team's copy, instead of listing")
+	cmd.Flags().BoolVar(&noFetch, "no-fetch", false, "use this machine's clone as it is: no network, and only what it last saw")
 	return cmd
+}
+
+// teamVerifyReport is `team log --verify --format json`.
+type teamVerifyReport struct {
+	Schema int  `json:"schema"`
+	OK     bool `json:"ok"`
+	// Events is how many are in the team's log, and Broken the first that doesn't hold.
+	Events int         `json:"events"`
+	Broken *brokenJSON `json:"broken"`
+	// ExtGaps counts places where a newer event's back-pointer leads to an event with no
+	// exit code or actor to check, and this machine's events that have them here and not in
+	// the team's copy: uploaded by an older meterm, or stripped.
+	ExtGaps int `json:"ext_gaps"`
+	// Device is this machine's chain. Compared is how many of the team's events are from
+	// it, and Differences where this machine's log has lost or changed them.
+	Device      string                `json:"device"`
+	Compared    int                   `json:"compared"`
+	Differences []activity.Difference `json:"differences"`
+	// NotInTeamCopy counts events here, on hosts shared now, that the upload has gone past and
+	// the team hasn't got. They may be from before the host was shared, or they may have been
+	// removed there, which can't be told apart, so this is a note and ok doesn't depend on it.
+	NotInTeamCopy int `json:"not_in_team_copy"`
+}
+
+func verifyTeamLog(ctx context.Context, tc *teamCtx, t team.Team, format string) error {
+	events, err := tc.be.ListEvents(ctx, t.ID, team.EventFilter{})
+	if err != nil {
+		return err
+	}
+	plain := make([]activity.Event, len(events))
+	for i, e := range events {
+		plain[i] = e.Event
+	}
+	check := activity.CheckShared(plain)
+	rep := teamVerifyReport{Schema: 1, Events: len(events), ExtGaps: check.ExtGaps, Differences: []activity.Difference{}}
+	if b := check.First; b != nil {
+		rep.Broken = &brokenJSON{Line: b.Line, Seq: b.Seq, Reason: termsafe.Text(b.Reason)}
+	}
+	if dir, err := activity.DefaultDir(); err == nil {
+		l := activity.Reader(dir)
+		rep.Device = termsafe.Text(l.Device())
+		local, err := l.All()
+		if err != nil {
+			return err
+		}
+		inTeam := map[int64]bool{}
+		for _, e := range plain {
+			if e.Device == l.Device() {
+				rep.Compared++
+				inTeam[e.Seq] = true
+			}
+		}
+		if d := activity.CompareCopy(local, plain, l.Device()); d != nil {
+			rep.Differences = d
+		}
+		// This machine can say more of its own events: the team's copy lacks what's here.
+		noExt := map[int64]bool{}
+		for _, e := range plain {
+			if e.Device == l.Device() && e.ExtHash == "" {
+				noExt[e.Seq] = true
+			}
+		}
+		for _, e := range local {
+			if e.ExtHash != "" && noExt[e.Seq] {
+				rep.ExtGaps++
+			}
+		}
+		if path, err := resolveCfgPath(); err == nil {
+			if cfg, err := config.Load(path); err == nil {
+				shared := map[string]bool{}
+				for _, h := range cfg.Hosts {
+					if h.Team == t.ID {
+						shared[h.Name] = true
+					}
+				}
+				sent, _ := l.UploadedSeq(t.ID)
+				for _, e := range local {
+					if e.Seq <= sent && shared[e.Host] && !inTeam[e.Seq] {
+						rep.NotInTeamCopy++
+					}
+				}
+			}
+		}
+	}
+	rep.OK = rep.Broken == nil && len(rep.Differences) == 0
+	if format == "json" {
+		if err := json.NewEncoder(os.Stdout).Encode(rep); err != nil {
+			return err
+		}
+	} else {
+		fmt.Printf("Team log: %d event(s).\n", rep.Events)
+		if rep.ExtGaps > 0 {
+			fmt.Printf("%d gap(s) in what vouches for exit codes and actors: events uploaded by an older meterm, or stripped. Not treated as tampering.\n", rep.ExtGaps)
+		}
+		if rep.Device == "" {
+			fmt.Println("This machine has no activity log to compare. If one was deleted with its directory, nothing here can tell.")
+		} else {
+			fmt.Printf("This machine (device %s): %d event(s) in the team's copy, %d differ from the log here.\n", rep.Device, rep.Compared, len(rep.Differences))
+		}
+		if rep.NotInTeamCopy > 0 {
+			fmt.Printf("%d event(s) here on shared hosts aren't in the team's copy: from before a host was shared, or removed there.\n", rep.NotInTeamCopy)
+		}
+		for i, d := range rep.Differences {
+			if i == 5 {
+				fmt.Printf("  and %d more\n", len(rep.Differences)-i)
+				break
+			}
+			fmt.Printf("  seq %d: %s\n", d.Seq, d.Reason)
+		}
+	}
+	switch {
+	case rep.Broken != nil:
+		return fmt.Errorf("team log broken at seq %d: %s", rep.Broken.Seq, rep.Broken.Reason)
+	case len(rep.Differences) > 0:
+		return fmt.Errorf("this machine's activity log doesn't match the team's copy: %d event(s) lost or changed here", len(rep.Differences))
+	}
+	return nil
+}
+
+// teamLogRow is an event as `team log --format json` gives it. Verified says this event
+// checks out by itself and against the ones next to it, and Problem says why not.
+type teamLogRow struct {
+	team.TeamEvent
+	Verified bool   `json:"verified"`
+	Problem  string `json:"integrity_problem,omitempty"`
+}
+
+// writeTeamLogJSON is the export, which has to stay usable whatever's in the log. That log
+// is append-only and comes from everyone, so one bad line would otherwise fail this for the
+// whole team for good. So every event comes out and says for itself whether it holds, a
+// problem is said on stderr, and the exit code stays 0: `team log --verify` is the gate.
+func writeTeamLogJSON(out, errOut io.Writer, events []team.TeamEvent) error {
+	plain := make([]activity.Event, len(events))
+	for i, e := range events {
+		plain[i] = e.Event
+	}
+	check := activity.CheckShared(plain)
+	rows := make([]teamLogRow, len(events))
+	for i, e := range events {
+		why := check.Problems[i]
+		e.Event = e.Event.Clean()
+		e.UploaderUID, e.UploaderEmail = termsafe.Text(e.UploaderUID), termsafe.Text(e.UploaderEmail)
+		rows[i] = teamLogRow{TeamEvent: e, Verified: why == "", Problem: termsafe.Text(why)}
+	}
+	enc := json.NewEncoder(out)
+	enc.SetIndent("", "  ")
+	if err := enc.Encode(rows); err != nil {
+		return err
+	}
+	if check.First != nil {
+		fmt.Fprintf(errOut, "meterm: warning: %d event(s) in the team log don't check out, marked verified: false; the first: %s\n",
+			len(check.Problems), termsafe.Text(check.First.Error()))
+	}
+	return nil
+}
+
+func writeTeamLogCSV(out io.Writer, events []team.TeamEvent) error {
+	w := csv.NewWriter(out)
+	// One place a row goes through, so no column can miss csvCell.
+	row := func(cells ...string) {
+		for i, c := range cells {
+			cells[i] = csvCell(c)
+		}
+		_ = w.Write(cells)
+	}
+	// verified means what it means in the JSON: this event, and it against the ones next to it.
+	plain := make([]activity.Event, len(events))
+	for i, e := range events {
+		plain[i] = e.Event
+	}
+	problems := activity.CheckShared(plain).Problems
+	row("time", "who", "local_user", "action", "host", "target", "detail", "device", "seq", "hash", "verified")
+	for i, e := range events {
+		row(e.Time.UTC().Format(time.RFC3339), e.UploaderEmail, e.User, e.Action, e.Host, e.Target, e.Detail,
+			e.Device, strconv.FormatInt(e.Seq, 10), e.Hash, strconv.FormatBool(problems[i] == ""))
+	}
+	w.Flush()
+	return w.Error()
+}
+
+// csvCell makes a cell fit for a terminal and a spreadsheet. These come from a log that other
+// people, and whatever they ran, wrote to. Spreadsheets skip spaces, read fullwidth forms as
+// the plain ones, and take | for a command, so what counts is the first thing that isn't blank.
+func csvCell(s string) string {
+	s = termsafe.Clip(termsafe.Text(s), 4096)
+	first := strings.TrimLeftFunc(s, func(r rune) bool { return unicode.IsSpace(r) || r == termsafe.Replacement })
+	if first != "" && strings.ContainsRune("=+-@|＝＋－＠｜", []rune(first)[0]) {
+		return "'" + s
+	}
+	return s
 }
 
 // stdinLines is shared so consecutive prompts fed from a pipe don't lose

@@ -50,6 +50,13 @@ type Agent struct {
 	WaitingFor string `json:"waitingFor,omitempty"`
 	SessionID  string `json:"sessionId,omitempty"`
 	Name       string `json:"name,omitempty"`
+
+	// The same agent in terms that don't depend on who made it. See Classify and
+	// docs/agent-events.md. These come from meterm's tables, never from the host.
+	Event      string `json:"event"`
+	AgentKind  string `json:"agent_kind"`
+	Source     string `json:"source"`
+	Confidence string `json:"confidence"`
 }
 
 // Host is what one host said. Agents is null, not empty, when Error is set: "we
@@ -121,6 +128,8 @@ func parseAgent(raw json.RawMessage) (Agent, error) {
 	if a.PID, err = readInt(fields, "pid"); err != nil {
 		return Agent{}, err
 	}
+	a.Event, a.Confidence = Classify(a.State, a.Status, a.WaitingFor)
+	a.AgentKind, a.Source = KindClaudeCode, SourceClaudeAgents
 	return a, nil
 }
 

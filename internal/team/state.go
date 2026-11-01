@@ -62,6 +62,19 @@ func Lock(dir string, wait time.Duration) (unlock func(), ok bool, err error) {
 	return unlock, true, nil
 }
 
+// WaiterLock is held by the one process waiting for Lock. It never waits: ok is false when
+// another process is already waiting, and it will do what this one came for.
+func WaiterLock(dir string) (unlock func(), ok bool, err error) {
+	unlock, err = lockfile.Acquire(filepath.Join(dir, "sync-waiter.lock"), 0, 0)
+	if errors.Is(err, lockfile.ErrBusy) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, err
+	}
+	return unlock, true, nil
+}
+
 // Dir is where team files live: next to the host inventory, or
 // $METERM_TEAM_DIR.
 func Dir() (string, error) {

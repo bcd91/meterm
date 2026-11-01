@@ -2,6 +2,7 @@ package team
 
 import (
 	"errors"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -129,5 +130,74 @@ func TestGitStoreSyncBetweenMembers(t *testing.T) {
 	log, _ := alice.git(ctx, "log", "--format=%ae %s")
 	if !strings.Contains(log, "bob@example.com meterm: audit web1") || !strings.Contains(log, "alice@example.com meterm: update host web1") {
 		t.Errorf("git log:\n%s", log)
+	}
+}
+
+// Events with exit codes hold pointers: a retry of the same event must still be the
+// same event, and one an older meterm uploaded, without the new fields, must not block.
+func TestSameEventWithNewFields(t *testing.T) {
+	code1, code2 := 0, 0
+	base := activity.Event{Device: "d", Seq: 1, Action: "outcome", Hash: "h", ExtHash: "x"}
+	a, b := base, base
+	a.ExitCode, b.ExitCode = &code1, &code2
+	if !sameEvent(a, b) {
+		t.Error("the same event in two allocations reads as different")
+	}
+	oldCopy := base
+	oldCopy.ExtHash = ""
+	if !sameEvent(oldCopy, a) || !sameEvent(a, oldCopy) {
+		t.Error("an older uploader's copy of it must count as the same")
+	}
+	other := base
+	other.ExtHash = "y"
+	if sameEvent(a, other) {
+		t.Error("a different ext hash is a different event")
+	}
+	edited := base
+	edited.Detail = "changed"
+	if sameEvent(base, edited) {
+		t.Error("different content is a different event")
+	}
+}
+
+// With WithNoFetch a read uses the clone as it is, and needs no remote at all.
+func TestNoFetchReadsWithoutTheRemote(t *testing.T) {
+	t.Setenv("HOME", t.TempDir()) // no global git identity
+	alice, bob := gitTeam(t)
+	if err := alice.AppendEvents(ctx, alice.ID, []activity.Event{{Device: "a", Seq: 1, Action: "exec", Host: "h", Hash: "x"}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := bob.ListEvents(ctx, bob.ID, EventFilter{}); err != nil { // bob's clone sees it once
+		t.Fatal(err)
+	}
+	if err := alice.AppendEvents(ctx, alice.ID, []activity.Event{{Device: "a", Seq: 2, Action: "exec", Host: "h", Hash: "y"}}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := bob.ListEvents(WithNoFetch(ctx), bob.ID, EventFilter{})
+	if err != nil || len(got) != 1 {
+		t.Fatalf("no-fetch should see what the clone last saw: %d, %v", len(got), err)
+	}
+	if _, err := bob.git(ctx, "remote", "set-url", "origin", filepath.Join(t.TempDir(), "gone")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := bob.ListEvents(ctx, bob.ID, EventFilter{}); err == nil {
+		t.Error("a fetch from a missing remote should fail, or this test proves nothing")
+	}
+	if _, err := bob.ListEvents(WithNoFetch(ctx), bob.ID, EventFilter{}); err != nil {
+		t.Errorf("no-fetch needed the remote: %v", err)
+	}
+	if _, err := bob.ListAudits(WithNoFetch(ctx), bob.ID); err != nil {
+		t.Errorf("audits, no-fetch: %v", err)
+	}
+}
+
+func TestOpenLocalGitStoreNeverClones(t *testing.T) {
+	dir := t.TempDir()
+	_, err := OpenLocalGitStore(dir, GitTeam{Name: "x", Remote: filepath.Join(dir, "remote.git")})
+	if !errors.Is(err, ErrNoClone) {
+		t.Fatalf("err = %v", err)
+	}
+	if entries, _ := os.ReadDir(dir); len(entries) != 0 {
+		t.Errorf("it made %v", entries)
 	}
 }

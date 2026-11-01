@@ -335,7 +335,7 @@ func TestAgentSSHArgsAsSSHReadsThem(t *testing.T) {
 			t.Fatalf("%s: %v", name, err)
 		}
 		r := config.Resolved{Address: "192.0.2.1", ExtraArgs: extra}
-		args := append([]string{"-G"}, sshrun.BuildArgs(config.Resolved{Address: "192.0.2.1", ExtraArgs: agentSSHArgs(r, sshConfig, 8*time.Second)})...)
+		args := append([]string{"-G"}, sshrun.BuildArgs(config.Resolved{Address: "192.0.2.1", ExtraArgs: isolatedSSHArgs(t, agentSSHArgs(r, sshConfig, 8*time.Second))})...)
 		out, err := exec.Command("ssh", args...).Output()
 		if err != nil {
 			t.Fatalf("%s: ssh -G %v: %v", name, args, err)
@@ -383,7 +383,7 @@ func TestRefusedExtraArgsReallyAreDangerous(t *testing.T) {
 			t.Errorf("%s: allowed", name)
 		}
 		r := config.Resolved{Address: "192.0.2.1", ExtraArgs: tc.extra}
-		args := append([]string{"-G"}, sshrun.BuildArgs(config.Resolved{Address: "192.0.2.1", ExtraArgs: agentSSHArgs(r, "", time.Second)})...)
+		args := append([]string{"-G"}, sshrun.BuildArgs(config.Resolved{Address: "192.0.2.1", ExtraArgs: isolatedSSHArgs(t, agentSSHArgs(r, "", time.Second))})...)
 		out, err := exec.Command("ssh", args...).Output()
 		if err != nil {
 			t.Fatalf("%s: %v", name, err)

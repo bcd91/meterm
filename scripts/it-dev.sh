@@ -12,15 +12,26 @@ W=$(cd "$W" && pwd -P)
 SSHD_PID=""
 HTTP_PID=""
 cleanup() {
+  trap - EXIT
   tmux -L it-outer kill-server 2>/dev/null || true
   TMUX_TMPDIR=$W/remote tmux kill-server 2>/dev/null || true
   [ -z "$HTTP_PID" ] || kill "$HTTP_PID" 2>/dev/null || true
   [ -z "$SSHD_PID" ] || kill "$SSHD_PID" 2>/dev/null || true
   [ -z "${SILENT_PID:-}" ] || kill "$SILENT_PID" 2>/dev/null || true
   [ -z "${BAD_PID:-}" ] || kill "$BAD_PID" 2>/dev/null || true
+  [ -z "${NT_PID:-}" ] || kill "$NT_PID" 2>/dev/null || true
+  [ -z "${NT2_PID:-}" ] || kill "$NT2_PID" 2>/dev/null || true
+  # Whatever still names this directory, on any way out: an sshd started partway through, a
+  # shared connection (ssh: $W/ctl/... [mux]) outliving the session, a tail -f it was running.
+  # The name is this run's own, so nothing else can match.
+  local p
+  for p in $(pgrep -f "$W/" 2>/dev/null); do
+    [ "$p" = "$$" ] || kill "$p" 2>/dev/null || true
+  done
   rm -rf "$W"
 }
 trap cleanup EXIT
+trap 'exit 130' INT TERM HUP
 fail() {
   echo "FAIL: $*"
   echo "--- outer pane"; tmux -L it-outer capture-pane -p -t it 2>/dev/null || true

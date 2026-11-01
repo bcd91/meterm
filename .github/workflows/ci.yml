@@ -17,11 +17,16 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # it-evidence.sh builds v0.22.0 to test an older meterm against new files
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
       - run: go vet ./...
-      - run: go test ./...
+      - run: go test -race -count=1 ./...
+        if: matrix.os != 'windows-latest'
+      - run: go test -count=1 ./...
+        if: matrix.os == 'windows-latest'
       - name: copy-id --via against a real sshd
         if: matrix.os == 'ubuntu-latest'
         shell: bash
@@ -33,10 +38,19 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y -qq tmux openssh-server
           scripts/it-dev.sh
+      - name: what walks around meterm, and the evidence features, against a real sshd
+        if: matrix.os == 'ubuntu-latest'
+        shell: bash
+        env:
+          METERM_REQUIRE_COMPAT: "1"
+        run: |
+          scripts/it-agents.sh
+          scripts/it-bypass.sh
+          scripts/it-evidence.sh
       - name: cross-build
         if: matrix.os == 'ubuntu-latest'
         shell: bash
         run: |
-          for t in linux/amd64 linux/arm64 darwin/arm64 windows/amd64; do
+          for t in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64; do
             GOOS=${t%/*} GOARCH=${t#*/} go build -o /dev/null ./cmd/meterm
           done

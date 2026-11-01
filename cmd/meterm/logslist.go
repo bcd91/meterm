@@ -42,19 +42,21 @@ func newLogsListCmd(raw *bool) *cobra.Command {
 				if len(args) == 2 {
 					dir = args[1]
 				}
-				recordActivity(cfg, *h, "logs", strings.TrimSpace("list "+dir))
+				run := beginActivity(cfg, *h, "logs", strings.TrimSpace("list "+dir))
 				kickAutosync(false, true)
 				c := sshrun.WinListLogsCommand(r, dir)
 				guardOutput(c, *raw)
-				return runInherited(c)
+				return run.runInherited(c)
 			}
 			dir := logfiles.DefaultDir
 			if len(args) == 2 {
 				dir = args[1]
 			}
-			recordActivity(cfg, *h, "logs", "list "+dir)
+			run := beginActivity(cfg, *h, "logs", "list "+dir)
 			kickAutosync(false, true)
-			return listLogs(cfg, *h, dir, all, *raw)
+			err = listLogs(cfg, *h, dir, all, *raw)
+			run.end(err)
+			return err
 		},
 	}
 	cmd.Flags().BoolVar(&all, "all", false, "also show rotated and .gz-compressed history")

@@ -184,20 +184,27 @@ func uploadAudits(ctx context.Context, hosts []config.Host, rep audit.Report) er
 
 func teamAuditsCmd(teamFlag *string) *cobra.Command {
 	var format string
+	var noFetch bool
 	cmd := &cobra.Command{
 		Use:   "audits",
 		Short: "Latest security audit of each shared host (from `meterm audit watch`)",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			tc, err := openTeamAny()
+			ctx := cmd.Context()
+			open := openTeamAny
+			if noFetch {
+				open = openTeamLocal
+				ctx = team.WithNoFetch(ctx)
+			}
+			tc, err := open()
 			if err != nil {
 				return err
 			}
-			t, err := tc.current(cmd.Context(), *teamFlag)
+			t, err := tc.current(ctx, *teamFlag)
 			if err != nil {
 				return err
 			}
-			recs, err := tc.be.ListAudits(cmd.Context(), t.ID)
+			recs, err := tc.be.ListAudits(ctx, t.ID)
 			if err != nil {
 				return err
 			}
@@ -228,5 +235,6 @@ func teamAuditsCmd(teamFlag *string) *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&format, "format", "text", "text or json")
+	cmd.Flags().BoolVar(&noFetch, "no-fetch", false, "use this machine's clone as it is: no network, and only what it last saw")
 	return cmd
 }
