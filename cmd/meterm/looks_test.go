@@ -392,10 +392,15 @@ func TestLooksRefuseWindowsAndNoSelection(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("METERM_CONFIG", cfgFile)
+	// Windows is refused before hosts are looked at, so pin the OS: on a real
+	// Windows runner the no-hosts check would otherwise never be reached.
+	realGOOS := agentsGOOS
+	t.Cleanup(func() { agentsGOOS = realGOOS })
 	for name, mk := range map[string]func() *cobra.Command{
 		"logins":       func() *cobra.Command { return newLoginsCmd() },
 		"auth-methods": func() *cobra.Command { return newAuthMethodsCmd() },
 	} {
+		agentsGOOS = "linux"
 		c := mk()
 		c.SetArgs([]string{})
 		c.SilenceUsage, c.SilenceErrors = true, true
@@ -408,13 +413,11 @@ func TestLooksRefuseWindowsAndNoSelection(t *testing.T) {
 		if err := c.Execute(); err == nil {
 			t.Errorf("%s with a bad format ran", name)
 		}
-		old := agentsGOOS
 		agentsGOOS = "windows"
 		c = mk()
 		c.SetArgs([]string{"dev1"})
 		c.SilenceUsage, c.SilenceErrors = true, true
 		err := c.Execute()
-		agentsGOOS = old
 		if err == nil || !strings.Contains(err.Error(), "Windows") || !strings.Contains(err.Error(), name) {
 			t.Errorf("%s on Windows: %v", name, err)
 		}
