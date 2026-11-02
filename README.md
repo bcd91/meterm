@@ -166,6 +166,7 @@ meterm activity [--host H] [--verify] [--format text|json]   what meterm was use
 meterm facts [--format json]    history, routes and what's known of each server (local, read-only)
 meterm auth-methods [host...] [--tag t] [--group g] [--format text|json]   which login methods a host accepts, without logging in
 meterm logins [host...] [--tag t] [--group g] [--format text|json]   who logged in, by the host's wtmp, beside meterm's log; read-only, not logged
+meterm caps [host...] [--tag t] [--group g] [--format text|json]   what a host can run: OS, CPUs, memory, disk, load, GPUs, tools; read-only, not logged
 meterm rename <old> <new>       rename a host, keeping history and jump-host references
 meterm files <host> [dir]       two-pane file manager: copy between here and the host (--shell: plain sftp prompt)
 
@@ -866,6 +867,33 @@ Both are looks, like `agents`: a production host only when named, the same `extr
 activity entry, and refused on a Windows client. A look that's safe to run on a schedule would bury
 a log that can't forget. Each one shows in the host's sshd log. The format is in [docs/export.md](docs/export.md).
 
+## What a host can run
+
+`meterm caps` asks each host about itself, for choosing where a job goes: OS and architecture,
+CPUs and model, memory, free disk in the account's home, the one-minute load, NVIDIA GPUs, whether a
+docker daemon answers, and for each of a fixed list of tools (claude, git, go, node, python3, docker,
+kubectl, gcc, java, psql and others) whether it's found, whether asking its version works, and what
+it says.
+
+```sh
+meterm caps web1 gpu1                # one line per host; "-" where something couldn't be read
+meterm caps --group build --format json
+```
+
+It runs one fixed script with no sudo, which reads and asks found tools their version, under a
+five-second timeout where the host has `timeout`, and nothing else. `runs` matters: macOS has stand-ins,
+such as `/usr/bin/java` with no Java behind it, that are found and won't run. What it can't say:
+
+- A tool that isn't found wasn't on the `PATH` a non-interactive login gets, plus `~/.local/bin`,
+  `~/go/bin`, `~/.cargo/bin`, `/opt/homebrew/bin`, `/usr/local/bin` and a few more. One behind nvm or
+  set up only in a shell's rc file won't show.
+- GPUs other than NVIDIA's. Without `nvidia-smi`, `gpus` is null, not empty.
+- Whether claude is logged in, which repos are checked out, or what a login can reach.
+- Load is a moment.
+
+It's a look, like `logins`, and it writes nothing here: keeping what it found over time is for whatever
+reads the JSON. The format is in [docs/export.md](docs/export.md).
+
 ## Status and history
 
 `meterm list --check` TCP-pings each host's port and adds a STATUS column of
@@ -933,8 +961,8 @@ A few things make that reliable:
 
 Every `connect`, `exec`, `cp` and `files` session appends one line to a local
 activity log: when, which local account, which saved host and what it
-resolved to, and the program or paths involved. `logs` is in there too. `meterm agents`
-and `meterm logins` aren't: see [Claude Code sessions on your hosts](#claude-code-sessions-on-your-hosts).
+resolved to, and the program or paths involved. `logs` is in there too. `meterm agents`,
+`meterm logins` and `meterm caps` aren't: see [Claude Code sessions on your hosts](#claude-code-sessions-on-your-hosts).
 
 The log can't forget, and it goes to the team for shared hosts, so a command's
 arguments stay out of it by default: `exec` records `mysql (+3 args)`, and

@@ -173,6 +173,34 @@ the server's list had a name that couldn't be read. `keyboard_interactive` usual
 This is the server's own statement of what's on offer to this account from this address. No key or password is
 offered to it. A jump host on the way is logged in to as usual.
 
+### `meterm caps <host> --format json`
+
+```json
+{"schema":1,"hosts":[{"host":"gpu1","reachable":true,"error":"",
+  "caps":{"complete":true,"user":"deploy","os":"Linux","arch":"x86_64","kernel":"6.12.113+deb13-amd64",
+   "distro":"debian","distro_version":"13","cpu_model":"AMD Ryzen 9 7950X 16-Core Processor","cpus":16,
+   "mem_total_mb":64000,"mem_available_mb":46875,"home_total_mb":937500,"home_free_mb":500000,"load1":0.52,
+   "gpu_check":"nvidia-smi","gpus":[{"name":"NVIDIA GeForce RTX 4090","memory_mb":24564}],
+   "tools":[{"name":"claude","found":false,"runs":null,"path":"","version":""},
+    {"name":"java","found":true,"runs":false,"path":"/usr/bin/java","version":"Unable to locate a Java Runtime."}],
+   "docker_daemon":"28.5.1","unparsed":0}}]}
+```
+
+`caps` is null when `error` is set. Every number in it is null when it couldn't be read, and **null isn't
+0**. `complete` is false when the output stopped before its end, and then what's missing is unknown.
+`mem_available_mb` is Linux's estimate, null elsewhere. `home_*` is the filesystem holding the account's home.
+`load1` is a moment.
+
+`gpu_check` is `nvidia-smi` when that was there to ask, and then `gpus` is a list, maybe empty. Otherwise
+it's empty and `gpus` is null: other GPUs, and Apple's, aren't looked for.
+
+`tools` has one entry for each tool in meterm's list, in its order. `found` false means not on the `PATH` a
+non-interactive login gets plus the usual install places, which isn't proof it isn't installed. `runs` says
+asking its version exited 0, and is null when not found. `version` is the first line it printed, which on
+failure is the error. `docker_daemon` is empty when docker isn't found, `unreachable` when the client couldn't
+reach a daemon (stopped, or no access), and otherwise the daemon's version. `unparsed` counts lines that weren't
+the known shape, such as a banner from a shell's startup file.
+
 ## Agents: `meterm agents --format json`
 
 See [agent-events.md](agent-events.md).

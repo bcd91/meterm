@@ -16,6 +16,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"meterm/internal/activity"
+	"meterm/internal/caps"
 	"meterm/internal/config"
 	"meterm/internal/logins"
 	"meterm/internal/sshrun"
@@ -334,6 +335,82 @@ func TestAskLogins(t *testing.T) {
 	}
 }
 
+func TestAskCaps(t *testing.T) {
+	job := agentJobFor("h")
+	const out = "caps=1\nos=Linux\ncpus=4\ntool=git\t/usr/bin/git\t0\tgit version 2\ntool=java\t/usr/bin/java\t1\tno runtime\nend=1\n"
+	got := askCaps(context.Background(), job, func(_ context.Context, _ config.Resolved) ([]byte, string, bool, error) {
+		return []byte(out), "", false, nil
+	}, time.Second)
+	if got.Error != "" || !got.Reachable || got.Caps == nil || got.Caps.CPUs == nil || *got.Caps.CPUs != 4 || !got.Caps.Complete {
+		t.Fatalf("%+v", got)
+	}
+	var text bytes.Buffer
+	if err := writeCaps(&text, caps.Report{Schema: 1, Hosts: []caps.Host{got}}, "text"); err != nil {
+		t.Fatal(err)
+	}
+	// A number that couldn't be read is "-", never 0, and a tool that won't run isn't
+	// listed as one that does.
+	if !strings.Contains(text.String(), "git (found, won't run: java)") || strings.Contains(text.String(), " 0.0 ") {
+		t.Errorf("%s", text.String())
+	}
+
+	exit1, exit127, exit255 := fakeSSHExit(t, 1), fakeSSHExit(t, caps.ExitNoShell), fakeSSHExit(t, 255)
+	for _, c := range []struct {
+		name      string
+		stderr    string
+		overflow  bool
+		err       error
+		reachable bool
+		want      string
+	}{
+		{"no sh", "", false, exit127, true, "sh not found"},
+		{"script fails", hostileText, false, exit1, true, "the script failed"},
+		{"no connection", hostileText, false, exit255, false, "unreachable"},
+		{"too much", "", true, nil, true, "more than meterm reads"},
+		{"won't run", "", false, errors.New("no ssh"), false, "couldn't run ssh"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			got := askCaps(context.Background(), job, func(_ context.Context, _ config.Resolved) ([]byte, string, bool, error) {
+				return nil, c.stderr, c.overflow, c.err
+			}, time.Second)
+			if !strings.Contains(got.Error, c.want) || got.Caps != nil || got.Reachable != c.reachable {
+				t.Errorf("%+v", got)
+			}
+			if strings.Contains(got.Error, "pwned") {
+				t.Errorf("the host's words got through: %q", got.Error)
+			}
+		})
+	}
+
+	// An error leaves caps null in the JSON, not an empty object that reads as nothing there.
+	var js bytes.Buffer
+	failed := caps.Host{Host: "h", Error: "unreachable: connection refused"}
+	if err := writeCaps(&js, caps.Report{Schema: 1, Hosts: []caps.Host{failed}}, "json"); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(js.String(), `"caps":null`) {
+		t.Errorf("%s", js.String())
+	}
+}
+
+func TestCapsHostileOutputInBothFormats(t *testing.T) {
+	job := agentJobFor("h\x1b[2J")
+	got := askCaps(context.Background(), job, func(_ context.Context, _ config.Resolved) ([]byte, string, bool, error) {
+		return []byte("caps=1\ndistro=x\x1b]0;pwned\x07\u202e\ntool=git\t/usr/bin/git\x1b[2J\t0\tv\x07\n" + hostileText + "\nend=1\n"), "", false, nil
+	}, time.Second)
+	for _, format := range []string{"text", "json"} {
+		var out bytes.Buffer
+		if err := writeCaps(&out, caps.Report{Schema: 1, Hosts: []caps.Host{got}}, format); err != nil {
+			t.Fatal(err)
+		}
+		for _, bad := range []string{"\x1b", "\x07", "\u202e", `\u001b`, `\u0007`, `\u202e`} {
+			if strings.Contains(out.String(), bad) {
+				t.Errorf("%s has %q: %q", format, bad, out.String())
+			}
+		}
+	}
+}
+
 func TestLoginsHostileOutputInBothFormats(t *testing.T) {
 	job := agentJobFor("h\x1b[2J")
 	got := askLogins(context.Background(), job, func(_ context.Context, _ config.Resolved) ([]byte, string, bool, error) {
@@ -381,6 +458,10 @@ func TestLooksShareTheirRefusals(t *testing.T) {
 			if a.Error == "" || a.Methods != nil || a.Reachable {
 				t.Errorf("auth-methods: %+v", a)
 			}
+			cp := askCaps(context.Background(), c.job, neverAsked(t), time.Second)
+			if cp.Error == "" || cp.Caps != nil || cp.Reachable {
+				t.Errorf("caps: %+v", cp)
+			}
 		})
 	}
 }
@@ -399,6 +480,7 @@ func TestLooksRefuseWindowsAndNoSelection(t *testing.T) {
 	for name, mk := range map[string]func() *cobra.Command{
 		"logins":       func() *cobra.Command { return newLoginsCmd() },
 		"auth-methods": func() *cobra.Command { return newAuthMethodsCmd() },
+		"caps":         func() *cobra.Command { return newCapsCmd() },
 	} {
 		agentsGOOS = "linux"
 		c := mk()

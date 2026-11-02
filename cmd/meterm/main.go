@@ -104,6 +104,7 @@ func main() {
 		newFactsCmd(),
 		newAuthMethodsCmd(),
 		newLoginsCmd(),
+		newCapsCmd(),
 		newTeamCmd(),
 	)
 
