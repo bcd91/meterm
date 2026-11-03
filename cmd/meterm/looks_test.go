@@ -350,8 +350,73 @@ func TestAskCaps(t *testing.T) {
 	}
 	// A number that couldn't be read is "-", never 0, and a tool that won't run isn't
 	// listed as one that does.
-	if !strings.Contains(text.String(), "git (found, won't run: java)") || strings.Contains(text.String(), " 0.0 ") {
+	if !strings.Contains(text.String(), "git (found, version check failed: java)") || strings.Contains(text.String(), " 0.0 ") {
 		t.Errorf("%s", text.String())
+	}
+
+	// A host that printed nothing of the script's, as a forced command would, didn't answer.
+	none := askCaps(context.Background(), job, func(_ context.Context, _ config.Resolved) ([]byte, string, bool, error) {
+		return []byte("This account is for git only.\n"), "", false, nil
+	}, time.Second)
+	if none.Error == "" || none.Caps != nil || !none.Reachable {
+		t.Errorf("%+v", none)
+	}
+
+	// At the deadline, what came before it is kept, as incomplete.
+	partial := askCaps(context.Background(), job, func(ctx context.Context, _ config.Resolved) ([]byte, string, bool, error) {
+		<-ctx.Done()
+		return []byte("caps=1\nos=Linux\ncpus=4\ntool=claude\n"), "", false, ctx.Err()
+	}, 50*time.Millisecond)
+	if partial.Error != "" || partial.Caps == nil || partial.Caps.Complete || partial.Caps.CPUs == nil || *partial.Caps.CPUs != 4 {
+		t.Errorf("%+v", partial)
+	}
+	silent := askCaps(context.Background(), job, func(ctx context.Context, _ config.Resolved) ([]byte, string, bool, error) {
+		<-ctx.Done()
+		return nil, "", false, ctx.Err()
+	}, 50*time.Millisecond)
+	if !strings.Contains(silent.Error, "timed out") || silent.Caps != nil {
+		t.Errorf("%+v", silent)
+	}
+
+	// Exit 2 for a host that didn't answer, and for one that answered in part.
+	whole := caps.Caps{Complete: true}
+	for _, c := range []struct {
+		hosts           []caps.Host
+		failed, partial int
+	}{
+		{[]caps.Host{{Caps: &whole}}, 0, 0},
+		{[]caps.Host{{Caps: &whole}, {Error: "x"}}, 1, 0},
+		{[]caps.Host{{Caps: partial.Caps}}, 0, 1},
+		{[]caps.Host{{Reachable: true}}, 0, 1},
+	} {
+		if f, p := capsShortfall(caps.Report{Hosts: c.hosts}); f != c.failed || p != c.partial {
+			t.Errorf("%+v: %d %d", c.hosts, f, p)
+		}
+	}
+
+	// The table: unknown is "-", never none; a failed GPU check, an incomplete answer and a
+	// tool that wasn't checked each say so.
+	four := 4
+	notRun := caps.Tool{Name: "java", Found: true, Note: "not run: a macOS stand-in"}
+	for _, c := range []struct {
+		caps caps.Caps
+		want string
+		not  string
+	}{
+		{caps.Caps{Complete: true}, "\t-\t", "none"},
+		{caps.Caps{Complete: true, GPUCheck: "nvidia-smi", GPUs: []caps.GPU{}}, "none (nvidia-smi)", ""},
+		{caps.Caps{Complete: true, GPUCheck: "failed"}, "unknown (nvidia-smi failed)", "none"},
+		{caps.Caps{Complete: false, CPUs: &four}, "[incomplete", ""},
+		{caps.Caps{Complete: true, Tools: []caps.Tool{notRun}}, "not checked or timed out: java", "version check failed"},
+	} {
+		var b bytes.Buffer
+		if err := writeCaps(&b, caps.Report{Schema: 1, Hosts: []caps.Host{{Host: "h", Reachable: true, Caps: &c.caps}}}, "text"); err != nil {
+			t.Fatal(err)
+		}
+		out := strings.ReplaceAll(b.String(), "  ", "\t")
+		if !strings.Contains(out, c.want) && !strings.Contains(b.String(), c.want) || (c.not != "" && strings.Contains(b.String(), c.not)) {
+			t.Errorf("want %q, not %q:\n%s", c.want, c.not, b.String())
+		}
 	}
 
 	exit1, exit127, exit255 := fakeSSHExit(t, 1), fakeSSHExit(t, caps.ExitNoShell), fakeSSHExit(t, 255)

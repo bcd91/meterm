@@ -6,6 +6,7 @@ package caps
 import (
 	"bufio"
 	"bytes"
+	"math"
 	"strconv"
 	"strings"
 
@@ -31,41 +32,69 @@ const SearchPath = "$HOME/.local/bin:$HOME/bin:$HOME/.claude/local:$HOME/.npm-gl
 // RemoteCommand is all `meterm caps` ever runs on a host. As with the other looks it's a
 // constant, on one line inside one pair of single quotes, for whatever the login shell is:
 // csh can't take a newline there, and fish reads a doubled backslash, so neither appears.
-// It reads, and runs nothing but `--version` (or its like) of tools it finds, under a
-// five-second timeout where the host has one. No sudo. Those run from / with what would
-// let them fetch or set themselves up turned off: a go.mod or rust-toolchain file in the
-// home could otherwise make go or rustup download a toolchain, and dotnet writes its
-// first-run files. Each fact is a line of key=value,
-// and `end=1` says it got to the end.
+//
+// What it runs: uname, id, sysctl, df, sed, cat and tr; /etc/os-release, which is shell
+// code, in a subshell; `nvidia-smi --query-gpu`; `docker context inspect` and `docker info`
+// when the daemon is local; and each tool it finds with `--version` or its like. No sudo.
+// Each of those is under a five-second limit, with what it started, by perl or else
+// `timeout` where the host has either, from /, with toolchain downloads and first-run setup turned off. On a
+// Mac without the developer tools, or without a JDK, /usr/bin's stand-ins aren't run, as
+// they'd ask whoever is at its screen to install something.
+//
+// Every value goes through kv, which strips newlines, so nothing a command prints can
+// start a line of its own. A line is key=value, and `end=1` says it got to the end.
 var RemoteCommand = `sh -c 'LC_ALL=C; export LC_ALL; PATH="$PATH:` + SearchPath + `"; export PATH; ` +
-	`T=; command -v timeout >/dev/null 2>&1 && T="timeout 5"; ` +
-	`echo caps=1; echo "user=$(id -un 2>/dev/null)"; ` +
-	`echo "os=$(uname -s)"; echo "arch=$(uname -m)"; echo "kernel=$(uname -r)"; ` +
-	`if [ -r /etc/os-release ]; then (. /etc/os-release; echo "distro=$ID"; echo "distro_version=$VERSION_ID"); fi; ` +
-	`if command -v sw_vers >/dev/null 2>&1; then echo distro=macos; echo "distro_version=$(sw_vers -productVersion)"; fi; ` +
-	`echo "cpus=$(nproc 2>/dev/null || getconf _NPROCESSORS_ONLN 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null)"; ` +
-	`if [ -r /proc/cpuinfo ]; then echo "cpu_model=$(sed -n "s/^model name[[:space:]]*: //p" /proc/cpuinfo | head -n 1)"; ` +
-	`else echo "cpu_model=$(sysctl -n machdep.cpu.brand_string 2>/dev/null)"; fi; ` +
+	`kv() { printf "%s=%s\n" "$1" "$(printf "%s" "$2" | tr -d "\r\n")"; }; ` +
+	`TO=; PL=; if command -v perl >/dev/null 2>&1; then PL=1; elif timeout 5 true >/dev/null 2>&1; then TO=1; fi; ` +
+	`t5() { if [ -n "$PL" ]; then perl -e "` + perlLimit + `" 5 "$@"; elif [ -n "$TO" ]; then timeout 5 "$@"; else "$@"; fi; }; ` +
+	`D=$(uname -s); echo caps=1; kv user "$(id -un 2>/dev/null)"; kv os "$D"; kv arch "$(uname -m)"; kv kernel "$(uname -r)"; ` +
+	`if [ -r /etc/os-release ]; then kv distro "$(. /etc/os-release; echo "$ID")"; kv distro_version "$(. /etc/os-release; echo "$VERSION_ID")"; fi; ` +
+	`if command -v sw_vers >/dev/null 2>&1; then echo distro=macos; kv distro_version "$(sw_vers -productVersion)"; fi; ` +
+	`kv cpus "$(nproc 2>/dev/null || getconf _NPROCESSORS_ONLN 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null)"; ` +
+	`if [ -r /proc/cpuinfo ]; then kv cpu_model "$(sed -n "s/^model name[[:space:]]*: //p" /proc/cpuinfo | head -n 1)"; ` +
+	`else kv cpu_model "$(sysctl -n machdep.cpu.brand_string 2>/dev/null || sysctl -n hw.model 2>/dev/null)"; fi; ` +
 	`if [ -r /proc/meminfo ]; then sed -n "s/^MemTotal: *\([0-9]*\) kB$/mem_total_kb=\1/p; s/^MemAvailable: *\([0-9]*\) kB$/mem_available_kb=\1/p" /proc/meminfo; ` +
-	`else echo "mem_total_bytes=$(sysctl -n hw.memsize 2>/dev/null)"; fi; ` +
-	`echo "home_df=$(df -Pk "$HOME" 2>/dev/null | tail -n 1)"; ` +
-	`if [ -r /proc/loadavg ]; then echo "load=$(cat /proc/loadavg)"; else echo "load=$(sysctl -n vm.loadavg 2>/dev/null)"; fi; ` +
-	`if command -v nvidia-smi >/dev/null 2>&1; then echo gpu_check=nvidia-smi; ` +
-	`$T nvidia-smi --query-gpu=name,memory.total --format=csv,noheader,nounits 2>/dev/null | sed "s/^/gpu=/"; fi; ` +
+	`else kv mem_total_bytes "$(sysctl -n hw.memsize 2>/dev/null || sysctl -n hw.physmem 2>/dev/null)"; fi; ` +
+	`if [ -r /sys/fs/cgroup/memory.max ]; then kv cgroup_memory_max "$(cat /sys/fs/cgroup/memory.max)"; fi; ` +
+	`if [ -r /sys/fs/cgroup/cpu.max ]; then kv cgroup_cpu_max "$(cat /sys/fs/cgroup/cpu.max)"; fi; ` +
+	`kv home_df "$(df -Pk "$HOME" 2>/dev/null | tail -n 1)"; ` +
+	`if [ -r /proc/loadavg ]; then kv load "$(cat /proc/loadavg)"; else kv load "$(sysctl -n vm.loadavg 2>/dev/null)"; fi; ` +
+	`if command -v nvidia-smi >/dev/null 2>&1; then if g=$(t5 nvidia-smi --query-gpu=name,memory.total --format=csv,noheader,nounits </dev/null 2>/dev/null); ` +
+	`then echo gpu_check=nvidia-smi; printf "%s\n" "$g" | sed -n "s/^./gpu=&/p"; else echo gpu_check=failed; fi; fi; ` +
+	`NOCLT=; NOJDK=; if [ "$D" = Darwin ]; then [ -d "$(xcode-select -p 2>/dev/null)" ] || NOCLT=1; ` +
+	`set -- /Library/Java/JavaVirtualMachines/*/Contents/Home/bin/java; [ -x "$1" ] || NOJDK=1; fi; ` +
 	`for t in ` + strings.Join(Tools, " ") + `; do p=$(command -v $t 2>/dev/null) || { echo "tool=$t"; continue; }; ` +
-	`case $t in go) a=version;; java) a=-version;; kubectl) a="version --client";; *) a=--version;; esac; ` +
-	`v=$(cd / && GOTOOLCHAIN=local RUSTUP_AUTO_INSTALL=0 DOTNET_NOLOGO=1 DOTNET_SKIP_FIRST_TIME_EXPERIENCE=1 DOTNET_CLI_TELEMETRY_OPTOUT=1 $T "$p" $a </dev/null 2>&1); e=$?; printf "tool=%s\t%s\t%s\t%s\n" "$t" "$p" "$e" "$(printf "%s" "$v" | head -n 1)"; done; ` +
-	`if command -v docker >/dev/null 2>&1; then if v=$($T docker info --format "{{.ServerVersion}}" </dev/null 2>/dev/null) && [ -n "$v" ]; ` +
-	`then echo "docker_daemon=$v"; else echo docker_daemon=-; fi; fi; ` +
+	`s=; if [ "$D" = Darwin ]; then case $p in /usr/bin/java) s=$NOJDK;; /usr/bin/*) s=$NOCLT;; esac; fi; ` +
+	`if [ -n "$s" ]; then printf "tool=%s\t%s\t-\t\n" "$t" "$p"; continue; fi; ` +
+	`case $t in go) a=version;; java) a=-version;; kubectl) a="version --client";; tmux) a=-V;; *) a=--version;; esac; ` +
+	`v=$(cd / && export GOTOOLCHAIN=local RUSTUP_AUTO_INSTALL=0 DOTNET_NOLOGO=1 DOTNET_SKIP_FIRST_TIME_EXPERIENCE=1 DOTNET_CLI_TELEMETRY_OPTOUT=1 ` +
+	`DOTNET_GENERATE_ASPNET_CERTIFICATE=false DOTNET_ADD_GLOBAL_TOOLS_TO_PATH=false; t5 "$p" $a </dev/null 2>&1); e=$?; ` +
+	`printf "tool=%s\t%s\t%s\t%s\n" "$t" "$p" "$e" "$(printf "%s\n" "$v" | sed -n "/[0-9]\.[0-9]/p" | head -n 1 | tr -d "\r")"; done; ` +
+	`if command -v docker >/dev/null 2>&1; then h=$DOCKER_HOST; [ -n "$h" ] || h=$(t5 docker context inspect --format "{{.Endpoints.docker.Host}}" </dev/null 2>/dev/null); ` +
+	`case $h in ""|unix://*|npipe://*) if v=$(t5 docker info --format "{{.ServerVersion}}" </dev/null 2>/dev/null) && [ -n "$v" ]; ` +
+	`then kv docker_daemon "$v"; else echo docker_daemon=-; fi;; *) echo docker_daemon=not-local;; esac; fi; ` +
 	`echo end=1'`
+
+// perlLimit runs its arguments in a process group of their own and kills the whole group
+// after the given seconds, exiting 142. Killing only the one process isn't enough: a child
+// it started keeps the output open, and the shell waits for that. It goes inside double
+// quotes in sh, so each $ is escaped, and it has no ! for csh.
+const perlLimit = `\$t=shift; \$p=fork; unless (\$p) { setpgrp(0,0); exec @ARGV; exit 127 } ` +
+	`\$SIG{ALRM}=sub { kill 9, -\$p; exit 142 }; alarm \$t; waitpid(\$p,0); exit(\$?>>8)`
 
 // ExitNoShell is what a login shell gives when it can't find sh.
 const ExitNoShell = 127
+
+// timedOut are the statuses of a version check that was stopped: timeout's, and a kill
+// or perl's alarm as a shell reports them.
+var timedOut = map[int]bool{124: true, 137: true, 142: true}
 
 // Limits on what's believed.
 const (
 	MaxOutput = 256 << 10
 	maxText   = 256
+	maxCPUs   = 1 << 16
+	maxLoad   = 1e5
 )
 
 // Report is what `meterm caps --format json` prints.
@@ -96,24 +125,35 @@ type Caps struct {
 	DistroVersion string `json:"distro_version"`
 	CPUModel      string `json:"cpu_model"`
 	CPUs          *int   `json:"cpus"`
-	MemTotalMB    *int64 `json:"mem_total_mb"`
+	// CPULimit is a cgroup's CPU quota in CPUs, as inside a container, when there is one.
+	CPULimit   *float64 `json:"cpu_limit"`
+	MemTotalMB *int64   `json:"mem_total_mb"`
 	// MemAvailableMB is Linux's estimate of what can be had without swapping. Null
 	// elsewhere.
 	MemAvailableMB *int64 `json:"mem_available_mb"`
+	// MemLimitMB is a cgroup's memory limit, as inside a container, when there is one.
+	// Inside one, the totals above are usually the machine's, not what's allowed.
+	MemLimitMB *int64 `json:"mem_limit_mb"`
 	// Of the filesystem holding the account's home.
 	HomeTotalMB *int64   `json:"home_total_mb"`
 	HomeFreeMB  *int64   `json:"home_free_mb"`
 	Load1       *float64 `json:"load1"`
-	// GPUCheck names how GPUs were looked for, or is empty when they weren't, and then
-	// GPUs is null: no nvidia-smi says nothing about other GPUs.
+	// GPUCheck is "nvidia-smi" when it answered, and then GPUs is a list, maybe empty;
+	// "failed" when it was there and didn't answer; or empty when it wasn't there. GPUs is
+	// null in both of the last two: they say nothing about what GPUs there are.
 	GPUCheck string `json:"gpu_check"`
 	GPUs     []GPU  `json:"gpus"`
 	Tools    []Tool `json:"tools"`
-	// DockerDaemon is empty when docker isn't found, "unreachable" when the client
-	// couldn't reach a daemon (stopped, or no access), else the daemon's version.
+	// DockerDaemon is empty when docker isn't found, "unreachable" when the client couldn't
+	// reach a local daemon (stopped, or no access), "not-local" when its context or
+	// DOCKER_HOST is elsewhere and so wasn't asked, else the daemon's version.
 	DockerDaemon string `json:"docker_daemon"`
-	// Unparsed counts lines that weren't the known shape.
+	// Unparsed counts lines that weren't the known shape, or said a second time.
 	Unparsed int `json:"unparsed"`
+
+	// Answered says the script's output was seen at all, which a forced command or a
+	// shell that exits early wouldn't give.
+	Answered bool `json:"-"`
 }
 
 // GPU is one line of nvidia-smi.
@@ -123,19 +163,28 @@ type GPU struct {
 }
 
 // Tool is one program looked for. Found false means not on the PATH that was searched,
-// which isn't proof it isn't installed. Runs says asking its version exited 0: macOS has
-// stand-ins, such as /usr/bin/java with no Java behind it, that are found and don't run.
-// It's null when it wasn't found or the exit status didn't come back. Version is the first
-// line the program printed when asked, as it printed it, which on failure is the error.
+// which isn't proof it isn't installed. Runs says asking its version exited 0. False means
+// that check failed, which can be a stand-in with nothing behind it, such as macOS's
+// /usr/bin/java, or a tool that doesn't take the flag. Null means not found, or not known,
+// and Note says why. Version is the first line it printed with a dotted number in it.
 type Tool struct {
 	Name    string `json:"name"`
 	Found   bool   `json:"found"`
 	Runs    *bool  `json:"runs"`
+	Note    string `json:"note"` // "timed out", or "not run: a macOS stand-in"
 	Path    string `json:"path"`
 	Version string `json:"version"`
 }
 
 func clean(s string) string { return termsafe.Clip(termsafe.Text(strings.TrimSpace(s)), maxText) }
+
+// scalars are the keys said once. A second one, from anything that got a line in, makes
+// the value unknown rather than either.
+var scalars = map[string]bool{
+	"user": true, "os": true, "arch": true, "kernel": true, "distro": true, "distro_version": true, "cpu_model": true,
+	"cpus": true, "mem_total_kb": true, "mem_available_kb": true, "mem_total_bytes": true, "cgroup_memory_max": true,
+	"cgroup_cpu_max": true, "home_df": true, "load": true, "gpu_check": true, "docker_daemon": true, "end": true,
+}
 
 // Parse reads RemoteCommand's output.
 func Parse(raw []byte) Caps {
@@ -144,8 +193,8 @@ func Parse(raw []byte) Caps {
 	for _, t := range Tools {
 		known[t] = true
 	}
-	seenTool := map[string]bool{}
-	started := false
+	var seenTool, seen, twice map[string]bool
+	before := 0
 	sc := bufio.NewScanner(bytes.NewReader(raw))
 	sc.Buffer(make([]byte, 64*1024), MaxOutput)
 	for sc.Scan() {
@@ -154,18 +203,31 @@ func Parse(raw []byte) Caps {
 			continue
 		}
 		key, val, ok := strings.Cut(line, "=")
+		if key == "caps" && val == "1" {
+			// The script's start. Anything before it, a shell's startup file included, is
+			// thrown away, and so is everything if it comes again.
+			if c.Answered {
+				before = c.Unparsed // which already holds what came before
+			}
+			c = Caps{Answered: true, Unparsed: before}
+			seenTool, seen, twice = map[string]bool{}, map[string]bool{}, map[string]bool{}
+			continue
+		}
+		if !c.Answered {
+			before++
+			continue
+		}
 		if !ok {
 			c.Unparsed++
 			continue
 		}
-		if !started {
-			// A shell's startup file can print before the script does.
-			if key == "caps" && val == "1" {
-				started = true
-			} else {
+		if scalars[key] {
+			if seen[key] {
+				twice[key] = true
 				c.Unparsed++
+				continue
 			}
-			continue
+			seen[key] = true
 		}
 		switch key {
 		case "user":
@@ -183,7 +245,7 @@ func Parse(raw []byte) Caps {
 		case "cpu_model":
 			c.CPUModel = clean(val)
 		case "cpus":
-			if n, err := strconv.Atoi(strings.TrimSpace(val)); err == nil && n > 0 {
+			if n, err := strconv.Atoi(strings.TrimSpace(val)); err == nil && n > 0 && n <= maxCPUs {
 				c.CPUs = &n
 			}
 		case "mem_total_kb":
@@ -192,23 +254,32 @@ func Parse(raw []byte) Caps {
 			c.MemAvailableMB = positive(val, 1024)
 		case "mem_total_bytes":
 			c.MemTotalMB = positive(val, 1024*1024)
+		case "cgroup_memory_max":
+			c.MemLimitMB = positive(val, 1024*1024) // "max" is no limit, and stays null
+		case "cgroup_cpu_max":
+			c.CPULimit = parseCPUMax(val)
 		case "home_df":
 			c.HomeTotalMB, c.HomeFreeMB = parseDF(val)
 		case "load":
 			c.Load1 = parseLoad(val)
 		case "gpu_check":
-			c.GPUCheck = clean(val)
-			if c.GPUs == nil {
-				c.GPUs = []GPU{}
+			switch v := clean(val); v {
+			case "nvidia-smi":
+				c.GPUCheck, c.GPUs = v, []GPU{}
+			case "failed":
+				c.GPUCheck = v
+			default:
+				c.Unparsed++
 			}
 		case "gpu":
 			name, mem, _ := strings.Cut(val, ",")
+			if c.GPUCheck != "nvidia-smi" || clean(name) == "" {
+				c.Unparsed++
+				continue
+			}
 			g := GPU{Name: clean(name)}
 			if n, err := strconv.ParseInt(strings.TrimSpace(mem), 10, 64); err == nil && n > 0 {
 				g.MemoryMB = &n
-			}
-			if c.GPUs == nil {
-				c.GPUs = []GPU{}
 			}
 			c.GPUs = append(c.GPUs, g)
 		case "tool":
@@ -222,7 +293,14 @@ func Parse(raw []byte) Caps {
 			if len(f) >= 2 && strings.TrimSpace(f[1]) != "" {
 				t.Found, t.Path = true, clean(f[1])
 				if len(f) >= 3 {
-					if e, err := strconv.Atoi(f[2]); err == nil {
+					e, err := strconv.Atoi(f[2])
+					switch {
+					case f[2] == "-":
+						t.Note = "not run: a macOS stand-in"
+					case err != nil:
+					case timedOut[e]:
+						t.Note = "timed out"
+					default:
 						runs := e == 0
 						t.Runs = &runs
 					}
@@ -233,9 +311,11 @@ func Parse(raw []byte) Caps {
 			}
 			c.Tools = append(c.Tools, t)
 		case "docker_daemon":
-			if v := clean(val); v == "-" {
+			switch v := clean(val); v {
+			case "-":
 				c.DockerDaemon = "unreachable"
-			} else if v != "" {
+			case "":
+			default:
 				c.DockerDaemon = v
 			}
 		case "end":
@@ -243,6 +323,48 @@ func Parse(raw []byte) Caps {
 		default:
 			c.Unparsed++
 		}
+	}
+	// Said twice is unknown: which the host meant can't be told.
+	for key := range twice {
+		switch key {
+		case "user":
+			c.User = ""
+		case "os":
+			c.OS = ""
+		case "arch":
+			c.Arch = ""
+		case "kernel":
+			c.Kernel = ""
+		case "distro":
+			c.Distro = ""
+		case "distro_version":
+			c.DistroVersion = ""
+		case "cpu_model":
+			c.CPUModel = ""
+		case "cpus":
+			c.CPUs = nil
+		case "mem_total_kb", "mem_total_bytes":
+			c.MemTotalMB = nil
+		case "mem_available_kb":
+			c.MemAvailableMB = nil
+		case "cgroup_memory_max":
+			c.MemLimitMB = nil
+		case "cgroup_cpu_max":
+			c.CPULimit = nil
+		case "home_df":
+			c.HomeTotalMB, c.HomeFreeMB = nil, nil
+		case "load":
+			c.Load1 = nil
+		case "gpu_check":
+			c.GPUCheck, c.GPUs = "", nil
+		case "docker_daemon":
+			c.DockerDaemon = ""
+		case "end":
+			c.Complete = false
+		}
+	}
+	if !c.Answered {
+		c.Unparsed = before
 	}
 	if c.Tools == nil {
 		c.Tools = []Tool{}
@@ -253,7 +375,7 @@ func Parse(raw []byte) Caps {
 // positive reads a whole number, in units of div after dividing, or nil.
 func positive(s string, div int64) *int64 {
 	n, err := strconv.ParseInt(strings.TrimSpace(s), 10, 64)
-	if err != nil || n <= 0 {
+	if err != nil || n <= 0 || n/div == 0 {
 		return nil
 	}
 	n /= div
@@ -280,15 +402,37 @@ func parseDF(s string) (total, free *int64) {
 	return nil, nil
 }
 
+// finite is a float JSON can carry, in range.
+func finite(v, hi float64) bool { return !math.IsNaN(v) && !math.IsInf(v, 0) && v >= 0 && v <= hi }
+
 // parseLoad reads the one-minute load from /proc/loadavg ("0.12 0.10 0.05 1/234 5678") or
-// sysctl's vm.loadavg ("{ 1.23 1.10 1.00 }").
+// sysctl's vm.loadavg ("{ 1.23 1.10 1.00 }"). NaN or Inf would make the whole report fail
+// to encode, for every host, so they're unknown.
 func parseLoad(s string) *float64 {
 	f := strings.Fields(strings.TrimPrefix(strings.TrimSpace(s), "{"))
 	if len(f) == 0 {
 		return nil
 	}
 	v, err := strconv.ParseFloat(f[0], 64)
-	if err != nil || v < 0 {
+	if err != nil || !finite(v, maxLoad) {
+		return nil
+	}
+	return &v
+}
+
+// parseCPUMax reads cgroup v2's cpu.max, "quota period" or "max period", as CPUs.
+func parseCPUMax(s string) *float64 {
+	f := strings.Fields(s)
+	if len(f) != 2 || f[0] == "max" {
+		return nil
+	}
+	q, err1 := strconv.ParseFloat(f[0], 64)
+	p, err2 := strconv.ParseFloat(f[1], 64)
+	if err1 != nil || err2 != nil || p <= 0 || q <= 0 {
+		return nil
+	}
+	v := math.Round(q/p*100) / 100
+	if !finite(v, maxCPUs) || v == 0 {
 		return nil
 	}
 	return &v

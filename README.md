@@ -871,28 +871,39 @@ a log that can't forget. Each one shows in the host's sshd log. The format is in
 
 `meterm caps` asks each host about itself, for choosing where a job goes: OS and architecture,
 CPUs and model, memory, free disk in the account's home, the one-minute load, NVIDIA GPUs, whether a
-docker daemon answers, and for each of a fixed list of tools (claude, git, go, node, python3, docker,
-kubectl, gcc, java, psql and others) whether it's found, whether asking its version works, and what
-it says.
+local docker daemon answers, and for each of a fixed list of tools (claude, git, go, node, python3,
+docker, kubectl, gcc, java, psql and others) whether it's found, whether asking its version works,
+and the version.
 
 ```sh
 meterm caps web1 gpu1                # one line per host; "-" where something couldn't be read
 meterm caps --group build --format json
 ```
 
-It runs one fixed script with no sudo, which reads and asks found tools their version, under a
-five-second timeout where the host has `timeout`, and nothing else. `runs` matters: macOS has stand-ins,
-such as `/usr/bin/java` with no Java behind it, that are found and won't run. What it can't say:
+It runs one fixed script with no sudo. Besides reading files and running `uname`, `df` and the like,
+it runs `nvidia-smi`, `docker info` when the daemon is local, and each found tool's version flag, from
+`/`, with toolchain downloads and first-run setup turned off. Each of those gets five seconds,
+together with anything it starts, where the host has perl or `timeout`. A tool that hangs past the
+host's own limit leaves what came before it, marked incomplete. On a Mac without the developer tools
+or a JDK, `/usr/bin`'s stand-ins aren't run, as they'd ask whoever is at that screen to install
+something. What it can't say:
 
 - A tool that isn't found wasn't on the `PATH` a non-interactive login gets, plus `~/.local/bin`,
   `~/go/bin`, `~/.cargo/bin`, `/opt/homebrew/bin`, `/usr/local/bin` and a few more. One behind nvm or
   set up only in a shell's rc file won't show.
-- GPUs other than NVIDIA's. Without `nvidia-smi`, `gpus` is null, not empty.
+- `runs` false means the version check failed. That's a stand-in with nothing behind it, such as
+  macOS's `/usr/bin/java`, or a tool that doesn't take the flag it was given.
+- GPUs other than NVIDIA's. Without `nvidia-smi`, or when it fails, `gpus` is null, not empty.
+- Inside a container, memory and CPUs are usually the machine's. `mem_limit_mb` and `cpu_limit` are
+  the cgroup's limits, when there are any.
+- A docker context or `DOCKER_HOST` that points elsewhere isn't followed: `docker_daemon` says
+  `not-local`.
 - Whether claude is logged in, which repos are checked out, or what a login can reach.
 - Load is a moment.
 
 It's a look, like `logins`, and it writes nothing here: keeping what it found over time is for whatever
-reads the JSON. The format is in [docs/export.md](docs/export.md).
+reads the JSON. Exit 2 means a host didn't answer or answered only in part. The format is in
+[docs/export.md](docs/export.md).
 
 ## Status and history
 

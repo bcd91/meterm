@@ -42,23 +42,32 @@ func newCapsCmd() *cobra.Command {
 		Short: "Show what hosts can run: OS, CPUs, memory, disk, load, GPUs, tools (read-only, not logged)",
 		Long: "Runs one fixed, read-only script on each selected host, with no sudo, and reports what\n" +
 			"the host says of itself: OS and architecture, CPUs and model, memory, free disk in the\n" +
-			"account's home, the one-minute load, NVIDIA GPUs, whether a docker daemon answers, and\n" +
-			"for each of " + strconv.Itoa(len(caps.Tools)) + " tools whether it's found, whether asking its version works, and\n" +
-			"what that says. It runs nothing else. Hosts are chosen, and production refused unless\n" +
-			"named, as with `agents`, and so are the extra_args a host can have.\n\n" +
+			"account's home, the one-minute load, NVIDIA GPUs, whether a local docker daemon answers,\n" +
+			"and for each of " + strconv.Itoa(len(caps.Tools)) + " tools whether it's found, whether asking its version works,\n" +
+			"and what that says. Besides reading, it runs nvidia-smi, docker info (only for a local\n" +
+			"daemon), and those tools' version flags, each under five seconds where the host has\n" +
+			"timeout or perl. On a Mac without the developer tools or a JDK, /usr/bin's stand-ins\n" +
+			"aren't run, as they'd ask whoever is at its screen to install something. Hosts are\n" +
+			"chosen, and production refused unless named, as with `agents`, and so are the\n" +
+			"extra_args a host can have.\n\n" +
 			"What it can't say:\n" +
 			"- A tool that isn't found wasn't on the PATH a non-interactive login gets, plus the usual\n" +
 			"  install places. One installed elsewhere, or behind nvm or a shell's rc file, won't show.\n" +
-			"- GPUs other than NVIDIA's, which need nvidia-smi. gpus is null when it wasn't there.\n" +
+			"- GPUs other than NVIDIA's, which need nvidia-smi. gpus is null when it wasn't there or\n" +
+			"  failed.\n" +
+			"- Inside a container, memory and CPUs are usually the machine's: mem_limit_mb and\n" +
+			"  cpu_limit are the cgroup's limits, when it has them.\n" +
+			"- runs false means the version check failed, which a working tool that doesn't take\n" +
+			"  the flag would also give.\n" +
 			"- Whether claude is logged in, what repos are checked out, or what a login can reach.\n" +
 			"- Load is a moment. Run it again before a choice that depends on it.\n\n" +
 			"--format json prints {\"schema\":1,\"hosts\":[{\"host\",\"reachable\",\"error\",\"caps\"}]}:\n" +
 			"see docs/export.md. caps is null when error is set, and a number that couldn't be read\n" +
 			"is null, never 0.\n\n" +
 			"Exit codes:\n" +
-			"  0  every host answered\n" +
+			"  0  every host answered in full\n" +
 			"  1  nothing was asked: bad flags, no selection, or an unknown host\n" +
-			"  2  the report is on stdout, and at least one host has an error in it",
+			"  2  the report is on stdout, and at least one host has an error or answered in part",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			jobs, _, err := flags.jobs("caps", args)
 			if err != nil {
@@ -75,14 +84,14 @@ func newCapsCmd() *cobra.Command {
 			if err := writeCaps(os.Stdout, rep, flags.format); err != nil {
 				return err
 			}
-			failed := 0
-			for _, h := range rep.Hosts {
-				if h.Error != "" {
-					failed++
-				}
-			}
+			failed, partial := capsShortfall(rep)
 			if failed > 0 {
 				fmt.Fprintf(os.Stderr, "meterm: %d of %d host(s) didn't answer\n", failed, len(rep.Hosts))
+			}
+			if partial > 0 {
+				fmt.Fprintf(os.Stderr, "meterm: %d of %d host(s) answered only in part\n", partial, len(rep.Hosts))
+			}
+			if failed+partial > 0 {
 				finish(agentsIncomplete)
 			}
 			return nil
@@ -92,6 +101,20 @@ func newCapsCmd() *cobra.Command {
 	flags.timeout = capsDefaultTimeout
 	cmd.Flags().Lookup("timeout").DefValue = capsDefaultTimeout.String()
 	return cmd
+}
+
+// capsShortfall counts the hosts that didn't answer, and those that answered in part. Either
+// makes the exit 2.
+func capsShortfall(rep caps.Report) (failed, partial int) {
+	for _, h := range rep.Hosts {
+		switch {
+		case h.Error != "":
+			failed++
+		case h.Caps == nil || !h.Caps.Complete:
+			partial++
+		}
+	}
+	return failed, partial
 }
 
 func runCaps(ctx context.Context, jobs []agentJob, query agentQuery, timeout time.Duration, parallel int) caps.Report {
@@ -130,6 +153,13 @@ func askCaps(ctx context.Context, job agentJob, query agentQuery, timeout time.D
 		out.Error = "unexpected output: more than meterm reads"
 		return out
 	case ctx.Err() == context.DeadlineExceeded:
+		// What came before the deadline is kept, as incomplete: one tool that hangs
+		// shouldn't cost the rest.
+		if c := caps.Parse(stdout); c.Answered {
+			c.Complete = false
+			out.Reachable, out.Caps = true, &c
+			return out
+		}
 		out.Error = "timed out after " + timeout.String()
 		return out
 	case ctx.Err() != nil:
@@ -146,7 +176,7 @@ func askCaps(ctx context.Context, job agentJob, query agentQuery, timeout time.D
 			out.Error = "sh not found on this host"
 		default:
 			out.Reachable = true
-			out.Error = "the script failed there: it needs a POSIX sh, which a Windows server doesn't have"
+			out.Error = fmt.Sprintf("the script failed there (exit %d): it needs a POSIX sh, which a Windows server doesn't have", exit.ExitCode())
 		}
 		return out
 	case err != nil && !errors.Is(err, exec.ErrWaitDelay):
@@ -155,6 +185,10 @@ func askCaps(ctx context.Context, job agentJob, query agentQuery, timeout time.D
 	}
 	out.Reachable = true
 	c := caps.Parse(stdout)
+	if !c.Answered {
+		out.Error = "it answered with nothing meterm could read: a forced command on the key, or a shell that exits early?"
+		return out
+	}
 	out.Caps = &c
 	return out
 }
@@ -165,7 +199,7 @@ func writeCaps(w io.Writer, rep caps.Report, format string) error {
 	}
 	var buf bytes.Buffer
 	t := tabwriter.NewWriter(&buf, 0, 2, 2, ' ', 0)
-	fmt.Fprintln(t, "HOST\tOS\tARCH\tCPUS\tMEM GB\tAVAIL GB\tHOME FREE GB\tLOAD\tGPU\tDOCKER\tTOOLS THAT RUN")
+	fmt.Fprintln(t, "HOST\tOS\tARCH\tCPUS\tMEM GB\tAVAIL GB\tHOME FREE GB\tLOAD\tGPU\tDOCKER\tTOOLS WHOSE VERSION CHECK WORKED")
 	for _, h := range rep.Hosts {
 		if h.Error != "" {
 			fmt.Fprintf(t, "%s\t%s\t\t\t\t\t\t\t\t\t\n", h.Host, h.Error)
@@ -179,24 +213,38 @@ func writeCaps(w io.Writer, rep caps.Report, format string) error {
 		if osName == "" {
 			osName = c.OS
 		}
-		var runs, broken []string
+		var runs, broken, unsure []string
 		for _, tool := range c.Tools {
 			switch {
-			case tool.Runs != nil && *tool.Runs:
+			case !tool.Found:
+			case tool.Runs == nil:
+				unsure = append(unsure, tool.Name)
+			case *tool.Runs:
 				runs = append(runs, tool.Name)
-			case tool.Found:
+			default:
 				broken = append(broken, tool.Name)
 			}
 		}
 		tools := strings.Join(runs, " ")
 		if len(broken) > 0 {
-			tools += " (found, won't run: " + strings.Join(broken, " ") + ")"
+			tools += " (found, version check failed: " + strings.Join(broken, " ") + ")"
+		}
+		if len(unsure) > 0 {
+			tools += " (found, not checked or timed out: " + strings.Join(unsure, " ") + ")"
 		}
 		if !c.Complete {
 			tools += " [incomplete: the output stopped early]"
 		}
+		mem := gbOrDash(c.MemTotalMB)
+		if c.MemLimitMB != nil && (c.MemTotalMB == nil || *c.MemLimitMB < *c.MemTotalMB) {
+			mem += " (limit " + gbOrDash(c.MemLimitMB) + ")"
+		}
+		cpus := intOrDash(c.CPUs)
+		if c.CPULimit != nil {
+			cpus += " (limit " + strconv.FormatFloat(*c.CPULimit, 'f', -1, 64) + ")"
+		}
 		fmt.Fprintf(t, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", h.Host, dash(osName), dash(c.Arch),
-			intOrDash(c.CPUs), gbOrDash(c.MemTotalMB), gbOrDash(c.MemAvailableMB), gbOrDash(c.HomeFreeMB),
+			cpus, mem, gbOrDash(c.MemAvailableMB), gbOrDash(c.HomeFreeMB),
 			loadOrDash(c.Load1), gpuText(c), dash(c.DockerDaemon), dash(tools))
 	}
 	if err := t.Flush(); err != nil {
@@ -237,6 +285,9 @@ func loadOrDash(v *float64) string {
 }
 
 func gpuText(c *caps.Caps) string {
+	if c.GPUCheck == "failed" {
+		return "unknown (nvidia-smi failed)"
+	}
 	if c.GPUs == nil {
 		return "-" // not looked for, which isn't none
 	}
