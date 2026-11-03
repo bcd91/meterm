@@ -179,20 +179,23 @@ offered to it. A jump host on the way is logged in to as usual.
 {"schema":1,"hosts":[{"host":"gpu1","reachable":true,"error":"",
   "caps":{"complete":true,"user":"deploy","os":"Linux","arch":"x86_64","kernel":"6.12.113+deb13-amd64",
    "distro":"debian","distro_version":"13","cpu_model":"AMD Ryzen 9 7950X 16-Core Processor","cpus":16,"cpu_limit":null,
-   "mem_total_mb":64000,"mem_available_mb":46875,"mem_limit_mb":null,"home_total_mb":937500,"home_free_mb":500000,
-   "load1":0.52,"gpu_check":"nvidia-smi","gpus":[{"name":"NVIDIA GeForce RTX 4090","memory_mb":24564}],
+   "mem_total_mb":64000,"mem_available_mb":46875,"mem_limit_mb":null,"cgroup_read":true,
+   "home_total_mb":937500,"home_free_mb":500000,"load1":0.52,
+   "gpu_check":"nvidia-smi","gpus":[{"name":"NVIDIA GeForce RTX 4090","memory_mb":24564}],
    "tools":[{"name":"claude","found":false,"runs":null,"note":"","path":"","version":""},
-    {"name":"java","found":true,"runs":null,"note":"not run: a macOS stand-in","path":"/usr/bin/java","version":""},
-    {"name":"git","found":true,"runs":true,"note":"","path":"/usr/bin/git","version":"git version 2.47.3"}],
+    {"name":"git","found":true,"runs":true,"note":"","path":"/usr/bin/git","version":"git version 2.47.3"},
+    {"name":"java","found":true,"runs":null,"note":"timed out","path":"/usr/bin/java","version":""}],
    "docker_daemon":"28.5.1","unparsed":0}}]}
 ```
 
-`caps` is null when `error` is set, and a host that printed nothing of the script's, as with a forced
-command on the key, has an `error`. Every number in `caps` is null when it couldn't be read, and **null
-isn't 0**. `complete` is false when the output stopped before its end, as when the host's time ran out
-part way, and then what's missing is unknown: exit 2 says so too. `mem_available_mb` is Linux's estimate,
-null elsewhere. `mem_limit_mb` and `cpu_limit` are a cgroup's limits, as inside a container, where the
-totals are usually the machine's. `home_*` is the filesystem holding the account's home. `load1` is a moment.
+The example shows 3 of the 20 tools. `caps` is null when `error` is set, and a host that printed nothing
+of the script's, as with a forced command on the key, has an `error`. Every number in `caps` is null when
+it couldn't be read, and **null isn't 0**. `complete` is false when the output stopped before its end, as
+when the host's time ran out part way, and then what's missing is unknown: exit 2 says so too. A last line
+cut off then isn't used. `mem_available_mb` is Linux's estimate, null elsewhere. `mem_limit_mb` and
+`cpu_limit` are a cgroup's limits, as inside a container, where the totals are usually the machine's. A
+null `mem_limit_mb` means no limit only when `cgroup_read` is true; false says nothing either way, and
+cgroup v1's CPU limit isn't read. `home_*` is the filesystem holding the account's home. `load1` is a moment.
 
 `gpu_check` is `nvidia-smi` when it answered, and then `gpus` is a list, maybe empty; `failed` when it was
 there and didn't answer; or empty when it wasn't there. In the last two `gpus` is null: other GPUs, and
@@ -200,14 +203,16 @@ Apple's, aren't looked for.
 
 `tools` has one entry for each tool in meterm's list, in its order, when `complete`. `found` false means not
 on the `PATH` a non-interactive login gets plus the usual install places, which isn't proof it isn't
-installed. `runs` says asking its version exited 0, and false means that check failed, which a tool that
-doesn't take the flag would also give. It's null when not found, and when `note` says `timed out` or
-`not run: a macOS stand-in`. `version` is the first line it printed with a dotted number in it, as printed.
+installed. `runs` says asking its version exited 0, and false means that check failed: it crashed, it's a
+stand-in with nothing behind it, or it doesn't take the flag. It's null when not found, and when `note` says
+`timed out` or `not run: a macOS stand-in`. `version` is the first line it printed with a dotted number in
+it, as printed.
 
 `docker_daemon` is empty when docker isn't found, `unreachable` when the client couldn't reach a local
-daemon (stopped, or no access), `not-local` when its context or `DOCKER_HOST` points elsewhere, which isn't
-followed, and otherwise the daemon's version. `unparsed` counts lines that weren't the known shape, such as
-a banner from a shell's startup file, or a value said twice, which then reads as unknown.
+daemon (stopped, or no access), `not-local` when its context or `DOCKER_HOST` isn't a local socket,
+`not-checked` when where it points couldn't be read, neither of which is asked, and otherwise the daemon's
+version. `unparsed` counts lines that weren't the known shape, such as a banner from a shell's startup file,
+or said again. A value said twice reads as unknown; a second line for a tool or a GPU check is ignored.
 
 ## Agents: `meterm agents --format json`
 

@@ -880,24 +880,27 @@ meterm caps web1 gpu1                # one line per host; "-" where something co
 meterm caps --group build --format json
 ```
 
-It runs one fixed script with no sudo. Besides reading files and running `uname`, `df` and the like,
-it runs `nvidia-smi`, `docker info` when the daemon is local, and each found tool's version flag, from
-`/`, with toolchain downloads and first-run setup turned off. Each of those gets five seconds,
-together with anything it starts, where the host has perl or `timeout`. A tool that hangs past the
-host's own limit leaves what came before it, marked incomplete. On a Mac without the developer tools
+It runs one fixed script from `/`, with no sudo. Besides reading files and running `uname`, `df` and
+the like, it runs `nvidia-smi`, `docker info` only when docker names a local socket, and each found
+tool's version flag, with toolchain downloads, first-run setup and the JVM's perf file turned off.
+Each of those gets five seconds, together with what it starts in its process group, where the host
+has perl or `timeout`; a child that leaves the group isn't reached. If the host's time runs out, what
+came before is kept, marked incomplete. On a Mac without the developer tools
 or a JDK, `/usr/bin`'s stand-ins aren't run, as they'd ask whoever is at that screen to install
 something. What it can't say:
 
 - A tool that isn't found wasn't on the `PATH` a non-interactive login gets, plus `~/.local/bin`,
   `~/go/bin`, `~/.cargo/bin`, `/opt/homebrew/bin`, `/usr/local/bin` and a few more. One behind nvm or
   set up only in a shell's rc file won't show.
-- `runs` false means the version check failed. That's a stand-in with nothing behind it, such as
-  macOS's `/usr/bin/java`, or a tool that doesn't take the flag it was given.
+- `runs` false means the version check failed: it crashed, it's a stand-in with nothing behind it,
+  or it doesn't take the flag it was given. A stand-in that wasn't run, or a check that timed out, is
+  null, with a `note` saying which.
 - GPUs other than NVIDIA's. Without `nvidia-smi`, or when it fails, `gpus` is null, not empty.
 - Inside a container, memory and CPUs are usually the machine's. `mem_limit_mb` and `cpu_limit` are
-  the cgroup's limits, when there are any.
-- A docker context or `DOCKER_HOST` that points elsewhere isn't followed: `docker_daemon` says
-  `not-local`.
+  the cgroup's limits. A null memory limit means none only when `cgroup_read` is true, and cgroup
+  v1's CPU limit isn't read.
+- A docker context or `DOCKER_HOST` that isn't a local socket isn't followed, and says `not-local`.
+  When where it points can't be read, it isn't asked either, and says `not-checked`.
 - Whether claude is logged in, which repos are checked out, or what a login can reach.
 - Load is a moment.
 

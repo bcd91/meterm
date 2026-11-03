@@ -44,9 +44,9 @@ func newCapsCmd() *cobra.Command {
 			"the host says of itself: OS and architecture, CPUs and model, memory, free disk in the\n" +
 			"account's home, the one-minute load, NVIDIA GPUs, whether a local docker daemon answers,\n" +
 			"and for each of " + strconv.Itoa(len(caps.Tools)) + " tools whether it's found, whether asking its version works,\n" +
-			"and what that says. Besides reading, it runs nvidia-smi, docker info (only for a local\n" +
-			"daemon), and those tools' version flags, each under five seconds where the host has\n" +
-			"timeout or perl. On a Mac without the developer tools or a JDK, /usr/bin's stand-ins\n" +
+			"and what that says. Besides reading, it runs nvidia-smi, docker info (only when docker\n" +
+			"names a local socket), and those tools' version flags, each under five seconds, with\n" +
+			"what it starts in its process group, where the host has perl or timeout. On a Mac without the developer tools or a JDK, /usr/bin's stand-ins\n" +
 			"aren't run, as they'd ask whoever is at its screen to install something. Hosts are\n" +
 			"chosen, and production refused unless named, as with `agents`, and so are the\n" +
 			"extra_args a host can have.\n\n" +
@@ -56,7 +56,8 @@ func newCapsCmd() *cobra.Command {
 			"- GPUs other than NVIDIA's, which need nvidia-smi. gpus is null when it wasn't there or\n" +
 			"  failed.\n" +
 			"- Inside a container, memory and CPUs are usually the machine's: mem_limit_mb and\n" +
-			"  cpu_limit are the cgroup's limits, when it has them.\n" +
+			"  cpu_limit are the cgroup's limits. A null limit means none only when cgroup_read is\n" +
+			"  true; cgroup v1's CPU limit isn't read.\n" +
 			"- runs false means the version check failed, which a working tool that doesn't take\n" +
 			"  the flag would also give.\n" +
 			"- Whether claude is logged in, what repos are checked out, or what a login can reach.\n" +
@@ -155,6 +156,12 @@ func askCaps(ctx context.Context, job agentJob, query agentQuery, timeout time.D
 	case ctx.Err() == context.DeadlineExceeded:
 		// What came before the deadline is kept, as incomplete: one tool that hangs
 		// shouldn't cost the rest.
+		// A last line cut off isn't believed: cpus=1 may be the start of cpus=16.
+		if i := bytes.LastIndexByte(stdout, '\n'); i >= 0 {
+			stdout = stdout[:i+1]
+		} else {
+			stdout = nil
+		}
 		if c := caps.Parse(stdout); c.Answered {
 			c.Complete = false
 			out.Reachable, out.Caps = true, &c
@@ -176,7 +183,7 @@ func askCaps(ctx context.Context, job agentJob, query agentQuery, timeout time.D
 			out.Error = "sh not found on this host"
 		default:
 			out.Reachable = true
-			out.Error = fmt.Sprintf("the script failed there (exit %d): it needs a POSIX sh, which a Windows server doesn't have", exit.ExitCode())
+			out.Error = fmt.Sprintf("the script failed there (exit %d): a forced command on the key, or no POSIX sh, as on Windows", exit.ExitCode())
 		}
 		return out
 	case err != nil && !errors.Is(err, exec.ErrWaitDelay):
@@ -201,8 +208,8 @@ func writeCaps(w io.Writer, rep caps.Report, format string) error {
 	t := tabwriter.NewWriter(&buf, 0, 2, 2, ' ', 0)
 	fmt.Fprintln(t, "HOST\tOS\tARCH\tCPUS\tMEM GB\tAVAIL GB\tHOME FREE GB\tLOAD\tGPU\tDOCKER\tTOOLS WHOSE VERSION CHECK WORKED")
 	for _, h := range rep.Hosts {
-		if h.Error != "" {
-			fmt.Fprintf(t, "%s\t%s\t\t\t\t\t\t\t\t\t\n", h.Host, h.Error)
+		if h.Error != "" || h.Caps == nil {
+			fmt.Fprintf(t, "%s\t%s\t\t\t\t\t\t\t\t\t\n", h.Host, firstNonEmpty(h.Error, "no answer"))
 			continue
 		}
 		c := h.Caps
@@ -252,6 +259,13 @@ func writeCaps(w io.Writer, rep caps.Report, format string) error {
 	}
 	_, err := w.Write(buf.Bytes())
 	return err
+}
+
+func firstNonEmpty(a, b string) string {
+	if a != "" {
+		return a
+	}
+	return b
 }
 
 // The text table shows "-" for what couldn't be said, never 0.

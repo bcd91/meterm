@@ -354,6 +354,7 @@ func TestAskCaps(t *testing.T) {
 		t.Errorf("%s", text.String())
 	}
 
+	four := 4
 	// A host that printed nothing of the script's, as a forced command would, didn't answer.
 	none := askCaps(context.Background(), job, func(_ context.Context, _ config.Resolved) ([]byte, string, bool, error) {
 		return []byte("This account is for git only.\n"), "", false, nil
@@ -365,10 +366,13 @@ func TestAskCaps(t *testing.T) {
 	// At the deadline, what came before it is kept, as incomplete.
 	partial := askCaps(context.Background(), job, func(ctx context.Context, _ config.Resolved) ([]byte, string, bool, error) {
 		<-ctx.Done()
-		return []byte("caps=1\nos=Linux\ncpus=4\ntool=claude\n"), "", false, ctx.Err()
+		return []byte("caps=1\nos=Linux\ncpus=4\ntool=claude\nend=1\nkernel=6.1"), "", false, ctx.Err()
 	}, 50*time.Millisecond)
 	if partial.Error != "" || partial.Caps == nil || partial.Caps.Complete || partial.Caps.CPUs == nil || *partial.Caps.CPUs != 4 {
 		t.Errorf("%+v", partial)
+	}
+	if partial.Caps != nil && partial.Caps.Kernel != "" {
+		t.Errorf("a last line cut off at the deadline was believed: %q", partial.Caps.Kernel)
 	}
 	silent := askCaps(context.Background(), job, func(ctx context.Context, _ config.Resolved) ([]byte, string, bool, error) {
 		<-ctx.Done()
@@ -394,9 +398,21 @@ func TestAskCaps(t *testing.T) {
 		}
 	}
 
+	// GB means GB, and a cgroup's limit shows.
+	mem, lim, cpuLim := int64(4096), int64(2048), 1.5
+	var tb bytes.Buffer
+	if err := writeCaps(&tb, caps.Report{Hosts: []caps.Host{{Host: "h", Caps: &caps.Caps{Complete: true, CPUs: &four, CPULimit: &cpuLim, MemTotalMB: &mem, MemLimitMB: &lim}}}}, "text"); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(tb.String(), "4.0 (limit 2.0)") || !strings.Contains(tb.String(), "4 (limit 1.5)") {
+		t.Errorf("%s", tb.String())
+	}
+	if d := newCapsCmd().Flags().Lookup("timeout").DefValue; d != "30s" {
+		t.Errorf("default timeout %s", d)
+	}
+
 	// The table: unknown is "-", never none; a failed GPU check, an incomplete answer and a
 	// tool that wasn't checked each say so.
-	four := 4
 	notRun := caps.Tool{Name: "java", Found: true, Note: "not run: a macOS stand-in"}
 	for _, c := range []struct {
 		caps caps.Caps

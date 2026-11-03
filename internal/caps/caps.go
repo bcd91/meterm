@@ -29,21 +29,25 @@ var Tools = []string{
 // PATH, and nowhere else.
 const SearchPath = "$HOME/.local/bin:$HOME/bin:$HOME/.claude/local:$HOME/.npm-global/bin:$HOME/go/bin:/usr/local/go/bin:$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin"
 
-// RemoteCommand is all `meterm caps` ever runs on a host. As with the other looks it's a
-// constant, on one line inside one pair of single quotes, for whatever the login shell is:
+// RemoteCommand is all `meterm caps` ever runs on a host. As with the other looks it's
+// fixed, made of constants and nothing from a host or a flag, on one line inside one pair of single quotes, for whatever the login shell is:
 // csh can't take a newline there, and fish reads a doubled backslash, so neither appears.
 //
-// What it runs: uname, id, sysctl, df, sed, cat and tr; /etc/os-release, which is shell
-// code, in a subshell; `nvidia-smi --query-gpu`; `docker context inspect` and `docker info`
-// when the daemon is local; and each tool it finds with `--version` or its like. No sudo.
-// Each of those is under a five-second limit, with what it started, by perl or else
-// `timeout` where the host has either, from /, with toolchain downloads and first-run setup turned off. On a
+// What it runs, from /: uname, id, sysctl, df, sed, cat, tr and xcode-select, with no limit
+// of their own; /etc/os-release, which is shell code, in a subshell; `nvidia-smi --query-gpu`;
+// `docker context inspect`, and `docker info` only when that names a local socket; and each
+// tool it finds with `--version` or its like, with toolchain downloads, first-run setup and
+// the JVM's perf file turned off. No sudo. nvidia-smi, docker and the tools are each under a
+// five-second limit, with what they started in their process group, by perl or else
+// `timeout` where the host has either. On a
 // Mac without the developer tools, or without a JDK, /usr/bin's stand-ins aren't run, as
 // they'd ask whoever is at its screen to install something.
 //
 // Every value goes through kv, which strips newlines, so nothing a command prints can
-// start a line of its own. A line is key=value, and `end=1` says it got to the end.
-var RemoteCommand = `sh -c 'LC_ALL=C; export LC_ALL; PATH="$PATH:` + SearchPath + `"; export PATH; ` +
+// start a line of its own. It starts with a newline, as a shell's startup file can print
+// without one, such as a title for the terminal. A line is key=value, and `end=1` says it
+// got to the end.
+var RemoteCommand = `sh -c 'LC_ALL=C; export LC_ALL; PATH="$PATH:` + SearchPath + `"; export PATH; cd / || exit 1; echo; ` +
 	`kv() { printf "%s=%s\n" "$1" "$(printf "%s" "$2" | tr -d "\r\n")"; }; ` +
 	`TO=; PL=; if command -v perl >/dev/null 2>&1; then PL=1; elif timeout 5 true >/dev/null 2>&1; then TO=1; fi; ` +
 	`t5() { if [ -n "$PL" ]; then perl -e "` + perlLimit + `" 5 "$@"; elif [ -n "$TO" ]; then timeout 5 "$@"; else "$@"; fi; }; ` +
@@ -57,37 +61,41 @@ var RemoteCommand = `sh -c 'LC_ALL=C; export LC_ALL; PATH="$PATH:` + SearchPath 
 	`else kv mem_total_bytes "$(sysctl -n hw.memsize 2>/dev/null || sysctl -n hw.physmem 2>/dev/null)"; fi; ` +
 	`if [ -r /sys/fs/cgroup/memory.max ]; then kv cgroup_memory_max "$(cat /sys/fs/cgroup/memory.max)"; fi; ` +
 	`if [ -r /sys/fs/cgroup/cpu.max ]; then kv cgroup_cpu_max "$(cat /sys/fs/cgroup/cpu.max)"; fi; ` +
+	`if [ -r /sys/fs/cgroup/memory/memory.limit_in_bytes ]; then kv cgroup1_memory_limit "$(cat /sys/fs/cgroup/memory/memory.limit_in_bytes)"; fi; ` +
 	`kv home_df "$(df -Pk "$HOME" 2>/dev/null | tail -n 1)"; ` +
 	`if [ -r /proc/loadavg ]; then kv load "$(cat /proc/loadavg)"; else kv load "$(sysctl -n vm.loadavg 2>/dev/null)"; fi; ` +
 	`if command -v nvidia-smi >/dev/null 2>&1; then if g=$(t5 nvidia-smi --query-gpu=name,memory.total --format=csv,noheader,nounits </dev/null 2>/dev/null); ` +
 	`then echo gpu_check=nvidia-smi; printf "%s\n" "$g" | sed -n "s/^./gpu=&/p"; else echo gpu_check=failed; fi; fi; ` +
-	`NOCLT=; NOJDK=; if [ "$D" = Darwin ]; then [ -d "$(xcode-select -p 2>/dev/null)" ] || NOCLT=1; ` +
-	`set -- /Library/Java/JavaVirtualMachines/*/Contents/Home/bin/java; [ -x "$1" ] || NOJDK=1; fi; ` +
+	`NOCLT=; NOJDK=; if [ "$D" = Darwin ]; then [ -d "$(xcode-select -p 2>/dev/null)" ] || NOCLT=1; NOJDK=1; ` +
+	`for j in /Library/Java/JavaVirtualMachines/*/Contents/Home/bin/java "$HOME"/Library/Java/JavaVirtualMachines/*/Contents/Home/bin/java; do [ -x "$j" ] && NOJDK=; done; fi; ` +
 	`for t in ` + strings.Join(Tools, " ") + `; do p=$(command -v $t 2>/dev/null) || { echo "tool=$t"; continue; }; ` +
 	`s=; if [ "$D" = Darwin ]; then case $p in /usr/bin/java) s=$NOJDK;; /usr/bin/*) s=$NOCLT;; esac; fi; ` +
 	`if [ -n "$s" ]; then printf "tool=%s\t%s\t-\t\n" "$t" "$p"; continue; fi; ` +
-	`case $t in go) a=version;; java) a=-version;; kubectl) a="version --client";; tmux) a=-V;; *) a=--version;; esac; ` +
-	`v=$(cd / && export GOTOOLCHAIN=local RUSTUP_AUTO_INSTALL=0 DOTNET_NOLOGO=1 DOTNET_SKIP_FIRST_TIME_EXPERIENCE=1 DOTNET_CLI_TELEMETRY_OPTOUT=1 ` +
+	`case $t in go) a=version;; java) a="-XX:-UsePerfData -version";; kubectl) a="version --client";; tmux) a=-V;; *) a=--version;; esac; ` +
+	`v=$(export GOTOOLCHAIN=local RUSTUP_AUTO_INSTALL=0 DOTNET_NOLOGO=1 DOTNET_SKIP_FIRST_TIME_EXPERIENCE=1 DOTNET_CLI_TELEMETRY_OPTOUT=1 ` +
 	`DOTNET_GENERATE_ASPNET_CERTIFICATE=false DOTNET_ADD_GLOBAL_TOOLS_TO_PATH=false; t5 "$p" $a </dev/null 2>&1); e=$?; ` +
 	`printf "tool=%s\t%s\t%s\t%s\n" "$t" "$p" "$e" "$(printf "%s\n" "$v" | sed -n "/[0-9]\.[0-9]/p" | head -n 1 | tr -d "\r")"; done; ` +
 	`if command -v docker >/dev/null 2>&1; then h=$DOCKER_HOST; [ -n "$h" ] || h=$(t5 docker context inspect --format "{{.Endpoints.docker.Host}}" </dev/null 2>/dev/null); ` +
-	`case $h in ""|unix://*|npipe://*) if v=$(t5 docker info --format "{{.ServerVersion}}" </dev/null 2>/dev/null) && [ -n "$v" ]; ` +
-	`then kv docker_daemon "$v"; else echo docker_daemon=-; fi;; *) echo docker_daemon=not-local;; esac; fi; ` +
+	`case $h in unix://*|npipe://*) if v=$(t5 docker info --format "{{.ServerVersion}}" </dev/null 2>/dev/null) && [ -n "$v" ]; ` +
+	`then kv docker_daemon "$v"; else echo docker_daemon=-; fi;; "") echo docker_daemon=not-checked;; *) echo docker_daemon=not-local;; esac; fi; ` +
 	`echo end=1'`
 
 // perlLimit runs its arguments in a process group of their own and kills the whole group
-// after the given seconds, exiting 142. Killing only the one process isn't enough: a child
-// it started keeps the output open, and the shell waits for that. It goes inside double
-// quotes in sh, so each $ is escaped, and it has no ! for csh.
+// after the given seconds, exiting 142, and again when the tool ends, for what it left
+// running. Killing only the one process isn't enough: a child it started keeps the output
+// open, and the shell waits for that. A tool killed by a signal exits 128 and the signal, as
+// a shell would say, never 0. It goes inside double quotes in sh, so each $ is escaped, and
+// it has no ! for csh. A child that leaves the group, with setsid, isn't reached.
 const perlLimit = `\$t=shift; \$p=fork; unless (\$p) { setpgrp(0,0); exec @ARGV; exit 127 } ` +
-	`\$SIG{ALRM}=sub { kill 9, -\$p; exit 142 }; alarm \$t; waitpid(\$p,0); exit(\$?>>8)`
+	`\$SIG{ALRM}=sub { kill 9, -\$p; exit 142 }; alarm \$t; waitpid(\$p,0); \$s=\$?; kill 9, -\$p; ` +
+	`exit(\$s & 127 ? 128+(\$s & 127) : \$s>>8)`
 
 // ExitNoShell is what a login shell gives when it can't find sh.
 const ExitNoShell = 127
 
-// timedOut are the statuses of a version check that was stopped: timeout's, and a kill
-// or perl's alarm as a shell reports them.
-var timedOut = map[int]bool{124: true, 137: true, 142: true}
+// timedOut are the statuses of a version check that was stopped: GNU timeout's, a kill,
+// perl's alarm, and busybox timeout's TERM, as a shell reports them.
+var timedOut = map[int]bool{124: true, 137: true, 142: true, 143: true}
 
 // Limits on what's believed.
 const (
@@ -134,6 +142,9 @@ type Caps struct {
 	// MemLimitMB is a cgroup's memory limit, as inside a container, when there is one.
 	// Inside one, the totals above are usually the machine's, not what's allowed.
 	MemLimitMB *int64 `json:"mem_limit_mb"`
+	// CgroupRead says a cgroup's memory limit file was read, so a null limit means none.
+	// False says nothing either way: no such file, or one this doesn't read.
+	CgroupRead bool `json:"cgroup_read"`
 	// Of the filesystem holding the account's home.
 	HomeTotalMB *int64   `json:"home_total_mb"`
 	HomeFreeMB  *int64   `json:"home_free_mb"`
@@ -146,7 +157,8 @@ type Caps struct {
 	Tools    []Tool `json:"tools"`
 	// DockerDaemon is empty when docker isn't found, "unreachable" when the client couldn't
 	// reach a local daemon (stopped, or no access), "not-local" when its context or
-	// DOCKER_HOST is elsewhere and so wasn't asked, else the daemon's version.
+	// DOCKER_HOST isn't a local socket, "not-checked" when where it points couldn't be read,
+	// neither of which was asked, else the daemon's version.
 	DockerDaemon string `json:"docker_daemon"`
 	// Unparsed counts lines that weren't the known shape, or said a second time.
 	Unparsed int `json:"unparsed"`
@@ -164,9 +176,9 @@ type GPU struct {
 
 // Tool is one program looked for. Found false means not on the PATH that was searched,
 // which isn't proof it isn't installed. Runs says asking its version exited 0. False means
-// that check failed, which can be a stand-in with nothing behind it, such as macOS's
-// /usr/bin/java, or a tool that doesn't take the flag. Null means not found, or not known,
-// and Note says why. Version is the first line it printed with a dotted number in it.
+// that check failed: it crashed, it's a stand-in with nothing behind it, or it doesn't take
+// the flag. Null means not found, or not known, and Note says why. Version is the first line
+// it printed with a dotted number in it.
 type Tool struct {
 	Name    string `json:"name"`
 	Found   bool   `json:"found"`
@@ -183,7 +195,7 @@ func clean(s string) string { return termsafe.Clip(termsafe.Text(strings.TrimSpa
 var scalars = map[string]bool{
 	"user": true, "os": true, "arch": true, "kernel": true, "distro": true, "distro_version": true, "cpu_model": true,
 	"cpus": true, "mem_total_kb": true, "mem_available_kb": true, "mem_total_bytes": true, "cgroup_memory_max": true,
-	"cgroup_cpu_max": true, "home_df": true, "load": true, "gpu_check": true, "docker_daemon": true, "end": true,
+	"cgroup_cpu_max": true, "cgroup1_memory_limit": true, "home_df": true, "load": true, "gpu_check": true, "docker_daemon": true, "end": true,
 }
 
 // Parse reads RemoteCommand's output.
@@ -256,6 +268,15 @@ func Parse(raw []byte) Caps {
 			c.MemTotalMB = positive(val, 1024*1024)
 		case "cgroup_memory_max":
 			c.MemLimitMB = positive(val, 1024*1024) // "max" is no limit, and stays null
+			c.CgroupRead = c.MemLimitMB != nil || strings.TrimSpace(val) == "max"
+		case "cgroup1_memory_limit":
+			// cgroup v1 says no limit with a number near 2^63.
+			if n, err := strconv.ParseInt(strings.TrimSpace(val), 10, 64); err == nil && n > 0 {
+				c.CgroupRead = true
+				if n < 1<<60 {
+					c.MemLimitMB = positive(val, 1024*1024)
+				}
+			}
 		case "cgroup_cpu_max":
 			c.CPULimit = parseCPUMax(val)
 		case "home_df":
@@ -347,8 +368,8 @@ func Parse(raw []byte) Caps {
 			c.MemTotalMB = nil
 		case "mem_available_kb":
 			c.MemAvailableMB = nil
-		case "cgroup_memory_max":
-			c.MemLimitMB = nil
+		case "cgroup_memory_max", "cgroup1_memory_limit":
+			c.MemLimitMB, c.CgroupRead = nil, false
 		case "cgroup_cpu_max":
 			c.CPULimit = nil
 		case "home_df":

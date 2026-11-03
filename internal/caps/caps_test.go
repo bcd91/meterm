@@ -2,10 +2,13 @@ package caps
 
 import (
 	"encoding/json"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 // From RemoteCommand run by zsh -c on macOS 26 on an M2 with the developer tools and no
@@ -113,6 +116,7 @@ tool=git	/usr/bin/git	0	git version 2.47.3
 tool=docker	/usr/bin/docker	0	Docker version 28.5.1, build e180ab8
 tool=python3	/usr/bin/python3	124
 tool=tmux	/usr/bin/tmux	1
+tool=psql	/usr/bin/psql	143	
 docker_daemon=28.5.1
 end=1
 `
@@ -142,6 +146,10 @@ func TestParseLinuxShape(t *testing.T) {
 		case "python3":
 			if tool.Runs != nil || tool.Note != "timed out" {
 				t.Errorf("timed out is unknown, not broken: %+v", tool)
+			}
+		case "psql":
+			if tool.Runs != nil || tool.Note != "timed out" {
+				t.Errorf("busybox timeout's TERM is a timeout: %+v", tool)
 			}
 		case "tmux":
 			if tool.Runs == nil || *tool.Runs {
@@ -211,8 +219,40 @@ func TestParseUnknownsAndLimits(t *testing.T) {
 
 	// What a host says is text, cleaned and cut.
 	c = Parse([]byte("caps=1\ncpu_model=x\x1b]0;pwned\x07\u202e" + strings.Repeat("a", 1000) + "\n"))
-	if strings.ContainsAny(c.CPUModel, "\x1b\x07\u202e") || len([]rune(c.CPUModel)) > maxText {
+	if strings.ContainsAny(c.CPUModel, "\x1b\x07\u202e") || len([]rune(c.CPUModel)) > 256 {
 		t.Errorf("%q", c.CPUModel)
+	}
+}
+
+func TestParseNumbers(t *testing.T) {
+	for in, want := range map[string]bool{"mem_total_kb=0": false, "mem_total_bytes=1000": false, "mem_total_kb=-5": false, "mem_total_kb=2048": true} {
+		if got := Parse([]byte("caps=1\n"+in+"\n")).MemTotalMB != nil; got != want {
+			t.Errorf("%s: %v", in, got)
+		}
+	}
+	for in, want := range map[string]float64{"150000 100000": 1.5, "33333 100000": 0.33, "0 100000": -1, "max 100000": -1, "5 0": -1} {
+		got := Parse([]byte("caps=1\ncgroup_cpu_max=" + in + "\n")).CPULimit
+		if (want < 0) != (got == nil) || (got != nil && *got != want) {
+			t.Errorf("%s: %v", in, got)
+		}
+	}
+	// cgroup: max is read and means none; v1's huge number means none; v1's limit is a limit.
+	if c := Parse([]byte("caps=1\ncgroup_memory_max=max\n")); !c.CgroupRead || c.MemLimitMB != nil {
+		t.Errorf("%+v", c)
+	}
+	if c := Parse([]byte("caps=1\ncgroup1_memory_limit=9223372036854771712\n")); !c.CgroupRead || c.MemLimitMB != nil {
+		t.Errorf("%+v", c)
+	}
+	if c := Parse([]byte("caps=1\ncgroup1_memory_limit=2147483648\n")); !c.CgroupRead || c.MemLimitMB == nil || *c.MemLimitMB != 2048 {
+		t.Errorf("%+v", c)
+	}
+	if c := Parse([]byte("caps=1\n")); c.CgroupRead {
+		t.Error("no file read isn't no limit")
+	}
+	// Said twice, these too are unknown.
+	c := Parse([]byte("caps=1\nmem_total_kb=2048\nmem_total_kb=4096\nhome_df=/dev/a 1024 0 1024 0% /\nhome_df=/dev/a 2048 0 2048 0% /\n"))
+	if c.MemTotalMB != nil || c.HomeFreeMB != nil || c.HomeTotalMB != nil {
+		t.Errorf("%+v", c)
 	}
 }
 
@@ -231,7 +271,7 @@ func TestRemoteCommandQuoting(t *testing.T) {
 		}
 	}
 	// Asking a version mustn't fetch or set anything up, or ask anyone at the screen.
-	for _, guard := range []string{"cd / &&", "GOTOOLCHAIN=local", "RUSTUP_AUTO_INSTALL=0", "DOTNET_SKIP_FIRST_TIME_EXPERIENCE=1",
+	for _, guard := range []string{"cd / ||", "-XX:-UsePerfData", "GOTOOLCHAIN=local", "RUSTUP_AUTO_INSTALL=0", "DOTNET_SKIP_FIRST_TIME_EXPERIENCE=1",
 		"DOTNET_GENERATE_ASPNET_CERTIFICATE=false", "xcode-select -p", "JavaVirtualMachines", "tmux) a=-V", "not-local", "kill 9, -"} {
 		if !strings.Contains(RemoteCommand, guard) {
 			t.Errorf("RemoteCommand lost %q", guard)
@@ -276,5 +316,108 @@ func TestRemoteCommandRunsHere(t *testing.T) {
 	}
 	if ran == 0 {
 		t.Fatal("no shell found to run it with")
+	}
+}
+
+// fakeTool writes an executable shell script named name into dir.
+func fakeTool(t *testing.T, dir, name, body string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(dir, name), []byte("#!/bin/sh\n"+body+"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// RemoteCommand run for real against made-up tools put first on PATH: what a host's tools
+// do mustn't turn into facts that aren't so, hang the look, or reach another host.
+func TestRemoteCommandAgainstFakes(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("a POSIX sh is what this needs")
+	}
+	if _, err := exec.LookPath("perl"); err != nil {
+		t.Skip("the time limit under test is perl's")
+	}
+	home, bin := t.TempDir(), t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("DOCKER_HOST", "")
+	log := filepath.Join(home, "docker.log")
+	fakeTool(t, bin, "git", `echo "git version 9.9.9"; kill -SEGV $$`)
+	fakeTool(t, bin, "node", `sleep 30`)
+	fakeTool(t, bin, "python3", `sleep 30 & echo "Python 3.1.1"`)
+	fakeTool(t, bin, "nvidia-smi", `echo "NVIDIA-SMI has failed because it couldn't communicate with the NVIDIA driver."; exit 9`)
+	fakeTool(t, bin, "docker", `echo "$1" >> "`+log+`"; case "$1" in --version) echo "Docker version 1.2.3";; context) exit 1;; info) echo 9.9;; esac`)
+	fakeTool(t, bin, "uname", `case "$1" in -m) printf 'x86_64\ncpus=999\ngpu_check=nvidia-smi\n';; *) exec /usr/bin/uname "$@";; esac`)
+
+	start := time.Now()
+	cmd := exec.Command("/bin/sh", "-c", "printf '\033]0;title\007'; "+RemoteCommand)
+	cmd.Dir = "/"
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	if took := time.Since(start); took > 20*time.Second {
+		t.Errorf("a hung tool, or a child left behind, held the look %v", took)
+	}
+	c := Parse(out)
+	if !c.Answered || !c.Complete {
+		t.Fatalf("a banner with no newline lost the answer:\n%q", out)
+	}
+	if c.CPUs != nil && *c.CPUs == 999 || c.GPUCheck != "failed" || c.GPUs != nil {
+		t.Errorf("planted or failed facts were believed: cpus %v gpu %q %v\n%s", c.CPUs, c.GPUCheck, c.GPUs, out)
+	}
+	byName := map[string]Tool{}
+	for _, tool := range c.Tools {
+		byName[tool.Name] = tool
+	}
+	if g := byName["git"]; g.Runs == nil || *g.Runs {
+		t.Errorf("a tool that crashed passed: %+v", g)
+	}
+	if n := byName["node"]; n.Runs != nil || n.Note != "timed out" {
+		t.Errorf("%+v", n)
+	}
+	if p := byName["python3"]; p.Runs == nil || !*p.Runs || p.Version == "" {
+		t.Errorf("%+v", p)
+	}
+	if c.DockerDaemon != "not-checked" {
+		t.Errorf("docker %q", c.DockerDaemon)
+	}
+	if b, _ := os.ReadFile(log); strings.Contains(string(b), "info") {
+		t.Errorf("docker info was asked with nowhere known to point: %s", b)
+	}
+	// With DOCKER_HOST elsewhere, it isn't asked either.
+	_ = os.Remove(log)
+	t.Setenv("DOCKER_HOST", "ssh://me@elsewhere")
+	cmd = exec.Command("/bin/sh", "-c", RemoteCommand)
+	cmd.Dir = "/"
+	out, _ = cmd.Output()
+	if c := Parse(out); c.DockerDaemon != "not-local" {
+		t.Errorf("%q", c.DockerDaemon)
+	}
+	if b, _ := os.ReadFile(log); strings.Contains(string(b), "info") {
+		t.Errorf("docker info followed DOCKER_HOST elsewhere: %s", b)
+	}
+}
+
+// On a Mac without the developer tools, /usr/bin's stand-ins aren't run. This Mac's real
+// xcode-select is replaced by one that says they're missing, so nothing would be shown even
+// if the skip failed: /usr/bin/git just works here.
+func TestMacStandInsArentRun(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("macOS only")
+	}
+	home, bin := t.TempDir(), t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	fakeTool(t, bin, "xcode-select", `echo /nonexistent/Developer`)
+	cmd := exec.Command("/bin/sh", "-c", RemoteCommand)
+	cmd.Dir = "/"
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tool := range Parse(out).Tools {
+		if strings.HasPrefix(tool.Path, "/usr/bin/") && tool.Note != "not run: a macOS stand-in" {
+			t.Errorf("%+v", tool)
+		}
 	}
 }
