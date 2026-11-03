@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"meterm/internal/activity"
+	"meterm/internal/lookscript"
 )
 
 const realShape = `bcd      pts/0        192.168.1.5      Sat Oct 31 20:11:03 2026   still logged in
@@ -144,7 +145,7 @@ func TestParseHostileOutput(t *testing.T) {
 }
 
 func TestRemoteCommandIsOneQuotedWord(t *testing.T) {
-	if !strings.HasPrefix(RemoteCommand, "sh -c '") || !strings.HasSuffix(RemoteCommand, "'") || strings.Count(RemoteCommand, "'") != 2 {
+	if !strings.HasPrefix(RemoteCommand, lookscript.Start) || !strings.HasSuffix(RemoteCommand, "'") || strings.Count(RemoteCommand, "'") != 2 || strings.Count(RemoteCommand, "!") != 0 {
 		t.Fatalf("not one quoted word: %s", RemoteCommand)
 	}
 	for _, bad := range []string{"sudo", "$HOME", "`", "rm ", ">/var"} {

@@ -25,6 +25,7 @@ import (
 
 	"meterm/internal/agents"
 	"meterm/internal/config"
+	"meterm/internal/lookscript"
 	"meterm/internal/route"
 	"meterm/internal/sshrun"
 	"meterm/internal/termsafe"
@@ -205,6 +206,7 @@ func askAgents(ctx context.Context, job agentJob, query agentQuery, timeout time
 		return out
 	}
 	stdout, stderr, overflow, err := query(ctx, r)
+	look := lookscript.Read(stdout)
 	var exit *exec.ExitError
 	switch {
 	case overflow:
@@ -218,12 +220,15 @@ func askAgents(ctx context.Context, job agentJob, query agentQuery, timeout time
 		out.Error = "stopped before it answered"
 		return out
 	case errors.As(err, &exit):
-		switch exit.ExitCode() {
-		case -1: // ssh itself was killed, so nothing is known of the host
+		switch code := exit.ExitCode(); {
+		case code == -1: // ssh itself was killed, so nothing is known of the host
 			out.Error = "ssh was killed before it answered"
-		case sshConnectionError:
+		case whyNotRun(look, code) != "":
+			out.Reachable = true
+			out.Error = whyNotRun(look, code)
+		case code == sshConnectionError:
 			out.Error = sshFailureText(stderr)
-		case agents.ExitNoClaude:
+		case code == agents.ExitNoClaude:
 			out.Reachable = true
 			out.Error = "claude not found on this host"
 		default:
@@ -236,13 +241,42 @@ func askAgents(ctx context.Context, job agentJob, query agentQuery, timeout time
 		return out
 	}
 	out.Reachable = true
-	list, err := agents.Parse(stdout)
+	if why := whyNotRun(look, 0); why != "" {
+		out.Error = why
+		return out
+	}
+	list, err := agents.Parse(look.Body)
 	if err != nil {
 		out.Error = "unexpected output from claude: " + err.Error()
 		return out
 	}
 	out.Agents = list
 	return out
+}
+
+// Why a look's script didn't run on a host that was reached. A login shell that isn't
+// sh still reads the whole line, so its exit can pass for the script's: cmd runs the
+// script's `|| exit 127` itself when it can't find sh, which read as "claude not found".
+const (
+	noPOSIXShell = "reached, but it has no POSIX sh, which this needs, as on Windows"
+	shNeverRan   = "reached, but the look's sh never ran there: its login shell may not take the command, " +
+		"as Windows PowerShell 5 doesn't, or a forced command may have run instead"
+)
+
+// whyNotRun says why a look's sh didn't run, given what came back and ssh's exit code
+// (0 for none). It's "" when sh ran, and when nothing shows the host was reached: ssh's
+// own 255 with no word from the login shell.
+func whyNotRun(look lookscript.Output, code int) string {
+	switch {
+	case look.Ran:
+		return ""
+	case look.Reached:
+		return noPOSIXShell
+	case code == sshConnectionError:
+		return ""
+	default:
+		return shNeverRan
+	}
 }
 
 // prepareLook is what comes before any look at a host: production, a host that isn't

@@ -19,6 +19,7 @@ import (
 
 	"meterm/internal/activity"
 	"meterm/internal/logins"
+	"meterm/internal/lookscript"
 	"meterm/internal/termsafe"
 )
 
@@ -35,7 +36,7 @@ func newLoginsCmd() *cobra.Command {
 		Use:   "logins [host...] [--tag t] [--group g]",
 		Short: "List who logged in to hosts, and whether meterm's log knows of it (read-only, not logged)",
 		Long: "Asks each selected host for `last -F -i -w -n 500`, and nothing else: the command is\n" +
-			"fixed, read-only and takes no sudo. Each login is set beside this machine's activity\n" +
+			"fixed, read-only and takes no sudo, with an echo before it that shows sh ran. Each login is set beside this machine's activity\n" +
 			"log: matched says there's an event on that host, for that account, within two\n" +
 			"minutes of it. Hosts are chosen, and production refused unless named, as with `agents`,\n" +
 			"and so are the extra_args a host can have.\n\n" +
@@ -121,6 +122,7 @@ func askLogins(ctx context.Context, job agentJob, query agentQuery, events []act
 		return out
 	}
 	stdout, stderr, overflow, err := query(ctx, r)
+	look := lookscript.Read(stdout)
 	var exit *exec.ExitError
 	switch {
 	case overflow:
@@ -134,12 +136,15 @@ func askLogins(ctx context.Context, job agentJob, query agentQuery, events []act
 		out.Error = "stopped before it answered"
 		return out
 	case errors.As(err, &exit):
-		switch exit.ExitCode() {
-		case -1:
+		switch code := exit.ExitCode(); {
+		case code == -1:
 			out.Error = "ssh was killed before it answered"
-		case sshConnectionError:
+		case whyNotRun(look, code) != "":
+			out.Reachable = true
+			out.Error = whyNotRun(look, code)
+		case code == sshConnectionError:
 			out.Error = sshFailureText(stderr)
-		case logins.ExitNoLast:
+		case code == logins.ExitNoLast:
 			out.Reachable = true
 			out.Error = "last not found on this host"
 		default:
@@ -152,7 +157,11 @@ func askLogins(ctx context.Context, job agentJob, query agentQuery, events []act
 		return out
 	}
 	out.Reachable = true
-	parsed := logins.Parse(stdout)
+	if why := whyNotRun(look, 0); why != "" {
+		out.Error = why
+		return out
+	}
+	parsed := logins.Parse(look.Body)
 	out.Since, out.Unparsed = parsed.Since, parsed.Unparsed
 	out.Logins = parsed.Logins
 	if out.Logins == nil {

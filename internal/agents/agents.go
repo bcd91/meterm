@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 
+	"meterm/internal/lookscript"
 	"meterm/internal/termsafe"
 )
 
@@ -23,8 +24,9 @@ const Schema = 1
 // one pair of single quotes for sh. A non-login ssh often has no ~/.local/bin on
 // PATH; those places go last, so that the claude this user would get anyway wins.
 // A failing claude comes out as 1, because 255 has to keep meaning ssh's own
-// failure, and 127 as "no claude" is decided here, not by claude.
-const RemoteCommand = `sh -c 'PATH="$PATH:$HOME/.local/bin:$HOME/.claude/local:$HOME/.npm-global/bin:/opt/homebrew/bin:/usr/local/bin"; export PATH; ` +
+// failure, and 127 as "no claude" is decided here, not by claude. It begins with
+// lookscript.Start, so that a 127 counts only when sh ran.
+const RemoteCommand = lookscript.Start + `PATH="$PATH:$HOME/.local/bin:$HOME/.claude/local:$HOME/.npm-global/bin:/opt/homebrew/bin:/usr/local/bin"; export PATH; ` +
 	`command -v claude >/dev/null 2>&1 || exit 127; claude agents --json || exit 1'`
 
 // ExitNoClaude is RemoteCommand's exit code when claude isn't there.

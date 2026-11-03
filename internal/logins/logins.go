@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"meterm/internal/activity"
+	"meterm/internal/lookscript"
 	"meterm/internal/termsafe"
 )
 
@@ -28,7 +29,7 @@ const MaxLogins = 500
 // makes the times UTC, since `last` prints no zone. -w keeps long names whole, -F full
 // times with a year, -i addresses instead of names a host can make up. No sudo: wtmp is
 // normally readable by anyone, and if it isn't that's this host's error.
-const RemoteCommand = `sh -c 'LC_ALL=C TZ=UTC; export LC_ALL TZ; command -v last >/dev/null 2>&1 || exit 127; last -F -i -w -n 500 || exit 1'`
+const RemoteCommand = lookscript.Start + `LC_ALL=C TZ=UTC; export LC_ALL TZ; command -v last >/dev/null 2>&1 || exit 127; last -F -i -w -n 500 || exit 1'`
 
 // ExitNoLast is RemoteCommand's exit code when `last` isn't there.
 const ExitNoLast = 127

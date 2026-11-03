@@ -17,6 +17,8 @@ import (
 
 	"meterm/internal/agents"
 	"meterm/internal/config"
+	"meterm/internal/logins"
+	"meterm/internal/lookscript"
 	"meterm/internal/sshrun"
 )
 
@@ -67,7 +69,7 @@ func TestAskAgentsNeverReportsFailureAsZero(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got := askAgents(context.Background(), agentJobFor("h"), func(context.Context, config.Resolved) ([]byte, string, bool, error) {
-				return []byte(tc.stdout), tc.stderr, tc.overflow, tc.err
+				return fromSh(tc.stdout), tc.stderr, tc.overflow, tc.err
 			}, time.Second)
 			if got.Error == "" || !strings.Contains(got.Error, tc.wantErrSubstr) {
 				t.Errorf("error = %q, want %q", got.Error, tc.wantErrSubstr)
@@ -112,7 +114,7 @@ func TestAskAgentsTimeout(t *testing.T) {
 
 func TestAskAgentsEmptyIsAnAnswer(t *testing.T) {
 	got := askAgents(context.Background(), agentJobFor("h"), func(context.Context, config.Resolved) ([]byte, string, bool, error) {
-		return []byte("[]\n"), "", false, nil
+		return fromSh("[]\n"), "", false, nil
 	}, time.Second)
 	if !got.Reachable || got.Error != "" || got.Agents == nil || len(got.Agents) != 0 {
 		t.Errorf("got %+v", got)
@@ -132,7 +134,7 @@ func TestAskAgentsDoesntRunForAnUnsafeHost(t *testing.T) {
 	}}
 	got := askAgents(context.Background(), job, func(context.Context, config.Resolved) ([]byte, string, bool, error) {
 		t.Error("it ran")
-		return nil, "", false, nil
+		return fromSh(""), "", false, nil
 	}, time.Second)
 	if got.Reachable || got.Error == "" || strings.Contains(got.Error, "\x1b") {
 		t.Errorf("got %+v", got)
@@ -146,7 +148,7 @@ func TestWriteAgentsHostileText(t *testing.T) {
 	stdout := `[{"cwd":` + string(enc) + `,"name":` + string(enc) + `,"status":` + string(enc) + `,"waitingFor":` + string(enc) + `,"kind":` + string(enc) + `,"id":` + string(enc) + `}]`
 	job := agentJobFor(bad)
 	rep := runAgents(context.Background(), []agentJob{job}, func(context.Context, config.Resolved) ([]byte, string, bool, error) {
-		return []byte(stdout), "", false, nil
+		return fromSh(stdout), "", false, nil
 	}, time.Second, 1)
 	for _, format := range []string{"text", "json"} {
 		var out bytes.Buffer
@@ -258,7 +260,7 @@ func TestRefusedProductionIsReportedNotAsked(t *testing.T) {
 		if r.Name == "live" {
 			t.Error("the production host was asked")
 		}
-		return []byte("[]"), "", false, nil
+		return fromSh("[]"), "", false, nil
 	}, time.Second, 2)
 	if agentsFailed(rep) != 1 || rep.Hosts[1].Host != "live" || rep.Hosts[1].Reachable || rep.Hosts[1].Agents != nil {
 		t.Errorf("got %+v", rep)
@@ -296,7 +298,7 @@ func TestHostileLoginAndAddressDontReachSSH(t *testing.T) {
 		}
 		got := askAgents(context.Background(), jobs[0], func(context.Context, config.Resolved) ([]byte, string, bool, error) {
 			t.Errorf("%s: ssh would have run", arg)
-			return nil, "", false, nil
+			return fromSh(""), "", false, nil
 		}, time.Second)
 		if got.Error == "" {
 			t.Errorf("%s: no error", arg)
@@ -444,7 +446,7 @@ func TestAgentsDontRunWithHostileExtraArgs(t *testing.T) {
 	}}
 	got := askAgents(context.Background(), job, func(context.Context, config.Resolved) ([]byte, string, bool, error) {
 		t.Error("ssh ran")
-		return nil, "", false, nil
+		return fromSh(""), "", false, nil
 	}, time.Second)
 	if got.Reachable || got.Agents != nil || !strings.Contains(got.Error, "extra_args") || strings.ContainsAny(got.Error, "\x1b\x07") {
 		t.Errorf("got %+v", got)
@@ -517,7 +519,7 @@ func fakeSSHScript(t *testing.T, body string) (argvFile string) {
 // Through the real command line builder and exec: the remote command is the constant
 // and it's the last argument, whatever the host is called.
 func TestSSHAgentQueryRunsTheOneCommand(t *testing.T) {
-	argvFile := fakeSSHScript(t, `echo '[{"pid":1,"cwd":"/a"}]'`)
+	argvFile := fakeSSHScript(t, `echo meterm-look; echo meterm-sh; echo '[{"pid":1,"cwd":"/a"}]'`)
 	job := agentJob{label: "x", resolve: func(context.Context) config.Resolved {
 		return config.Resolved{Name: "$(touch /tmp/x)", Address: "192.0.2.1", Forwards: []config.Forward{{Type: "L", LocalPort: 1, RemoteHost: "a", RemotePort: 2}}}
 	}}
@@ -552,7 +554,7 @@ func TestSSHAgentQueryStopsAtTheLimit(t *testing.T) {
 
 // The command has no activity or history of its own to write, even on a good run.
 func TestAgentsWritesNoActivityOrHistory(t *testing.T) {
-	fakeSSHScript(t, `echo '[]'`)
+	fakeSSHScript(t, `echo meterm-look; echo meterm-sh; echo '[]'`)
 	dir := t.TempDir()
 	cfgFile := filepath.Join(dir, "hosts.yaml")
 	if err := os.WriteFile(cfgFile, []byte(agentsHosts), 0o600); err != nil {
@@ -582,7 +584,7 @@ func TestAgentsCmdRefusals(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("METERM_CONFIG", cfgFile)
-	argvFile := fakeSSHScript(t, `echo '[]'`)
+	argvFile := fakeSSHScript(t, `echo meterm-look; echo meterm-sh; echo '[]'`)
 	for _, args := range [][]string{
 		{},
 		{"--format", "json"},
@@ -610,7 +612,7 @@ func TestAskAgentsStopped(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	got := askAgents(ctx, agentJobFor("h"), func(ctx context.Context, _ config.Resolved) ([]byte, string, bool, error) {
-		return []byte("[]"), "", false, ctx.Err()
+		return fromSh("[]"), "", false, ctx.Err()
 	}, time.Second)
 	if got.Reachable || got.Error == "" || got.Agents != nil {
 		t.Errorf("got %+v", got)
@@ -659,5 +661,58 @@ func TestSelectAgentHostsRefusesURIHop(t *testing.T) {
 		if j.refused == "" {
 			t.Errorf("%s wasn't refused", j.label)
 		}
+	}
+}
+
+// fromSh is a host's stdout when its sh ran the look and printed out.
+func fromSh(out string) []byte {
+	return []byte(lookscript.Marker + "\n" + lookscript.ShMarker + "\n" + out)
+}
+
+// The real command, run by a real sh as the login shell, with a claude that answers:
+// both markers come, and only claude's words are parsed.
+func TestRemoteCommandRunsInSh(t *testing.T) {
+	argvFile := fakeSSHScript(t, `for last; do :; done; exec /bin/sh -c "$last"`)
+	// Only the fake's directory and the system's: no claude of this machine's may run.
+	t.Setenv("PATH", filepath.Dir(argvFile)+string(os.PathListSeparator)+"/usr/bin:/bin")
+	claude := filepath.Join(filepath.Dir(argvFile), "claude")
+	if err := os.WriteFile(claude, []byte("#!/bin/sh\necho '[{\"pid\":7}]'\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	got := askAgents(context.Background(), agentJobFor("x"), sshAgentQuery("", 20*time.Second), 20*time.Second)
+	if got.Error != "" || !got.Reachable || len(got.Agents) != 1 {
+		t.Fatalf("got %+v", got)
+	}
+	if err := os.Remove(claude); err != nil {
+		t.Fatal(err)
+	}
+	if got := askAgents(context.Background(), agentJobFor("x"), sshAgentQuery("", 20*time.Second), 20*time.Second); got.Error != "claude not found on this host" || !got.Reachable {
+		t.Errorf("no claude: %+v", got)
+	}
+}
+
+// A login shell that isn't sh, as on Windows, still reads the rest of the line: cmd runs
+// the || exit 127 itself, and a long line can come back as 255. Neither is the script's
+// word, so neither may read as "claude not found" or as a host that wasn't reached.
+func TestLookWithNoShIsNotTheScriptsExit(t *testing.T) {
+	for _, c := range []struct{ name, body, want string }{
+		{"cmd", `echo "meterm-look "; echo "'sh' is not recognized" >&2; exit 127`, noPOSIXShell},
+		{"cmd 255", `echo "meterm-look "; exit 255`, noPOSIXShell},
+		{"startup text first", `printf 'motd'; echo "meterm-look"; exit 1`, noPOSIXShell},
+		{"powershell 5", `echo "The token '&&' is not a valid statement separator" >&2; exit 1`, shNeverRan},
+		{"forced command, exit 0", `echo '[]'`, shNeverRan},
+		{"no connection", `echo "ssh: connect to host x port 22: refused" >&2; exit 255`, "unreachable"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			fakeSSHScript(t, c.body)
+			got := askAgents(context.Background(), agentJobFor("x"), sshAgentQuery("", 20*time.Second), 20*time.Second)
+			if !strings.Contains(got.Error, c.want) || got.Agents != nil || got.Reachable != (c.name != "no connection") {
+				t.Errorf("agents: %+v", got)
+			}
+			l := askLogins(context.Background(), agentJobFor("x"), sshLookQuery("", 20*time.Second, logins.RemoteCommand, logins.MaxOutput), nil, 20*time.Second)
+			if !strings.Contains(l.Error, c.want) || l.Logins != nil || l.Reachable != (c.name != "no connection") {
+				t.Errorf("logins: %+v", l)
+			}
+		})
 	}
 }

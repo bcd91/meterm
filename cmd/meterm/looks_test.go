@@ -283,7 +283,7 @@ func TestAskLogins(t *testing.T) {
 	job.host = config.Host{Name: "h"}
 	events := []activity.Event{{Device: "d", Seq: 9, Action: "connect", Host: "h", Target: "bcd@1.2.3.4", Time: time.Date(2026, 10, 31, 20, 11, 0, 0, time.UTC)}}
 	got := askLogins(context.Background(), job, func(_ context.Context, _ config.Resolved) ([]byte, string, bool, error) {
-		return []byte(line), "", false, nil
+		return fromSh(line), "", false, nil
 	}, events, time.Second)
 	if got.Error != "" || !got.Reachable || len(got.Logins) != 1 || !got.Logins[0].Matched || got.Logins[0].Event.Seq != 9 || got.Since == nil {
 		t.Fatalf("%+v", got)
@@ -307,7 +307,7 @@ func TestAskLogins(t *testing.T) {
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			got := askLogins(context.Background(), job, func(_ context.Context, _ config.Resolved) ([]byte, string, bool, error) {
-				return []byte(c.stdout), c.stderr, c.overflow, c.err
+				return fromSh(c.stdout), c.stderr, c.overflow, c.err
 			}, nil, time.Second)
 			if !strings.Contains(got.Error, c.want) || got.Logins != nil || got.Reachable != c.reachable {
 				t.Errorf("%+v", got)
@@ -320,7 +320,7 @@ func TestAskLogins(t *testing.T) {
 
 	// A host with nothing to say about logins isn't a host that can't say.
 	empty := askLogins(context.Background(), job, func(_ context.Context, _ config.Resolved) ([]byte, string, bool, error) {
-		return nil, "", false, nil
+		return fromSh(""), "", false, nil
 	}, nil, time.Second)
 	if empty.Error != "" || empty.Logins == nil || len(empty.Logins) != 0 {
 		t.Errorf("%+v", empty)
@@ -337,7 +337,7 @@ func TestAskLogins(t *testing.T) {
 func TestLoginsHostileOutputInBothFormats(t *testing.T) {
 	job := agentJobFor("h\x1b[2J")
 	got := askLogins(context.Background(), job, func(_ context.Context, _ config.Resolved) ([]byte, string, bool, error) {
-		return []byte("a\x1b]0;pwned\x07  pts‮/0  1.2.3.4  Sat Oct 31 20:11:03 2026   still logged in\n" + hostileText + "\n"), "", false, nil
+		return fromSh("a\x1b]0;pwned\x07  pts‮/0  1.2.3.4  Sat Oct 31 20:11:03 2026   still logged in\n" + hostileText + "\n"), "", false, nil
 	}, nil, time.Second)
 	if got.Unparsed != 1 || len(got.Logins) != 1 {
 		t.Fatalf("%+v", got)

@@ -304,7 +304,10 @@ and the like go in one string: `meterm exec web1 -- 'df -h | grep /srv'`. Script
 that put shell syntax in separate arguments, or quotes inside one
 (`-- sh -c "'a; b'"`), need to change: `-- sh -c 'a; b'` is what that means now. A
 Windows server gets the arguments joined with spaces, as before, because cmd.exe
-doesn't read these quotes, so don't pass one text you don't trust.
+doesn't read these quotes, so don't pass one text you don't trust. Its OpenSSH already
+runs the line with `cmd.exe /c`, so don't start it with `cmd /c` again: `-- cmd /c ver`
+fails there with `'ver"' is not recognized`, as plain `ssh host "cmd /c ver"` does.
+`-- ver` is the same command.
 
 `--tag`/`--group` are repeatable and can combine with explicit host names;
 matches are deduped. When everything has finished it prints a summary table
@@ -824,7 +827,9 @@ which get none of a command line's `-o`. It includes your own ssh config after t
 
 `agents` runs on Linux and macOS, and refuses to run on Windows, where nothing shows those
 options would reach a hop. A Windows server can't answer either: the command needs `sh`, so it
-comes back as an error for that host. It needs OpenSSH 7.6 or newer, for `RemoteCommand`, and
+comes back as an error for that host that says so. The command starts with two `echo`s, one by
+the login shell and one by `sh`, so that it's known how far it got. Without them, cmd runs the
+`|| exit 127` meant for `sh` itself, and the host read as having no `claude`. It needs OpenSSH 7.6 or newer, for `RemoteCommand`, and
 has been run only with 10.3. It uses the first `ssh` on `PATH`, and since `-F` replaces the
 system config, an ssh from elsewhere such as Homebrew reads `/etc/ssh/ssh_config` instead of its
 own.
@@ -850,6 +855,7 @@ host, for that account, within two minutes. What it can't see:
   only means an event was close.
 - Anything removed by root, and hosts whose `last` has no `-F -i -w`, such as macOS and BSD, which
   come back as an error.
+- Windows, which has no `last` or `sh`. It comes back as an error that says there's no POSIX `sh`.
 
 `auth-methods` connects asking for no authentication, so no key or password is offered, and reports
 what the server says can continue. `password_login` says it takes passwords. It's `null` when it

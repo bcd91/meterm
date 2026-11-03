@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+
+	"meterm/internal/lookscript"
 )
 
 func TestParseRealShape(t *testing.T) {
@@ -128,7 +130,7 @@ func TestParseNullMeansAbsent(t *testing.T) {
 // The command is what's promised: one line, one pair of quotes, and no way for it
 // to be anything else, since it's a constant.
 func TestRemoteCommand(t *testing.T) {
-	if strings.Count(RemoteCommand, "'") != 2 || !strings.HasPrefix(RemoteCommand, "sh -c '") || !strings.HasSuffix(RemoteCommand, "'") {
+	if strings.Count(RemoteCommand, "'") != 2 || strings.Count(RemoteCommand, "!") != 0 || !strings.HasPrefix(RemoteCommand, lookscript.Start) || !strings.HasSuffix(RemoteCommand, "'") {
 		t.Errorf("quoting: %s", RemoteCommand)
 	}
 	for _, want := range []string{"$HOME/.local/bin", "claude agents --json", "exit 127", "|| exit 1"} {
