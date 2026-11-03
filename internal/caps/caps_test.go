@@ -95,6 +95,7 @@ func TestParseMacShape(t *testing.T) {
 // one.
 const linuxShape = `Welcome to web1, from a .bashrc
 caps=1
+limiter=timeout-term
 user=deploy
 os=Linux
 arch=x86_64
@@ -207,6 +208,19 @@ func TestParseUnknownsAndLimits(t *testing.T) {
 	if c.CPUs != nil || c.Complete || len(c.Tools) != 1 || c.Tools[0].Path != "/usr/bin/git" || c.Unparsed != 4 {
 		t.Errorf("%+v", c)
 	}
+	// end said twice isn't complete; a status means timed out only for the limiter that gives it.
+	if c := Parse([]byte("caps=1\nend=1\nend=1\n")); c.Complete {
+		t.Error("end twice")
+	}
+	for _, x := range []struct {
+		limiter, code string
+		timedOut      bool
+	}{{"perl", "142", true}, {"perl", "137", false}, {"timeout", "137", true}, {"timeout", "143", false}, {"timeout-term", "143", true}, {"none", "137", false}, {"none", "142", false}} {
+		c := Parse([]byte("caps=1\nlimiter=" + x.limiter + "\ntool=git\t/usr/bin/git\t" + x.code + "\t\n"))
+		if got := c.Tools[0].Note == "timed out"; got != x.timedOut || (!got && (c.Tools[0].Runs == nil || *c.Tools[0].Runs)) {
+			t.Errorf("%s %s: %+v", x.limiter, x.code, c.Tools[0])
+		}
+	}
 	// Said twice is unknown, whichever came first.
 	c = Parse([]byte("caps=1\ncpus=8\ncpus=512\ndistro=debian\ndistro=fake\nend=1\n"))
 	if c.CPUs != nil || c.Distro != "" || !c.Complete || c.Unparsed != 2 {
@@ -272,50 +286,86 @@ func TestRemoteCommandQuoting(t *testing.T) {
 	}
 	// Asking a version mustn't fetch or set anything up, or ask anyone at the screen.
 	for _, guard := range []string{"cd / ||", "-XX:-UsePerfData", "GOTOOLCHAIN=local", "RUSTUP_AUTO_INSTALL=0", "DOTNET_SKIP_FIRST_TIME_EXPERIENCE=1",
-		"DOTNET_GENERATE_ASPNET_CERTIFICATE=false", "xcode-select -p", "JavaVirtualMachines", "tmux) a=-V", "not-local", "kill 9, -"} {
+		"DOTNET_GENERATE_ASPNET_CERTIFICATE=false", "xcode-select -p", "JavaVirtualMachines", "unset OMP_NUM_THREADS", "timeout -k 1 5", "defined(", "tmux) a=-V", "not-local", "kill 9, -"} {
 		if !strings.Contains(RemoteCommand, guard) {
 			t.Errorf("RemoteCommand lost %q", guard)
 		}
 	}
 }
 
-// RemoteCommand run for real by each login shell this machine has, as ssh would run it.
-// HOME is a temporary one, and the tools it finds are this machine's.
+// safePath is a directory of links to the few programs the script needs and nothing else,
+// for PATH, with nothing added to it. Run with it, the script can't reach a real stand-in
+// such as /usr/bin/java, which would put an install dialog on this machine's screen, or
+// any other real tool: the tests see only the fakes they put first.
+func safePath(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	for _, name := range []string{"sh", "uname", "id", "sed", "cat", "tr", "df", "head", "tail", "sysctl", "getconf", "nproc", "perl", "sleep", "sw_vers", "env", "timeout"} {
+		for _, d := range []string{"/bin", "/usr/bin", "/usr/sbin", "/sbin"} {
+			if _, err := os.Stat(filepath.Join(d, name)); err == nil {
+				if err := os.Symlink(filepath.Join(d, name), filepath.Join(dir, name)); err != nil {
+					t.Fatal(err)
+				}
+				break
+			}
+		}
+	}
+	return dir
+}
+
+// safeCommand is RemoteCommand with nothing added to PATH and stand-ins looked for in
+// standIns.
+func safeCommand(standIns string) string { return remoteCommand(standIns, "") }
+
+func runScript(t *testing.T, shell, script string) []byte {
+	t.Helper()
+	cmd := exec.Command(shell, "-c", script)
+	cmd.Dir = "/"
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	return out
+}
+
+// The script run for real by each login shell this machine has, as ssh would run it, with
+// a temporary HOME and only safePath's programs.
 func TestRemoteCommandRunsHere(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("a POSIX sh is what this needs")
 	}
-	t.Setenv("HOME", t.TempDir())
-	ran := 0
+	if !strings.Contains(RemoteCommand, SearchPath) || !strings.Contains(RemoteCommand, "/usr/bin/java)") {
+		t.Fatal("RemoteCommand isn't remoteCommand with the real places")
+	}
+	shells := map[string]string{}
 	for _, sh := range []string{"sh", "bash", "zsh", "dash", "ksh", "fish", "tcsh", "csh"} {
-		path, err := exec.LookPath(sh)
-		if err != nil {
+		if path, err := exec.LookPath(sh); err == nil {
+			shells[sh] = path
+		} else {
 			t.Logf("%s isn't here, so it wasn't tried", sh)
-			continue
 		}
-		ran++
+	}
+	if len(shells) == 0 {
+		t.Fatal("no shell found to run it with")
+	}
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("PATH", safePath(t))
+	script := safeCommand(t.TempDir())
+	for sh, path := range shells {
 		t.Run(sh, func(t *testing.T) {
-			cmd := exec.Command(path, "-c", RemoteCommand)
-			cmd.Dir = "/"
-			out, err := cmd.Output()
-			if err != nil {
-				t.Fatalf("%v", err)
-			}
+			out := runScript(t, path, script)
 			c := Parse(out)
 			if !c.Answered || !c.Complete || c.Unparsed != 0 {
 				t.Fatalf("complete %v, unparsed %d:\n%s", c.Complete, c.Unparsed, out)
 			}
-			uname, _ := exec.Command("uname", "-s").Output()
-			if c.OS != strings.TrimSpace(string(uname)) || c.Arch == "" || c.CPUs == nil || c.MemTotalMB == nil || c.HomeFreeMB == nil || c.Load1 == nil {
+			uname, _ := exec.Command("/usr/bin/uname", "-s").Output()
+			if c.OS != strings.TrimSpace(string(uname)) || c.Arch == "" || c.CPUs == nil || c.MemTotalMB == nil || c.HomeFreeMB == nil || c.Load1 == nil || c.Limiter == "" {
 				t.Errorf("%+v\n%s", c, out)
 			}
 			if len(c.Tools) != len(Tools) {
 				t.Errorf("%d tools of %d:\n%s", len(c.Tools), len(Tools), out)
 			}
 		})
-	}
-	if ran == 0 {
-		t.Fatal("no shell found to run it with")
 	}
 }
 
@@ -327,8 +377,8 @@ func fakeTool(t *testing.T, dir, name, body string) {
 	}
 }
 
-// RemoteCommand run for real against made-up tools put first on PATH: what a host's tools
-// do mustn't turn into facts that aren't so, hang the look, or reach another host.
+// The script against made-up tools: what a host's tools do mustn't turn into facts that
+// aren't so, hang the look, or reach another host.
 func TestRemoteCommandAgainstFakes(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("a POSIX sh is what this needs")
@@ -338,32 +388,36 @@ func TestRemoteCommandAgainstFakes(t *testing.T) {
 	}
 	home, bin := t.TempDir(), t.TempDir()
 	t.Setenv("HOME", home)
-	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+safePath(t))
 	t.Setenv("DOCKER_HOST", "")
+	t.Setenv("OMP_NUM_THREADS", "1")
 	log := filepath.Join(home, "docker.log")
 	fakeTool(t, bin, "git", `echo "git version 9.9.9"; kill -SEGV $$`)
 	fakeTool(t, bin, "node", `sleep 30`)
 	fakeTool(t, bin, "python3", `sleep 30 & echo "Python 3.1.1"`)
+	if err := os.WriteFile(filepath.Join(bin, "uv"), []byte("#!/nonexistent/interpreter\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
 	fakeTool(t, bin, "nvidia-smi", `echo "NVIDIA-SMI has failed because it couldn't communicate with the NVIDIA driver."; exit 9`)
 	fakeTool(t, bin, "docker", `echo "$1" >> "`+log+`"; case "$1" in --version) echo "Docker version 1.2.3";; context) exit 1;; info) echo 9.9;; esac`)
 	fakeTool(t, bin, "uname", `case "$1" in -m) printf 'x86_64\ncpus=999\ngpu_check=nvidia-smi\n';; *) exec /usr/bin/uname "$@";; esac`)
 
 	start := time.Now()
-	cmd := exec.Command("/bin/sh", "-c", "printf '\033]0;title\007'; "+RemoteCommand)
-	cmd.Dir = "/"
-	out, err := cmd.Output()
-	if err != nil {
-		t.Fatalf("%v\n%s", err, out)
-	}
+	out := runScript(t, "/bin/sh", "printf '\033]0;title\007'; "+safeCommand(t.TempDir()))
 	if took := time.Since(start); took > 20*time.Second {
 		t.Errorf("a hung tool, or a child left behind, held the look %v", took)
 	}
 	c := Parse(out)
-	if !c.Answered || !c.Complete {
+	if !c.Answered || !c.Complete || c.Limiter != "perl" {
 		t.Fatalf("a banner with no newline lost the answer:\n%q", out)
 	}
 	if c.CPUs != nil && *c.CPUs == 999 || c.GPUCheck != "failed" || c.GPUs != nil {
 		t.Errorf("planted or failed facts were believed: cpus %v gpu %q %v\n%s", c.CPUs, c.GPUCheck, c.GPUs, out)
+	}
+	if real, err := exec.Command("/bin/sh", "-c", "getconf _NPROCESSORS_ONLN").Output(); err == nil && strings.TrimSpace(string(real)) != "1" {
+		if c.CPUs == nil || *c.CPUs == 1 {
+			t.Errorf("OMP_NUM_THREADS decided the CPU count: %v", c.CPUs)
+		}
 	}
 	byName := map[string]Tool{}
 	for _, tool := range c.Tools {
@@ -371,6 +425,9 @@ func TestRemoteCommandAgainstFakes(t *testing.T) {
 	}
 	if g := byName["git"]; g.Runs == nil || *g.Runs {
 		t.Errorf("a tool that crashed passed: %+v", g)
+	}
+	if u := byName["uv"]; u.Runs == nil || *u.Runs {
+		t.Errorf("a tool that couldn't be run passed: %+v", u)
 	}
 	if n := byName["node"]; n.Runs != nil || n.Note != "timed out" {
 		t.Errorf("%+v", n)
@@ -384,40 +441,78 @@ func TestRemoteCommandAgainstFakes(t *testing.T) {
 	if b, _ := os.ReadFile(log); strings.Contains(string(b), "info") {
 		t.Errorf("docker info was asked with nowhere known to point: %s", b)
 	}
+
 	// With DOCKER_HOST elsewhere, it isn't asked either.
 	_ = os.Remove(log)
 	t.Setenv("DOCKER_HOST", "ssh://me@elsewhere")
-	cmd = exec.Command("/bin/sh", "-c", RemoteCommand)
-	cmd.Dir = "/"
-	out, _ = cmd.Output()
-	if c := Parse(out); c.DockerDaemon != "not-local" {
+	if c := Parse(runScript(t, "/bin/sh", safeCommand(t.TempDir()))); c.DockerDaemon != "not-local" {
 		t.Errorf("%q", c.DockerDaemon)
 	}
 	if b, _ := os.ReadFile(log); strings.Contains(string(b), "info") {
 		t.Errorf("docker info followed DOCKER_HOST elsewhere: %s", b)
 	}
+	// A local daemon that says nothing is unreachable, not no docker.
+	t.Setenv("DOCKER_HOST", "unix:///var/run/docker.sock")
+	fakeTool(t, bin, "docker", `case "$1" in --version) echo "Docker version 1.2.3";; info) exit 0;; esac`)
+	if c := Parse(runScript(t, "/bin/sh", safeCommand(t.TempDir()))); c.DockerDaemon != "unreachable" {
+		t.Errorf("%q", c.DockerDaemon)
+	}
 }
 
-// On a Mac without the developer tools, /usr/bin's stand-ins aren't run. This Mac's real
-// xcode-select is replaced by one that says they're missing, so nothing would be shown even
-// if the skip failed: /usr/bin/git just works here.
+// On a Mac, a tool where the stand-ins live is run only when the developer directory has
+// the real one, and java only with a JDK. The stand-ins here are fakes that leave a mark,
+// in a directory of the test's own, so nothing real is ever run.
 func TestMacStandInsArentRun(t *testing.T) {
 	if runtime.GOOS != "darwin" {
 		t.Skip("macOS only")
 	}
-	home, bin := t.TempDir(), t.TempDir()
+	home, bin, standIns, dev := t.TempDir(), t.TempDir(), t.TempDir(), t.TempDir()
 	t.Setenv("HOME", home)
-	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+standIns+string(os.PathListSeparator)+safePath(t))
+	mark := filepath.Join(home, "ran")
+	for _, name := range []string{"git", "java"} {
+		fakeTool(t, standIns, name, `echo `+name+` >> "`+mark+`"; echo "`+name+` version 1.2.3"`)
+	}
+	ran := func() string { b, _ := os.ReadFile(mark); _ = os.Remove(mark); return string(b) }
+	tool := func(out []byte, name string) Tool {
+		for _, tl := range Parse(out).Tools {
+			if tl.Name == name {
+				return tl
+			}
+		}
+		return Tool{}
+	}
+	script := safeCommand(standIns)
+
+	// No developer tools: neither runs.
 	fakeTool(t, bin, "xcode-select", `echo /nonexistent/Developer`)
-	cmd := exec.Command("/bin/sh", "-c", RemoteCommand)
-	cmd.Dir = "/"
-	out, err := cmd.Output()
-	if err != nil {
+	out := runScript(t, "/bin/sh", script)
+	if r := ran(); r != "" || tool(out, "git").Note != "not run: a macOS stand-in" {
+		t.Fatalf("ran %q:\n%s", r, out)
+	}
+	if _, err := os.Stat("/Library/Java/JavaVirtualMachines"); os.IsNotExist(err) && tool(out, "java").Note != "not run: a macOS stand-in" {
+		t.Errorf("java with no JDK: %+v", tool(out, "java"))
+	}
+	// A developer directory without git, as after an upgrade: still not run.
+	if err := os.MkdirAll(filepath.Join(dev, "usr", "bin"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	for _, tool := range Parse(out).Tools {
-		if strings.HasPrefix(tool.Path, "/usr/bin/") && tool.Note != "not run: a macOS stand-in" {
-			t.Errorf("%+v", tool)
-		}
+	fakeTool(t, bin, "xcode-select", `echo `+dev)
+	if r := ran(); r != "" {
+		t.Fatal(r)
+	}
+	if out = runScript(t, "/bin/sh", script); strings.Contains(ran(), "git") {
+		t.Fatalf("git ran with no real git behind it:\n%s", out)
+	}
+	// With the real one there, and a JDK in the home, both run: the check isn't just off.
+	fakeTool(t, filepath.Join(dev, "usr", "bin"), "git", `true`)
+	jdk := filepath.Join(home, "Library", "Java", "JavaVirtualMachines", "x.jdk", "Contents", "Home", "bin")
+	if err := os.MkdirAll(jdk, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	fakeTool(t, jdk, "java", `true`)
+	out = runScript(t, "/bin/sh", script)
+	if r := ran(); !strings.Contains(r, "git") || !strings.Contains(r, "java") {
+		t.Fatalf("ran %q:\n%s", r, out)
 	}
 }

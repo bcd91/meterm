@@ -883,10 +883,12 @@ meterm caps --group build --format json
 It runs one fixed script from `/`, with no sudo. Besides reading files and running `uname`, `df` and
 the like, it runs `nvidia-smi`, `docker info` only when docker names a local socket, and each found
 tool's version flag, with toolchain downloads, first-run setup and the JVM's perf file turned off.
-Each of those gets five seconds, together with what it starts in its process group, where the host
-has perl or `timeout`; a child that leaves the group isn't reached. If the host's time runs out, what
-came before is kept, marked incomplete. On a Mac without the developer tools
-or a JDK, `/usr/bin`'s stand-ins aren't run, as they'd ask whoever is at that screen to install
+Each of those gets five seconds. With perl, that covers what it starts in its process group, which is
+killed again when it ends; with only `timeout`, it's TERM then KILL for the tool alone; `limiter` says
+which. If the host's time runs out, what came before is kept, marked incomplete, and the script on the
+host isn't stopped until it next writes, as there's no terminal to hang up. On a Mac, a tool in
+`/usr/bin` is run only when the developer directory `xcode-select` names has the real one, and java
+only with a JDK, as otherwise they're stand-ins that would ask whoever is at that screen to install
 something. What it can't say:
 
 - A tool that isn't found wasn't on the `PATH` a non-interactive login gets, plus `~/.local/bin`,

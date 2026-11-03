@@ -33,52 +33,64 @@ const SearchPath = "$HOME/.local/bin:$HOME/bin:$HOME/.claude/local:$HOME/.npm-gl
 // fixed, made of constants and nothing from a host or a flag, on one line inside one pair of single quotes, for whatever the login shell is:
 // csh can't take a newline there, and fish reads a doubled backslash, so neither appears.
 //
-// What it runs, from /: uname, id, sysctl, df, sed, cat, tr and xcode-select, with no limit
-// of their own; /etc/os-release, which is shell code, in a subshell; `nvidia-smi --query-gpu`;
-// `docker context inspect`, and `docker info` only when that names a local socket; and each
-// tool it finds with `--version` or its like, with toolchain downloads, first-run setup and
-// the JVM's perf file turned off. No sudo. nvidia-smi, docker and the tools are each under a
-// five-second limit, with what they started in their process group, by perl or else
-// `timeout` where the host has either. On a
-// Mac without the developer tools, or without a JDK, /usr/bin's stand-ins aren't run, as
-// they'd ask whoever is at its screen to install something.
+// What it runs, from /: uname, id, sysctl, sw_vers, nproc, getconf, df, head, tail, sed,
+// cat, tr, perl and xcode-select, with no limit of their own; /etc/os-release, which is
+// shell code, in a subshell; `nvidia-smi --query-gpu`; `docker context inspect`, and
+// `docker info` only when that names a local socket; and each tool it finds with
+// `--version` or its like, with toolchain downloads, first-run setup and the JVM's perf
+// file turned off. No sudo. nvidia-smi, docker and the tools each get five seconds: with
+// perl, together with what they started in their process group, which is killed again
+// when they end; with timeout, TERM then KILL a second later, for the tool alone. With
+// neither, there's no limit but meterm's for the whole host, and when that runs out the
+// script on the host isn't stopped, as there's no terminal to hang up: it goes on until it
+// next writes. On a Mac, a tool in /usr/bin is run only when the developer directory
+// xcode-select names has the real one, and java only with a JDK installed: otherwise
+// they're stand-ins that would ask whoever is at its screen to install something.
 //
 // Every value goes through kv, which strips newlines, so nothing a command prints can
 // start a line of its own. It starts with a newline, as a shell's startup file can print
 // without one, such as a title for the terminal. A line is key=value, and `end=1` says it
 // got to the end.
-var RemoteCommand = `sh -c 'LC_ALL=C; export LC_ALL; PATH="$PATH:` + SearchPath + `"; export PATH; cd / || exit 1; echo; ` +
-	`kv() { printf "%s=%s\n" "$1" "$(printf "%s" "$2" | tr -d "\r\n")"; }; ` +
-	`TO=; PL=; if command -v perl >/dev/null 2>&1; then PL=1; elif timeout 5 true >/dev/null 2>&1; then TO=1; fi; ` +
-	`t5() { if [ -n "$PL" ]; then perl -e "` + perlLimit + `" 5 "$@"; elif [ -n "$TO" ]; then timeout 5 "$@"; else "$@"; fi; }; ` +
-	`D=$(uname -s); echo caps=1; kv user "$(id -un 2>/dev/null)"; kv os "$D"; kv arch "$(uname -m)"; kv kernel "$(uname -r)"; ` +
-	`if [ -r /etc/os-release ]; then kv distro "$(. /etc/os-release; echo "$ID")"; kv distro_version "$(. /etc/os-release; echo "$VERSION_ID")"; fi; ` +
-	`if command -v sw_vers >/dev/null 2>&1; then echo distro=macos; kv distro_version "$(sw_vers -productVersion)"; fi; ` +
-	`kv cpus "$(nproc 2>/dev/null || getconf _NPROCESSORS_ONLN 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null)"; ` +
-	`if [ -r /proc/cpuinfo ]; then kv cpu_model "$(sed -n "s/^model name[[:space:]]*: //p" /proc/cpuinfo | head -n 1)"; ` +
-	`else kv cpu_model "$(sysctl -n machdep.cpu.brand_string 2>/dev/null || sysctl -n hw.model 2>/dev/null)"; fi; ` +
-	`if [ -r /proc/meminfo ]; then sed -n "s/^MemTotal: *\([0-9]*\) kB$/mem_total_kb=\1/p; s/^MemAvailable: *\([0-9]*\) kB$/mem_available_kb=\1/p" /proc/meminfo; ` +
-	`else kv mem_total_bytes "$(sysctl -n hw.memsize 2>/dev/null || sysctl -n hw.physmem 2>/dev/null)"; fi; ` +
-	`if [ -r /sys/fs/cgroup/memory.max ]; then kv cgroup_memory_max "$(cat /sys/fs/cgroup/memory.max)"; fi; ` +
-	`if [ -r /sys/fs/cgroup/cpu.max ]; then kv cgroup_cpu_max "$(cat /sys/fs/cgroup/cpu.max)"; fi; ` +
-	`if [ -r /sys/fs/cgroup/memory/memory.limit_in_bytes ]; then kv cgroup1_memory_limit "$(cat /sys/fs/cgroup/memory/memory.limit_in_bytes)"; fi; ` +
-	`kv home_df "$(df -Pk "$HOME" 2>/dev/null | tail -n 1)"; ` +
-	`if [ -r /proc/loadavg ]; then kv load "$(cat /proc/loadavg)"; else kv load "$(sysctl -n vm.loadavg 2>/dev/null)"; fi; ` +
-	`if command -v nvidia-smi >/dev/null 2>&1; then if g=$(t5 nvidia-smi --query-gpu=name,memory.total --format=csv,noheader,nounits </dev/null 2>/dev/null); ` +
-	`then echo gpu_check=nvidia-smi; printf "%s\n" "$g" | sed -n "s/^./gpu=&/p"; else echo gpu_check=failed; fi; fi; ` +
-	`NOCLT=; NOJDK=; if [ "$D" = Darwin ]; then [ -d "$(xcode-select -p 2>/dev/null)" ] || NOCLT=1; NOJDK=1; ` +
-	`for j in /Library/Java/JavaVirtualMachines/*/Contents/Home/bin/java "$HOME"/Library/Java/JavaVirtualMachines/*/Contents/Home/bin/java; do [ -x "$j" ] && NOJDK=; done; fi; ` +
-	`for t in ` + strings.Join(Tools, " ") + `; do p=$(command -v $t 2>/dev/null) || { echo "tool=$t"; continue; }; ` +
-	`s=; if [ "$D" = Darwin ]; then case $p in /usr/bin/java) s=$NOJDK;; /usr/bin/*) s=$NOCLT;; esac; fi; ` +
-	`if [ -n "$s" ]; then printf "tool=%s\t%s\t-\t\n" "$t" "$p"; continue; fi; ` +
-	`case $t in go) a=version;; java) a="-XX:-UsePerfData -version";; kubectl) a="version --client";; tmux) a=-V;; *) a=--version;; esac; ` +
-	`v=$(export GOTOOLCHAIN=local RUSTUP_AUTO_INSTALL=0 DOTNET_NOLOGO=1 DOTNET_SKIP_FIRST_TIME_EXPERIENCE=1 DOTNET_CLI_TELEMETRY_OPTOUT=1 ` +
-	`DOTNET_GENERATE_ASPNET_CERTIFICATE=false DOTNET_ADD_GLOBAL_TOOLS_TO_PATH=false; t5 "$p" $a </dev/null 2>&1); e=$?; ` +
-	`printf "tool=%s\t%s\t%s\t%s\n" "$t" "$p" "$e" "$(printf "%s\n" "$v" | sed -n "/[0-9]\.[0-9]/p" | head -n 1 | tr -d "\r")"; done; ` +
-	`if command -v docker >/dev/null 2>&1; then h=$DOCKER_HOST; [ -n "$h" ] || h=$(t5 docker context inspect --format "{{.Endpoints.docker.Host}}" </dev/null 2>/dev/null); ` +
-	`case $h in unix://*|npipe://*) if v=$(t5 docker info --format "{{.ServerVersion}}" </dev/null 2>/dev/null) && [ -n "$v" ]; ` +
-	`then kv docker_daemon "$v"; else echo docker_daemon=-; fi;; "") echo docker_daemon=not-checked;; *) echo docker_daemon=not-local;; esac; fi; ` +
-	`echo end=1'`
+var RemoteCommand = remoteCommand("/usr/bin", SearchPath)
+
+// remoteCommand is RemoteCommand with where macOS's stand-ins live, and what's added to
+// PATH, as arguments: tests point both at directories of their own, so that nothing they
+// run can be a real stand-in that asks to install something on the screen running them.
+func remoteCommand(standIns, searchPath string) string {
+	return `sh -c 'LC_ALL=C; export LC_ALL; PATH="$PATH:` + searchPath + `"; export PATH; cd / || exit 1; echo; ` +
+		`kv() { printf "%s=%s\n" "$1" "$(printf "%s" "$2" | tr -d "\r\n")"; }; ` +
+		`L=none; if command -v perl >/dev/null 2>&1; then L=perl; elif timeout -k 1 5 true >/dev/null 2>&1; then L=timeout; ` +
+		`elif timeout 5 true >/dev/null 2>&1; then L=timeout-term; fi; ` +
+		`t5() { case $L in perl) perl -e "` + perlLimit + `" 5 "$@";; timeout) timeout -k 1 5 "$@";; timeout-term) timeout 5 "$@";; *) "$@";; esac; }; ` +
+		`D=$(uname -s); echo caps=1; kv limiter "$L"; kv user "$(id -un 2>/dev/null)"; kv os "$D"; kv arch "$(uname -m)"; kv kernel "$(uname -r)"; ` +
+		`if [ -r /etc/os-release ]; then kv distro "$(. /etc/os-release; echo "$ID")"; kv distro_version "$(. /etc/os-release; echo "$VERSION_ID")"; fi; ` +
+		`if command -v sw_vers >/dev/null 2>&1; then echo distro=macos; kv distro_version "$(sw_vers -productVersion)"; fi; ` +
+		`kv cpus "$(unset OMP_NUM_THREADS OMP_THREAD_LIMIT; nproc 2>/dev/null || getconf _NPROCESSORS_ONLN 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null)"; ` +
+		`if [ -r /proc/cpuinfo ]; then kv cpu_model "$(sed -n "s/^model name[[:space:]]*: //p" /proc/cpuinfo | head -n 1)"; ` +
+		`else kv cpu_model "$(sysctl -n machdep.cpu.brand_string 2>/dev/null || sysctl -n hw.model 2>/dev/null)"; fi; ` +
+		`if [ -r /proc/meminfo ]; then sed -n "s/^MemTotal: *\([0-9]*\) kB$/mem_total_kb=\1/p; s/^MemAvailable: *\([0-9]*\) kB$/mem_available_kb=\1/p" /proc/meminfo; ` +
+		`else kv mem_total_bytes "$(sysctl -n hw.memsize 2>/dev/null || sysctl -n hw.physmem 2>/dev/null)"; fi; ` +
+		`if [ -r /sys/fs/cgroup/memory.max ]; then kv cgroup_memory_max "$(cat /sys/fs/cgroup/memory.max)"; fi; ` +
+		`if [ -r /sys/fs/cgroup/cpu.max ]; then kv cgroup_cpu_max "$(cat /sys/fs/cgroup/cpu.max)"; fi; ` +
+		`if [ -r /sys/fs/cgroup/memory/memory.limit_in_bytes ]; then kv cgroup1_memory_limit "$(cat /sys/fs/cgroup/memory/memory.limit_in_bytes)"; fi; ` +
+		`kv home_df "$(df -Pk "$HOME" 2>/dev/null | tail -n 1)"; ` +
+		`if [ -r /proc/loadavg ]; then kv load "$(cat /proc/loadavg)"; else kv load "$(sysctl -n vm.loadavg 2>/dev/null)"; fi; ` +
+		`if command -v nvidia-smi >/dev/null 2>&1; then if g=$(t5 nvidia-smi --query-gpu=name,memory.total --format=csv,noheader,nounits </dev/null 2>/dev/null); ` +
+		`then echo gpu_check=nvidia-smi; printf "%s\n" "$g" | sed -n "s/^./gpu=&/p"; else echo gpu_check=failed; fi; fi; ` +
+		`DEV=; NOJDK=; if [ "$D" = Darwin ]; then DEV=$(xcode-select -p 2>/dev/null); NOJDK=1; ` +
+		`for j in /Library/Java/JavaVirtualMachines/*/Contents/Home/bin/java "$HOME"/Library/Java/JavaVirtualMachines/*/Contents/Home/bin/java; do [ -x "$j" ] && NOJDK=; done; fi; ` +
+		`for t in ` + strings.Join(Tools, " ") + `; do p=$(command -v $t 2>/dev/null) || { echo "tool=$t"; continue; }; ` +
+		`s=; if [ "$D" = Darwin ]; then case $p in ` + standIns + `/java) s=$NOJDK;; ` + standIns + `/*) [ -n "$DEV" ] && [ -x "$DEV/usr/bin/$t" ] || s=1;; esac; fi; ` +
+		`if [ -n "$s" ]; then printf "tool=%s\t%s\t-\t\n" "$t" "$p"; continue; fi; ` +
+		`case $t in go) a=version;; java) a="-XX:-UsePerfData -version";; kubectl) a="version --client";; tmux) a=-V;; *) a=--version;; esac; ` +
+		`v=$(export GOTOOLCHAIN=local RUSTUP_AUTO_INSTALL=0 DOTNET_NOLOGO=1 DOTNET_SKIP_FIRST_TIME_EXPERIENCE=1 DOTNET_CLI_TELEMETRY_OPTOUT=1 ` +
+		`DOTNET_GENERATE_ASPNET_CERTIFICATE=false DOTNET_ADD_GLOBAL_TOOLS_TO_PATH=false; t5 "$p" $a </dev/null 2>&1); e=$?; ` +
+		`printf "tool=%s\t%s\t%s\t%s\n" "$t" "$p" "$e" "$(printf "%s\n" "$v" | sed -n "/[0-9]\.[0-9]/p" | head -n 1 | tr -d "\r")"; done; ` +
+		`if command -v docker >/dev/null 2>&1; then h=$DOCKER_HOST; [ -n "$h" ] || h=$(t5 docker context inspect --format "{{.Endpoints.docker.Host}}" </dev/null 2>/dev/null); ` +
+		`case $h in unix://*|npipe://*) if v=$(t5 docker info --format "{{.ServerVersion}}" </dev/null 2>/dev/null) && [ -n "$v" ]; ` +
+		`then kv docker_daemon "$v"; else echo docker_daemon=-; fi;; "") echo docker_daemon=not-checked;; *) echo docker_daemon=not-local;; esac; fi; ` +
+		`echo end=1'`
+}
 
 // perlLimit runs its arguments in a process group of their own and kills the whole group
 // after the given seconds, exiting 142, and again when the tool ends, for what it left
@@ -86,16 +98,22 @@ var RemoteCommand = `sh -c 'LC_ALL=C; export LC_ALL; PATH="$PATH:` + SearchPath 
 // open, and the shell waits for that. A tool killed by a signal exits 128 and the signal, as
 // a shell would say, never 0. It goes inside double quotes in sh, so each $ is escaped, and
 // it has no ! for csh. A child that leaves the group, with setsid, isn't reached.
-const perlLimit = `\$t=shift; \$p=fork; unless (\$p) { setpgrp(0,0); exec @ARGV; exit 127 } ` +
-	`\$SIG{ALRM}=sub { kill 9, -\$p; exit 142 }; alarm \$t; waitpid(\$p,0); \$s=\$?; kill 9, -\$p; ` +
+const perlLimit = `\$t=shift; defined(\$p=fork) or exit 126; unless (\$p) { setpgrp(0,0); exec @ARGV; exit 127 } ` +
+	`\$SIG{ALRM}=sub { kill 9, -\$p; exit 142 }; alarm \$t; waitpid(\$p,0); alarm 0; \$s=\$?; kill 9, -\$p; ` +
 	`exit(\$s & 127 ? 128+(\$s & 127) : \$s>>8)`
 
 // ExitNoShell is what a login shell gives when it can't find sh.
 const ExitNoShell = 127
 
-// timedOut are the statuses of a version check that was stopped: GNU timeout's, a kill,
-// perl's alarm, and busybox timeout's TERM, as a shell reports them.
-var timedOut = map[int]bool{124: true, 137: true, 142: true, 143: true}
+// timedOut are, for each way of limiting time, the statuses that mean a version check was
+// stopped by it: perl's alarm; timeout's own 124, and its KILL after -k; or its TERM where
+// it has no -k. With no limit, none: a kill then came from elsewhere, and is a failure.
+var timedOut = map[string]map[int]bool{
+	"perl":         {142: true},
+	"timeout":      {124: true, 137: true},
+	"timeout-term": {124: true, 143: true},
+	"none":         {},
+}
 
 // Limits on what's believed.
 const (
@@ -124,7 +142,11 @@ type Host struct {
 // isn't zero, and an empty string says nothing either.
 type Caps struct {
 	// Complete says the output got to its end. Without it, what's missing is unknown.
-	Complete      bool   `json:"complete"`
+	Complete bool `json:"complete"`
+	// Limiter is how each tool's time was limited: perl, which also kills what it left in
+	// its process group; timeout, with KILL a second after TERM; timeout-term, TERM only;
+	// or none.
+	Limiter       string `json:"limiter"`
 	User          string `json:"user"`
 	OS            string `json:"os"` // uname -s: Linux, Darwin, FreeBSD ...
 	Arch          string `json:"arch"`
@@ -193,7 +215,7 @@ func clean(s string) string { return termsafe.Clip(termsafe.Text(strings.TrimSpa
 // scalars are the keys said once. A second one, from anything that got a line in, makes
 // the value unknown rather than either.
 var scalars = map[string]bool{
-	"user": true, "os": true, "arch": true, "kernel": true, "distro": true, "distro_version": true, "cpu_model": true,
+	"limiter": true, "user": true, "os": true, "arch": true, "kernel": true, "distro": true, "distro_version": true, "cpu_model": true,
 	"cpus": true, "mem_total_kb": true, "mem_available_kb": true, "mem_total_bytes": true, "cgroup_memory_max": true,
 	"cgroup_cpu_max": true, "cgroup1_memory_limit": true, "home_df": true, "load": true, "gpu_check": true, "docker_daemon": true, "end": true,
 }
@@ -242,6 +264,10 @@ func Parse(raw []byte) Caps {
 			seen[key] = true
 		}
 		switch key {
+		case "limiter":
+			if _, ok := timedOut[val]; ok {
+				c.Limiter = val
+			}
 		case "user":
 			c.User = clean(val)
 		case "os":
@@ -319,8 +345,10 @@ func Parse(raw []byte) Caps {
 					case f[2] == "-":
 						t.Note = "not run: a macOS stand-in"
 					case err != nil:
-					case timedOut[e]:
+					case timedOut[c.Limiter][e] || c.Limiter == "" && (e == 124 || e == 142):
 						t.Note = "timed out"
+					case e == 126:
+						t.Note = "couldn't be started"
 					default:
 						runs := e == 0
 						t.Runs = &runs

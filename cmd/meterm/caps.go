@@ -45,9 +45,11 @@ func newCapsCmd() *cobra.Command {
 			"account's home, the one-minute load, NVIDIA GPUs, whether a local docker daemon answers,\n" +
 			"and for each of " + strconv.Itoa(len(caps.Tools)) + " tools whether it's found, whether asking its version works,\n" +
 			"and what that says. Besides reading, it runs nvidia-smi, docker info (only when docker\n" +
-			"names a local socket), and those tools' version flags, each under five seconds, with\n" +
-			"what it starts in its process group, where the host has perl or timeout. On a Mac without the developer tools or a JDK, /usr/bin's stand-ins\n" +
-			"aren't run, as they'd ask whoever is at its screen to install something. Hosts are\n" +
+			"names a local socket), and those tools' version flags, each under five seconds: with\n" +
+			"perl, together with what it starts in its process group; with only timeout, the tool\n" +
+			"alone. On a Mac, a tool in /usr/bin runs only when the developer tools have the real\n" +
+			"one, and java only with a JDK, as otherwise they're stand-ins that would ask whoever\n" +
+			"is at its screen to install something. Hosts are\n" +
 			"chosen, and production refused unless named, as with `agents`, and so are the\n" +
 			"extra_args a host can have.\n\n" +
 			"What it can't say:\n" +
