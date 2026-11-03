@@ -90,6 +90,76 @@ func TestParseMacShape(t *testing.T) {
 	}
 }
 
+// From RemoteCommand over ssh to a real Debian 13 host, an agent account on a laptop-class
+// AMD machine with no container around it, with the volume group renamed. No cgroup file
+// at the root, so whether there's a limit is unknown. The empty first line is the script's.
+const debianShape = `
+caps=1
+limiter=perl
+user=agent
+os=Linux
+arch=x86_64
+kernel=6.12.113+deb13-amd64
+distro=debian
+distro_version=13
+cpus=12
+cpu_model=AMD Ryzen 5 7640HS w/ Radeon 760M Graphics
+mem_total_kb=26470544
+mem_available_kb=25565816
+home_df=/dev/mapper/host--vg-root   933475188 2776936 883206568       1% /
+load=0.08 0.03 0.00 1/266 35749
+tool=claude	/home/agent/.local/bin/claude	0	2.1.317 (Claude Code)
+tool=codex
+tool=git	/usr/bin/git	0	git version 2.47.3
+tool=go
+tool=node
+tool=python3	/usr/bin/python3	0	Python 3.13.5
+tool=uv
+tool=docker
+tool=podman
+tool=kubectl
+tool=make
+tool=gcc
+tool=rustc
+tool=cargo
+tool=java
+tool=dotnet
+tool=psql
+tool=mysql
+tool=sqlcmd
+tool=tmux	/usr/bin/tmux	0	tmux 3.5a
+end=1
+`
+
+func TestParseDebianShape(t *testing.T) {
+	c := Parse([]byte(debianShape))
+	if !c.Answered || !c.Complete || c.Unparsed != 0 || c.Limiter != "perl" || c.User != "agent" {
+		t.Fatalf("%+v", c)
+	}
+	if c.Distro != "debian" || c.DistroVersion != "13" || c.CPUs == nil || *c.CPUs != 12 || c.CPUModel != "AMD Ryzen 5 7640HS w/ Radeon 760M Graphics" {
+		t.Errorf("%+v", c)
+	}
+	if c.MemTotalMB == nil || *c.MemTotalMB != 25850 || c.MemAvailableMB == nil || *c.MemAvailableMB != 24966 {
+		t.Errorf("mem %v %v", c.MemTotalMB, c.MemAvailableMB)
+	}
+	if c.HomeTotalMB == nil || *c.HomeTotalMB != 911596 || c.HomeFreeMB == nil || *c.HomeFreeMB != 862506 || c.Load1 == nil || *c.Load1 != 0.08 {
+		t.Errorf("home %v %v load %v", c.HomeTotalMB, c.HomeFreeMB, c.Load1)
+	}
+	// An AMD GPU with no nvidia-smi says nothing of GPUs; no cgroup file says nothing of limits.
+	if c.GPUs != nil || c.GPUCheck != "" || c.CgroupRead || c.MemLimitMB != nil || c.DockerDaemon != "" {
+		t.Errorf("%+v", c)
+	}
+	runs := map[string]string{}
+	for _, tool := range c.Tools {
+		if tool.Runs != nil && *tool.Runs {
+			runs[tool.Name] = tool.Version
+		}
+	}
+	if len(runs) != 4 || runs["tmux"] != "tmux 3.5a" || runs["claude"] != "2.1.317 (Claude Code)" {
+		t.Errorf("tmux -V on a real tmux, and the rest: %v", runs)
+	}
+}
+
 // Written by hand from the formats of /proc, cgroup v2 and nvidia-smi, not copied from a
 // host: replace it with real output from a Linux host with a GPU and docker when there is
 // one.
