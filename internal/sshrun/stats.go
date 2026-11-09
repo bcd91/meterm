@@ -44,9 +44,17 @@ fi
 // non-interactive (no stdin) so it fails fast instead of hanging on a
 // password prompt — it's for hosts key-based auth already works on.
 func StatsCommand(r config.Resolved) *exec.Cmd {
-	cmd := SSH(r, statsScript)
+	cmd := SSH(connectTimeout(r), statsScript)
 	cmd.Stdin = nil
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	return cmd
+}
+
+// connectTimeout gives up on connecting after 10 seconds. Without it, a host asleep
+// behind a jump host holds the command for minutes on the jump host's TCP retries;
+// with it, ssh stops at the banner. A copy: r's own ExtraArgs are left alone.
+func connectTimeout(r config.Resolved) config.Resolved {
+	r.ExtraArgs = append([]string{"-o", "ConnectTimeout=10"}, r.ExtraArgs...)
+	return r
 }

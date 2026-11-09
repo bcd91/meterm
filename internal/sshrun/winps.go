@@ -71,7 +71,9 @@ Get-CimInstance Win32_NetworkAdapterConfiguration -Filter 'IPEnabled=True' | For
 `
 
 // WinStatsCommand is StatsCommand for a Windows server.
-func WinStatsCommand(r config.Resolved) *exec.Cmd { return psCommand(r, winStatsScript) }
+func WinStatsCommand(r config.Resolved) *exec.Cmd {
+	return psCommand(connectTimeout(r), winStatsScript)
+}
 
 const winTailFileScript = `$n = [int]$A[0]
 $follow = $A[1] -eq '1'
