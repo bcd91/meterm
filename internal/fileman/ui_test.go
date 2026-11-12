@@ -1,6 +1,8 @@
 package fileman
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -437,5 +439,106 @@ func TestQuitWorksAfterACancelledQuestion(t *testing.T) {
 		if _, ok := cmd().(tea.QuitMsg); !ok {
 			t.Errorf("%s didn't quit", k)
 		}
+	}
+}
+
+// busyCopying puts the model in the middle of a copy with spies for both
+// ways to stop.
+func busyCopying(h *harness, overwriting bool) (stoppedAfter, stoppedNow *bool) {
+	m := h.model()
+	a, n := false, false
+	m.mode = modeBusy
+	m.progress = &Progress{File: "/src/app.conf", Dst: "/dst/app.conf", FileSize: 10, Total: 10, FilesTotal: 1, Overwriting: overwriting}
+	m.stopAfter = func() { a = true }
+	m.cancel = func() { n = true }
+	h.m = m
+	return &a, &n
+}
+
+func TestEscDuringAnOverwriteFinishesTheFileFirst(t *testing.T) {
+	for _, key := range []tea.KeyMsg{{Type: tea.KeyEsc}, {Type: tea.KeyCtrlC}} {
+		h := newHarness(t, t.TempDir(), t.TempDir())
+		after, now := busyCopying(h, true)
+		h.send(key)
+		if !*after || *now {
+			t.Errorf("%s: stop after = %v, stop now = %v; want only stop after", key, *after, *now)
+		}
+		want := "stopping after app.conf finishes — esc again to stop now (it will be left partly written)"
+		if st := h.model().status; st != want {
+			t.Errorf("%s: status = %q", key, st)
+		}
+		h.send(key)
+		if !*now {
+			t.Errorf("%s again didn't stop at once", key)
+		}
+	}
+}
+
+func TestEscDuringANewFileStopsAtOnce(t *testing.T) {
+	h := newHarness(t, t.TempDir(), t.TempDir())
+	after, now := busyCopying(h, false)
+	h.send(tea.KeyMsg{Type: tea.KeyEsc})
+	if !*now || !*after {
+		t.Errorf("stop after = %v, stop now = %v; want a new file stopped at once", *after, *now)
+	}
+}
+
+// Run wraps the error with the file name, so a cancel must be recognised
+// through the wrapping, and the status must only say a file was removed
+// when one was.
+func TestCancelIsReportedAccurately(t *testing.T) {
+	left, right := t.TempDir(), t.TempDir()
+	h := newHarness(t, left, right)
+	plan := Plan{Src: Local{}, Dst: h.model().opts.Right, DstDir: right}
+	cancel := fmt.Errorf("%s: %w", filepath.Join(left, "big.bin"), context.Canceled)
+	h.send(transferDoneMsg{err: cancel, plan: plan, res: Result{Copied: 2}})
+	if st := h.model().status; st != "cancelled after 2 file(s)" {
+		t.Errorf("status = %q", st)
+	}
+	removed := filepath.Join(right, "big.bin")
+	h.send(transferDoneMsg{err: cancel, plan: plan, res: Result{RemovedPartial: removed}})
+	if st := h.model().status; st != "cancelled after 0 file(s); the unfinished new file "+removed+" was removed" {
+		t.Errorf("status = %q", st)
+	}
+}
+
+// A copy over an existing file that failed or was stopped at once says the
+// file may be partly written, naming the side, on screen and in the log.
+func TestPartlyWrittenIsReported(t *testing.T) {
+	left, right := t.TempDir(), t.TempDir()
+	h := newHarness(t, left, right)
+	for _, tc := range []struct {
+		plan   Plan
+		target string
+		kind   string
+		remote bool
+	}{
+		{Plan{Src: Local{}, Dst: h.model().opts.Right, DstDir: right}, filepath.Join(right, "app.conf"), "upload", true},
+		{Plan{Src: h.model().opts.Right, Dst: Local{}, DstDir: left}, filepath.Join(left, "app.conf"), "download", true},
+	} {
+		for _, cause := range []error{context.Canceled, errors.New("connection lost")} {
+			h.events = nil
+			err := fmt.Errorf("x: %w", &PartlyWrittenError{Path: tc.target, Err: cause})
+			h.send(transferDoneMsg{err: err, plan: tc.plan})
+			where := tc.plan.Dst.Label() + ":" + tc.target
+			if st := h.model().status; !strings.Contains(st, where+" may be partly written") || strings.Contains(st, "removed") {
+				t.Errorf("status = %q, want %s named", st, where)
+			}
+			if len(h.events) != 1 || h.events[0].kind != tc.kind || h.events[0].remote != tc.remote || !strings.Contains(h.events[0].detail, where+" may be partly written") {
+				t.Errorf("events = %+v", h.events)
+			}
+		}
+	}
+}
+
+// The progress line is what's on screen during a copy, so it carries the
+// "stopping after" message.
+func TestStoppingShowsOnTheProgressLine(t *testing.T) {
+	h := newHarness(t, t.TempDir(), t.TempDir())
+	h.send(tea.WindowSizeMsg{Width: 250, Height: 30})
+	busyCopying(h, true)
+	h.send(tea.KeyMsg{Type: tea.KeyEsc})
+	if v := stripANSI(h.m.View()); !strings.Contains(v, "stopping after app.conf finishes — esc again to stop now (it will be left partly written)") {
+		t.Errorf("view doesn't say it's stopping:\n%s", v)
 	}
 }

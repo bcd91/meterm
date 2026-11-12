@@ -2,6 +2,7 @@ package fileman
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -146,6 +147,8 @@ type Model struct {
 	statusErr bool
 	progress  *Progress
 	cancel    context.CancelFunc
+	stopAfter context.CancelFunc // stop once the file being overwritten is done
+	stopping  bool               // stopAfter was asked for: the next esc stops at once
 	events    chan tea.Msg
 }
 
@@ -295,18 +298,33 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, waitFor(m.events)
 
 	case transferDoneMsg:
-		m.mode, m.progress, m.cancel = modeNormal, nil, nil
+		m.mode, m.progress, m.cancel, m.stopAfter, m.stopping = modeNormal, nil, nil, nil, false
 		dst := 1 - m.active
 		for _, p := range m.panes {
 			p.sel = map[string]bool{}
 		}
-		if msg.err != nil {
-			if msg.err == context.Canceled {
-				m.setStatus(fmt.Sprintf("cancelled after %d file(s); the unfinished file was removed", msg.res.Copied), true)
-			} else {
-				m.setStatus("copy failed: "+msg.err.Error(), true)
+		var partly *PartlyWrittenError
+		switch {
+		case errors.As(msg.err, &partly):
+			what := fmt.Sprintf("copy failed (%v)", partly.Err)
+			if errors.Is(msg.err, context.Canceled) {
+				what = fmt.Sprintf("cancelled after %d file(s)", msg.res.Copied)
 			}
-		} else {
+			where := msg.plan.Dst.Label() + ":" + partly.Path
+			m.setStatus(fmt.Sprintf("%s; %s may be partly written", what, where), true)
+			if m.opts.OnEvent != nil {
+				kind, remote := m.transferKind(msg.plan)
+				m.opts.OnEvent(kind, fmt.Sprintf("%s may be partly written (%v)", where, partly.Err), remote)
+			}
+		case errors.Is(msg.err, context.Canceled):
+			st := fmt.Sprintf("cancelled after %d file(s)", msg.res.Copied)
+			if msg.res.RemovedPartial != "" {
+				st += "; the unfinished new file " + msg.res.RemovedPartial + " was removed"
+			}
+			m.setStatus(st, true)
+		case msg.err != nil:
+			m.setStatus("copy failed: "+msg.err.Error(), true)
+		default:
 			s := fmt.Sprintf("copied %d file(s), %s to %s:%s", msg.res.Copied, HumanBytes(msg.res.Bytes), msg.plan.Dst.Label(), m.panes[dst].dir)
 			if msg.res.Skipped > 0 {
 				s += fmt.Sprintf("; kept %d existing", msg.res.Skipped)
@@ -366,6 +384,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case modeBusy:
 			switch {
 			case (msg.String() == "esc" || msg.String() == "ctrl+c") && m.cancel != nil:
+				// A file being overwritten finishes first: stopping it now
+				// leaves it partly written. A second esc does that anyway.
+				if p := m.progress; p != nil && p.Overwriting && !m.stopping && m.stopAfter != nil {
+					m.stopAfter()
+					m.stopping = true
+					m.setStatus(fmt.Sprintf("stopping after %s finishes — esc again to stop now (it will be left partly written)", m.panes[1-m.active].fs.Base(p.Dst)), true)
+					return m, nil
+				}
+				if m.stopAfter != nil {
+					m.stopAfter()
+				}
 				m.cancel()
 				m.setStatus("cancelling…", true)
 			case m.progress == nil:
@@ -642,14 +671,15 @@ func (m Model) updateConfirm(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) startTransfer(plan Plan, overwrite bool) (tea.Model, tea.Cmd) {
-	ctx, cancel := context.WithCancel(context.Background())
-	m.cancel = cancel
+	now, cancel := context.WithCancel(context.Background())
+	after, stopAfter := context.WithCancel(now)
+	m.cancel, m.stopAfter, m.stopping = cancel, stopAfter, false
 	m.mode = modeBusy
 	m.progress = &Progress{Total: plan.TotalBytes, FilesTotal: len(plan.Files), Started: time.Now()}
 	ch := make(chan tea.Msg, 16)
 	m.events = ch
 	go func() {
-		res, err := Run(ctx, plan, overwrite, func(p Progress) {
+		res, err := runPlan(now, after, plan, overwrite, func(p Progress) {
 			select {
 			case ch <- progressMsg(p):
 			default: // the UI is behind; drop this update rather than slow the copy
@@ -682,18 +712,24 @@ func waitFor(ch chan tea.Msg) tea.Cmd {
 	return func() tea.Msg { return <-ch }
 }
 
+// transferKind names a copy for the activity log, and says whether it
+// changed something on the host.
+func (m Model) transferKind(plan Plan) (kind string, remote bool) {
+	switch {
+	case plan.Dst == m.opts.Right:
+		return "upload", true
+	case plan.Src != m.opts.Right:
+		return "copy", false
+	}
+	return "download", true
+}
+
 // report tells OnEvent what a finished copy did.
 func (m Model) report(plan Plan, res Result) {
 	if m.opts.OnEvent == nil {
 		return
 	}
-	kind, remote := "download", true
-	switch {
-	case plan.Dst == m.opts.Right:
-		kind = "upload"
-	case plan.Src != m.opts.Right:
-		kind, remote = "copy", false
-	}
+	kind, remote := m.transferKind(plan)
 	var tops []string
 	for _, it := range plan.Items {
 		if len(tops) == 5 {
@@ -831,8 +867,15 @@ func (m Model) viewStatus() string {
 		if p.File != "" {
 			name = m.panes[m.active].fs.Base(p.File) + "  "
 		}
-		s := fmt.Sprintf("%s%s %3.0f%%  %s / %s  %s/s  file %d/%d  (esc cancels)",
-			name, bar, pct*100, HumanBytes(p.Done), HumanBytes(p.Total), HumanBytes(int64(p.Rate())), min(p.Files+1, p.FilesTotal), p.FilesTotal)
+		hint := "esc cancels"
+		switch {
+		case m.stopping:
+			hint = m.status // "stopping after <file> finishes — esc again ..."
+		case p.Overwriting:
+			hint = "esc stops after this file"
+		}
+		s := fmt.Sprintf("%s%s %3.0f%%  %s / %s  %s/s  file %d/%d  (%s)",
+			name, bar, pct*100, HumanBytes(p.Done), HumanBytes(p.Total), HumanBytes(int64(p.Rate())), min(p.Files+1, p.FilesTotal), p.FilesTotal, hint)
 		return ansi.Truncate(s, m.w, "…")
 	case m.status != "":
 		st := okStyle

@@ -27,7 +27,9 @@ func newFilesCmd() *cobra.Command {
 			"  /          find by name (n: next) .                  show hidden files\n" +
 			"  ~          home directory\n" +
 			"  R          reload                 q                  quit\n" +
-			"  esc        cancel a running copy (the unfinished file is removed)\n\n" +
+			"  esc        stop a running copy: a new file being written is removed; a\n" +
+			"             file being overwritten is finished first (esc again stops it\n" +
+			"             at once, leaving it partly written). An existing file is never deleted.\n\n" +
 			"Copying over existing files asks first: overwrite them, or skip them.\n" +
 			"It runs SFTP through your own ssh, so jump hosts and keys work as for\n" +
 			"`meterm connect`. Uploads, downloads, deletes and renames on the host are\n" +

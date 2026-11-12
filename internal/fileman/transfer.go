@@ -104,6 +104,8 @@ type Progress struct {
 	Done, Total        int64 // bytes, whole plan
 	Files, FilesTotal  int   // finished files
 	Started            time.Time
+	Dst                string // where the current file goes
+	Overwriting        bool   // the current file replaces an existing one
 }
 
 // Rate is bytes per second so far.
@@ -119,12 +121,34 @@ func (p Progress) Rate() float64 {
 type Result struct {
 	Copied, Skipped int
 	Bytes           int64
+	RemovedPartial  string // a new file a stopped copy had started, and removed
 }
 
+// PartlyWrittenError is a copy over an existing file that failed or was
+// stopped part way: the file is still there, but may hold part of the new
+// content.
+type PartlyWrittenError struct {
+	Path string
+	Err  error
+}
+
+func (e *PartlyWrittenError) Error() string {
+	return fmt.Sprintf("%s may be partly written: %v", e.Path, e.Err)
+}
+func (e *PartlyWrittenError) Unwrap() error { return e.Err }
+
 // Run executes the plan. overwrite decides what happens to files that
-// already exist (false: leave them). A cancelled or failed copy removes the
-// partial file it was writing, so nothing half-written is left behind.
+// already exist (false: leave them). Cancelling ctx stops at once.
 func Run(ctx context.Context, p Plan, overwrite bool, report func(Progress)) (Result, error) {
+	return runPlan(ctx, ctx, p, overwrite, report)
+}
+
+// runPlan is Run with two ways to stop. Cancelling after stops a new file
+// at once, removing what it wrote (it's ours), but lets a file being
+// overwritten finish, then stops. Cancelling now stops at once whatever
+// the file; one being overwritten is then left in place, partly written.
+// An existing file is never removed.
+func runPlan(now, after context.Context, p Plan, overwrite bool, report func(Progress)) (Result, error) {
 	var res Result
 	pr := Progress{Total: p.TotalBytes, FilesTotal: len(p.Files), Started: time.Now()}
 	for _, d := range p.Dirs {
@@ -140,7 +164,7 @@ func Run(ctx context.Context, p Plan, overwrite bool, report func(Progress)) (Re
 		}
 	}
 	for _, f := range p.Files {
-		if err := ctx.Err(); err != nil {
+		if err := after.Err(); err != nil {
 			return res, err
 		}
 		if f.Exists && !overwrite {
@@ -149,14 +173,23 @@ func Run(ctx context.Context, p Plan, overwrite bool, report func(Progress)) (Re
 			pr.Files++
 			continue
 		}
-		pr.File, pr.FileDone, pr.FileSize = f.Src, 0, f.Size
+		_, statErr := p.Dst.Lstat(f.Dst)
+		existed := !errors.Is(statErr, fs.ErrNotExist)
+		ctx := after
+		if existed {
+			ctx = now
+		}
+		pr.File, pr.FileDone, pr.FileSize, pr.Dst, pr.Overwriting = f.Src, 0, f.Size, f.Dst, existed
 		tick(true)
-		n, err := copyFile(ctx, p.Src, p.Dst, f, func(delta int64) {
+		n, removed, err := copyFile(ctx, p.Src, p.Dst, f, existed, func(delta int64) {
 			pr.FileDone += delta
 			pr.Done += delta
 			tick(false)
 		})
 		res.Bytes += n
+		if removed {
+			res.RemovedPartial = f.Dst
+		}
 		if err != nil {
 			return res, fmt.Errorf("%s: %w", f.Src, err)
 		}
@@ -168,26 +201,35 @@ func Run(ctx context.Context, p Plan, overwrite bool, report func(Progress)) (Re
 	return res, nil
 }
 
-func copyFile(ctx context.Context, src, dst FS, f FileOp, onBytes func(int64)) (n int64, err error) {
+// copyFile writes f.Src over f.Dst in place, as it always has. If it fails
+// or is stopped, a file this copy created is removed (removed says so); a
+// file that was already there is left, and the error says it may be partly
+// written.
+func copyFile(ctx context.Context, src, dst FS, f FileOp, existed bool, onBytes func(int64)) (n int64, removed bool, err error) {
 	in, err := src.Open(f.Src)
 	if err != nil {
-		return 0, err
+		return 0, false, err
 	}
 	defer in.Close()
 	out, err := dst.Create(f.Dst, f.Mode)
 	if err != nil {
-		return 0, err
+		return 0, false, err
 	}
 	defer func() {
 		cerr := out.Close()
 		if err == nil {
 			err = cerr
 		}
-		if err != nil {
-			_ = dst.Remove(f.Dst) // don't leave a partial file
+		switch {
+		case err == nil:
+		case existed:
+			err = &PartlyWrittenError{Path: f.Dst, Err: err}
+		default:
+			removed = dst.Remove(f.Dst) == nil
 		}
 	}()
-	return copyData(ctx, out, in, onBytes)
+	n, err = copyData(ctx, out, in, onBytes)
+	return n, false, err
 }
 
 // copyData keeps pkg/sftp's pipelined fast paths (many requests in flight)
