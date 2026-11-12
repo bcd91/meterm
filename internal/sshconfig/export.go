@@ -117,11 +117,16 @@ func LeftOut(cfg *config.Config) []Skipped {
 		}
 	}
 	// A ProxyJump hop "h#1" is read as h, "ops@b" as user ops on b and
-	// "b:2222" as port 2222: a host with those in its name can't be a hop.
+	// "app:1" as port 1 on app: a host that jumps through a host with those
+	// in its name is left out (that host itself is fine).
 	for _, h := range hosts {
+		if _, ok := why[h.Name]; ok {
+			continue
+		}
 		for _, jh := range cfg.Resolve(h).ProxyJump {
-			if _, ok := why[jh.Name]; !ok && strings.ContainsAny(jh.Name, "#@:") {
-				why[jh.Name] = fmt.Sprintf("it's a jump host, and ssh would misread the %q in its name", jh.Name[strings.IndexAny(jh.Name, "#@:")])
+			if i := strings.IndexAny(jh.Name, "#@:"); i >= 0 {
+				why[h.Name] = fmt.Sprintf("it jumps through %q, and ssh would misread the %q in that name", jh.Name, jh.Name[i])
+				break
 			}
 		}
 	}

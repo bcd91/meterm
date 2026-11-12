@@ -178,17 +178,16 @@ func TestRenderLeavesOutCommentNames(t *testing.T) {
 }
 
 // OpenSSH reads a ProxyJump hop "h#1" as h, "ops@b" as user ops on b and
-// "b:2222" as port 2222 on b, so a host with '#', '@' or ':' in its name
-// can't be a hop. It's left out, with the hosts that jump through it.
-func TestRenderLeavesOutHopNamesSSHWouldMisread(t *testing.T) {
+// "app:1" as port 1 on app, so the hosts that jump through such a host are
+// left out. The host itself is fine ("ssh app:1" works).
+func TestRenderLeavesOutJumpsThroughNamesSSHWouldMisread(t *testing.T) {
 	cfg := &config.Config{Hosts: []config.Host{
 		{Name: "h#1", Address: "192.0.2.60"},
 		{Name: "ops@b", Address: "192.0.2.61"},
-		{Name: "b:2222", Address: "192.0.2.62"},
-		{Name: "web#2", Address: "192.0.2.63"}, // not a hop: fine
+		{Name: "app:1", Address: "192.0.2.62"},
 		{Name: "via-hash", Address: "192.0.2.64", ProxyJump: "h#1"},
 		{Name: "via-at", Address: "192.0.2.65", ProxyJump: "ops@b"},
-		{Name: "via-colon", Address: "192.0.2.66", ProxyJump: "b:2222"},
+		{Name: "via-colon", Address: "192.0.2.66", ProxyJump: "app:1"},
 		{Name: "via-via", Address: "192.0.2.67", ProxyJump: "via-at"},
 	}}
 	out := Render(cfg)
@@ -196,12 +195,17 @@ func TestRenderLeavesOutHopNamesSSHWouldMisread(t *testing.T) {
 	for _, l := range LeftOut(cfg) {
 		left[l.Name] = l.Why
 	}
-	for _, n := range []string{"h#1", "ops@b", "b:2222", "via-hash", "via-at", "via-colon", "via-via"} {
+	for _, n := range []string{"via-hash", "via-at", "via-colon", "via-via"} {
 		if _, ok := left[n]; !ok {
 			t.Errorf("%q not left out", n)
 		}
 	}
-	if _, ok := left["web#2"]; ok || strings.Contains(out, "ProxyJump") {
-		t.Errorf("left out %v; got:\n%s", left, out)
+	for _, n := range []string{"h#1", "ops@b", "app:1"} {
+		if w, ok := left[n]; ok || !strings.Contains(out, "Host "+n+"\n") {
+			t.Errorf("%q left out (%q), want it kept", n, w)
+		}
+	}
+	if strings.Contains(out, "ProxyJump") {
+		t.Errorf("got:\n%s", out)
 	}
 }
