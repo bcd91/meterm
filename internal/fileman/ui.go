@@ -133,8 +133,14 @@ type Model struct {
 
 	lastFind string // for n (next match)
 
-	pendingPlan   *Plan
-	pendingDelete []Entry
+	pendingPlan *Plan
+	// asked is what an open delete question or name box is about, fixed
+	// when it opened: the answer acts on this, not on what the pane shows
+	// by then. A listing of another directory landing in that pane cancels
+	// the question, and dismiss then makes the next key enter or esc, so a
+	// "y" typed as the answer doesn't act.
+	asked   *asked
+	dismiss bool
 
 	status    string
 	statusErr bool
@@ -154,6 +160,14 @@ func New(o Options) Model {
 		input: ti,
 		w:     100, h: 30,
 	}
+}
+
+type asked struct {
+	pane    int
+	fs      FS
+	dir     string
+	targets []string // full paths of what a delete removes
+	entry   string   // name of what a rename renames
 }
 
 type dirLoadedMsg struct {
@@ -221,6 +235,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		changed := p.dir != msg.dir
+		if a := m.asked; a != nil && (m.mode == modeConfirm || m.mode == modeInput) && a.pane == msg.pane && a.dir != msg.dir {
+			m.asked, m.dismiss = nil, true
+			m.mode = modeNormal
+			m.input.Blur()
+			m.setStatus("cancelled: the directory changed while asking  (enter or esc to go on)", true)
+		}
 		p.dir, p.entries, p.err = msg.dir, msg.entries, ""
 		if changed {
 			p.sel = map[string]bool{}
@@ -328,6 +348,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return model, tea.Batch(cmds...)
 		}
+		if m.dismiss {
+			switch msg.String() {
+			case "enter", "esc":
+				m.dismiss = false
+				m.setStatus("", false)
+			case "q", "ctrl+c":
+				return m, tea.Quit
+			}
+			return m, nil
+		}
 		switch m.mode {
 		case modeInput:
 			return m.updateInput(msg)
@@ -427,15 +457,20 @@ func (m Model) updateNormal(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if len(ts) == 0 {
 			return m, nil
 		}
-		m.pendingDelete = ts
+		a := &asked{pane: m.active, fs: p.fs, dir: p.dir}
+		for _, e := range ts {
+			a.targets = append(a.targets, p.fs.Join(p.dir, e.Name))
+		}
+		m.asked = a
 		m.mode, m.confirmKind = modeConfirm, confirmDelete
 		what := ts[0].Name
 		if len(ts) > 1 {
 			what = fmt.Sprintf("%d items", len(ts))
 		}
-		m.confirmText = fmt.Sprintf("Delete %s on %s (directories with everything inside)?  y = delete   any other key = cancel", what, p.fs.Label())
+		m.confirmText = fmt.Sprintf("Delete %s in %s on %s (directories with everything inside)?  y = delete   any other key = cancel", what, p.dir, p.fs.Label())
 	case "r", "f6":
 		if e, ok := p.current(); ok {
+			m.asked = &asked{pane: m.active, fs: p.fs, dir: p.dir, entry: e.Name}
 			m.mode, m.inputKind = modeInput, inputRename
 			m.input.Prompt = "Rename to: "
 			m.input.SetValue(e.Name)
@@ -450,6 +485,7 @@ func (m Model) updateNormal(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "n":
 		m.findNext(m.lastFind, p.cursor+1)
 	case "m", "f7":
+		m.asked = &asked{pane: m.active, fs: p.fs, dir: p.dir}
 		m.mode, m.inputKind = modeInput, inputMkdir
 		m.input.Prompt = "New directory: "
 		m.input.SetValue("")
@@ -475,20 +511,24 @@ func (m Model) updateInput(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 	switch k.String() {
 	case "esc":
-		m.mode = modeNormal
+		m.mode, m.asked = modeNormal, nil
 		m.input.Blur()
 		return m, nil
 	case "enter":
-		m.mode = modeNormal
+		a := m.asked
+		m.mode, m.asked = modeNormal, nil
 		m.input.Blur()
 		name := strings.TrimSpace(m.input.Value())
 		if name == "" || strings.ContainsAny(name, `/\`) || name == "." || name == ".." {
 			m.setStatus("not a valid name", true)
 			return m, nil
 		}
-		i := m.active
+		if a == nil {
+			return m, nil
+		}
+		i := a.pane
 		p := m.panes[i]
-		fsys, dir := p.fs, p.dir
+		fsys, dir := a.fs, a.dir
 		remote := i == 1
 		on := m.opts.OnEvent
 		switch m.inputKind {
@@ -505,13 +545,12 @@ func (m Model) updateInput(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 				return opDoneMsg{panes: []int{i}, status: "created " + target}
 			}
 		case inputRename:
-			e, ok := p.current()
-			if !ok || e.Name == name {
+			if a.entry == name {
 				return m, nil
 			}
 			p.focusOn = name
 			return m, func() tea.Msg {
-				from, to := fsys.Join(dir, e.Name), fsys.Join(dir, name)
+				from, to := fsys.Join(dir, a.entry), fsys.Join(dir, name)
 				if _, err := fsys.Lstat(to); err == nil {
 					return opDoneMsg{panes: []int{i}, err: fmt.Errorf("rename: %s already exists", name)}
 				}
@@ -571,34 +610,32 @@ func (m Model) updateConfirm(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.setStatus("copy cancelled", false)
 		return m, nil
 	case confirmDelete:
-		ts := m.pendingDelete
-		m.pendingDelete = nil
-		if key != "y" {
+		a := m.asked
+		m.asked = nil
+		if key != "y" || a == nil {
 			m.mode = modeNormal
 			m.setStatus("delete cancelled", false)
 			return m, nil
 		}
-		i := m.active
-		p := m.panes[i]
-		fsys, dir := p.fs, p.dir
+		i := a.pane
+		fsys := a.fs
 		remote := i == 1
 		on := m.opts.OnEvent
-		p.sel = map[string]bool{}
+		m.panes[i].sel = map[string]bool{}
 		m.mode = modeBusy
 		m.setStatus("deleting…", false)
 		return m, func() tea.Msg {
 			var names []string
-			for _, e := range ts {
-				target := fsys.Join(dir, e.Name)
+			for _, target := range a.targets {
 				if err := RemoveAll(context.Background(), fsys, target); err != nil {
-					return opDoneMsg{panes: []int{i}, err: fmt.Errorf("delete %s: %w", e.Name, err)}
+					return opDoneMsg{panes: []int{i}, err: fmt.Errorf("delete %s: %w", fsys.Base(target), err)}
 				}
 				names = append(names, target)
 			}
 			if on != nil {
 				on("delete", strings.Join(names, ", "), remote)
 			}
-			return opDoneMsg{panes: []int{i}, status: fmt.Sprintf("deleted %d item(s)", len(ts))}
+			return opDoneMsg{panes: []int{i}, status: fmt.Sprintf("deleted %d item(s)", len(a.targets))}
 		}
 	}
 	return m, nil
