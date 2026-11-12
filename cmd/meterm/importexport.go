@@ -185,6 +185,13 @@ func newExportCmd() *cobra.Command {
 				return err
 			}
 			cfg.SetRoutePicker(nil) // export each host's own address
+			if format != "ssh" && format != "ansible" {
+				return fmt.Errorf("--format must be ssh or ansible")
+			}
+			left := sshconfig.LeftOut(cfg)
+			for _, l := range left {
+				fmt.Fprintf(os.Stderr, "meterm export: left out host %q: %s\n", l.Name, l.Why)
+			}
 			switch format {
 			case "ansible":
 				data, err := inventory.ToAnsible(cfg)
@@ -198,7 +205,7 @@ func newExportCmd() *cobra.Command {
 				if err := os.WriteFile(out, data, 0o644); err != nil {
 					return err
 				}
-				fmt.Printf("Wrote %s (%d hosts). Use it with: ansible -i %s all -m ping\n", out, len(cfg.Hosts), out)
+				fmt.Printf("Wrote %s (%d hosts). Use it with: ansible -i %s all -m ping\n", out, len(cfg.Hosts)-len(left), out)
 				return nil
 			case "ssh":
 			default:
