@@ -121,7 +121,11 @@ func (p Progress) Rate() float64 {
 type Result struct {
 	Copied, Skipped int
 	Bytes           int64
-	RemovedPartial  string // a new file a stopped copy had started, and removed
+	Files           []string // where each copied file went, in order
+	// Partial is a new file a failed or stopped copy had started; it is
+	// removed, unless PartialErr says why it couldn't be.
+	Partial    string
+	PartialErr error
 }
 
 // PartlyWrittenError is a copy over an existing file that failed or was
@@ -181,20 +185,21 @@ func runPlan(now, after context.Context, p Plan, overwrite bool, report func(Pro
 		}
 		pr.File, pr.FileDone, pr.FileSize, pr.Dst, pr.Overwriting = f.Src, 0, f.Size, f.Dst, existed
 		tick(true)
-		n, removed, err := copyFile(ctx, p.Src, p.Dst, f, existed, func(delta int64) {
+		n, partial, removeErr, err := copyFile(ctx, p.Src, p.Dst, f, existed, func(delta int64) {
 			pr.FileDone += delta
 			pr.Done += delta
 			tick(false)
 		})
 		res.Bytes += n
-		if removed {
-			res.RemovedPartial = f.Dst
+		if partial {
+			res.Partial, res.PartialErr = f.Dst, removeErr
 		}
 		if err != nil {
 			return res, fmt.Errorf("%s: %w", f.Src, err)
 		}
 		pr.Files++
 		res.Copied++
+		res.Files = append(res.Files, f.Dst)
 	}
 	pr.File = ""
 	tick(true)
@@ -202,18 +207,18 @@ func runPlan(now, after context.Context, p Plan, overwrite bool, report func(Pro
 }
 
 // copyFile writes f.Src over f.Dst in place, as it always has. If it fails
-// or is stopped, a file this copy created is removed (removed says so); a
-// file that was already there is left, and the error says it may be partly
-// written.
-func copyFile(ctx context.Context, src, dst FS, f FileOp, existed bool, onBytes func(int64)) (n int64, removed bool, err error) {
+// or is stopped, a file this copy created is removed (partial says one was
+// started; removeErr says why it couldn't be removed); a file that was
+// already there is left, and the error says it may be partly written.
+func copyFile(ctx context.Context, src, dst FS, f FileOp, existed bool, onBytes func(int64)) (n int64, partial bool, removeErr, err error) {
 	in, err := src.Open(f.Src)
 	if err != nil {
-		return 0, false, err
+		return 0, false, nil, err
 	}
 	defer in.Close()
 	out, err := dst.Create(f.Dst, f.Mode)
 	if err != nil {
-		return 0, false, err
+		return 0, false, nil, err
 	}
 	defer func() {
 		cerr := out.Close()
@@ -225,11 +230,11 @@ func copyFile(ctx context.Context, src, dst FS, f FileOp, existed bool, onBytes 
 		case existed:
 			err = &PartlyWrittenError{Path: f.Dst, Err: err}
 		default:
-			removed = dst.Remove(f.Dst) == nil
+			partial, removeErr = true, dst.Remove(f.Dst)
 		}
 	}()
 	n, err = copyData(ctx, out, in, onBytes)
-	return n, false, err
+	return n, false, nil, err
 }
 
 // copyData keeps pkg/sftp's pipelined fast paths (many requests in flight)

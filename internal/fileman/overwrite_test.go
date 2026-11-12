@@ -134,6 +134,9 @@ func TestFirstStopFinishesTheFileBeingOverwritten(t *testing.T) {
 			if _, err := os.Stat(filepath.Join(dst, "b.bin")); err == nil {
 				t.Error("b.bin was copied after the stop")
 			}
+			if len(res.Files) != 1 || res.Files[0] != filepath.Join(dst, "a.bin") {
+				t.Errorf("Files = %q, want just a.bin", res.Files)
+			}
 			if res.Copied != 1 || !seen.Overwriting || seen.Dst != filepath.Join(dst, "a.bin") {
 				t.Errorf("res = %+v, progress = %+v", res, seen)
 			}
@@ -159,9 +162,26 @@ func TestFirstStopRemovesAPartialNewFile(t *testing.T) {
 			if _, err := os.Stat(filepath.Join(dst, "new.bin")); !os.IsNotExist(err) {
 				t.Errorf("partial new file left behind (%v)", err)
 			}
-			if res.RemovedPartial != filepath.Join(dst, "new.bin") {
-				t.Errorf("RemovedPartial = %q", res.RemovedPartial)
+			if res.Partial != filepath.Join(dst, "new.bin") || res.PartialErr != nil {
+				t.Errorf("Partial = %q, PartialErr = %v", res.Partial, res.PartialErr)
 			}
 		})
+	}
+}
+
+// cantRemove has lost the connection by the time the partial file is to go.
+type cantRemove struct{ Local }
+
+func (cantRemove) Remove(string) error { return errors.New("connection lost") }
+
+func TestAPartialNewFileThatCantBeRemovedIsNamed(t *testing.T) {
+	src, dst := t.TempDir(), t.TempDir()
+	write(t, filepath.Join(src, "new.bin"), string(bytes.Repeat([]byte("n"), big)), 0o644)
+	now, cancelNow := context.WithCancel(context.Background())
+	defer cancelNow()
+	plan, _ := MakePlan(context.Background(), cancellingFS{cancel: cancelNow}, []string{filepath.Join(src, "new.bin")}, cantRemove{}, dst)
+	res, _ := runPlan(now, now, plan, true, nil)
+	if res.Partial != filepath.Join(dst, "new.bin") || res.PartialErr == nil {
+		t.Errorf("Partial = %q, PartialErr = %v; want the file and why it's still there", res.Partial, res.PartialErr)
 	}
 }

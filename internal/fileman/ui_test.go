@@ -418,26 +418,30 @@ func TestRenameRenamesWhatItWasOpenedFor(t *testing.T) {
 }
 
 // After a question was cancelled because the directory changed, the next
-// key must be enter or esc, but q and ctrl+c still quit.
-func TestQuitWorksAfterACancelledQuestion(t *testing.T) {
-	for _, k := range []tea.KeyMsg{{Type: tea.KeyRunes, Runes: []rune("q")}, {Type: tea.KeyCtrlC}} {
+// key must be enter or esc: a stray q (typed into what was a rename box)
+// doesn't quit either. ctrl+c still does.
+func TestOnlyCtrlCQuitsAfterACancelledQuestion(t *testing.T) {
+	for _, tc := range []struct {
+		key  tea.KeyMsg
+		quit bool
+	}{{tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("q")}, false}, {tea.KeyMsg{Type: tea.KeyCtrlC}, true}} {
 		left, right := t.TempDir(), t.TempDir()
 		write(t, filepath.Join(right, "A", "config"), "inner", 0o644)
 		h := newHarness(t, left, right)
 		h.keys("tab", "l")
 		listing := h.hold("h")
-		h.keys("d")
+		h.keys("r")
 		h.run(listing)
 		if !h.model().dismiss {
 			t.Fatal("question wasn't cancelled")
 		}
-		_, cmd := h.m.Update(k)
-		if cmd == nil {
-			t.Errorf("%s did nothing", k)
-			continue
+		_, cmd := h.m.Update(tc.key)
+		quit := false
+		if cmd != nil {
+			_, quit = cmd().(tea.QuitMsg)
 		}
-		if _, ok := cmd().(tea.QuitMsg); !ok {
-			t.Errorf("%s didn't quit", k)
+		if quit != tc.quit {
+			t.Errorf("%s: quit = %v, want %v", tc.key, quit, tc.quit)
 		}
 	}
 }
@@ -455,37 +459,29 @@ func busyCopying(h *harness, overwriting bool) (stoppedAfter, stoppedNow *bool) 
 	return &a, &n
 }
 
-func TestEscDuringAnOverwriteFinishesTheFileFirst(t *testing.T) {
-	for _, key := range []tea.KeyMsg{{Type: tea.KeyEsc}, {Type: tea.KeyCtrlC}} {
-		h := newHarness(t, t.TempDir(), t.TempDir())
-		after, now := busyCopying(h, true)
-		h.send(key)
-		if !*after || *now {
-			t.Errorf("%s: stop after = %v, stop now = %v; want only stop after", key, *after, *now)
+// The first esc only asks to stop after the current file: a file being
+// overwritten finishes, a new one stops at once (the copy itself knows
+// which; the progress shown may be behind). The second esc stops at once.
+func TestFirstEscOnlyStopsAfterTheCurrentFile(t *testing.T) {
+	for _, overwriting := range []bool{true, false} { // false: a stale progress
+		for _, key := range []tea.KeyMsg{{Type: tea.KeyEsc}, {Type: tea.KeyCtrlC}} {
+			h := newHarness(t, t.TempDir(), t.TempDir())
+			after, now := busyCopying(h, overwriting)
+			h.send(key)
+			if !*after || *now {
+				t.Errorf("overwriting=%v %s: stop after = %v, stop now = %v; want only stop after", overwriting, key, *after, *now)
+			}
+			h.send(key)
+			if !*now {
+				t.Errorf("overwriting=%v %s again didn't stop at once", overwriting, key)
+			}
 		}
-		want := "stopping after app.conf finishes — esc again to stop now (it will be left partly written)"
-		if st := h.model().status; st != want {
-			t.Errorf("%s: status = %q", key, st)
-		}
-		h.send(key)
-		if !*now {
-			t.Errorf("%s again didn't stop at once", key)
-		}
-	}
-}
-
-func TestEscDuringANewFileStopsAtOnce(t *testing.T) {
-	h := newHarness(t, t.TempDir(), t.TempDir())
-	after, now := busyCopying(h, false)
-	h.send(tea.KeyMsg{Type: tea.KeyEsc})
-	if !*now || !*after {
-		t.Errorf("stop after = %v, stop now = %v; want a new file stopped at once", *after, *now)
 	}
 }
 
 // Run wraps the error with the file name, so a cancel must be recognised
 // through the wrapping, and the status must only say a file was removed
-// when one was.
+// when one was, naming its side.
 func TestCancelIsReportedAccurately(t *testing.T) {
 	left, right := t.TempDir(), t.TempDir()
 	h := newHarness(t, left, right)
@@ -495,9 +491,13 @@ func TestCancelIsReportedAccurately(t *testing.T) {
 	if st := h.model().status; st != "cancelled after 2 file(s)" {
 		t.Errorf("status = %q", st)
 	}
-	removed := filepath.Join(right, "big.bin")
-	h.send(transferDoneMsg{err: cancel, plan: plan, res: Result{RemovedPartial: removed}})
-	if st := h.model().status; st != "cancelled after 0 file(s); the unfinished new file "+removed+" was removed" {
+	partial := filepath.Join(right, "big.bin")
+	h.send(transferDoneMsg{err: cancel, plan: plan, res: Result{Partial: partial}})
+	if st := h.model().status; st != "removed the unfinished new file test:"+partial+"; cancelled after 0 file(s)" {
+		t.Errorf("status = %q", st)
+	}
+	h.send(transferDoneMsg{err: cancel, plan: plan, res: Result{Partial: partial, PartialErr: errors.New("connection lost")}})
+	if st := h.model().status; st != "couldn't remove the unfinished new file test:"+partial+" (connection lost); cancelled after 0 file(s)" {
 		t.Errorf("status = %q", st)
 	}
 }
@@ -531,14 +531,67 @@ func TestPartlyWrittenIsReported(t *testing.T) {
 	}
 }
 
-// The progress line is what's on screen during a copy, so it carries the
-// "stopping after" message.
-func TestStoppingShowsOnTheProgressLine(t *testing.T) {
-	h := newHarness(t, t.TempDir(), t.TempDir())
-	h.send(tea.WindowSizeMsg{Width: 250, Height: 30})
-	busyCopying(h, true)
-	h.send(tea.KeyMsg{Type: tea.KeyEsc})
-	if v := stripANSI(h.m.View()); !strings.Contains(v, "stopping after app.conf finishes — esc again to stop now (it will be left partly written)") {
-		t.Errorf("view doesn't say it's stopping:\n%s", v)
+// statusLine is the line under the panes, as drawn.
+func statusLine(h *harness) string {
+	lines := strings.Split(stripANSI(h.m.View()), "\n")
+	return lines[len(lines)-2]
+}
+
+const deep = "/srv/releases/2026/very-long-directory-name-for-a-narrow-terminal/and-another-level"
+
+// What to press, and what happens, must stay on screen at 60 and 80
+// columns; long paths are shortened from the left instead.
+func TestKeyWordsFitNarrowTerminals(t *testing.T) {
+	for _, w := range []int{60, 80} {
+		h := newHarness(t, t.TempDir(), t.TempDir())
+		h.send(tea.WindowSizeMsg{Width: w, Height: 20})
+		busyCopying(h, true)
+		m := h.model()
+		m.progress.Dst = deep + "/app.conf"
+		h.m = m
+		h.send(tea.KeyMsg{Type: tea.KeyEsc})
+		if l := statusLine(h); !strings.Contains(l, "esc again: stop now (an overwrite is left partly written)") {
+			t.Errorf("width %d, stopping: %q", w, l)
+		}
+		plan := Plan{Src: Local{}, Dst: h.model().opts.Right, DstDir: deep}
+		h.send(transferDoneMsg{err: fmt.Errorf("x: %w", &PartlyWrittenError{Path: deep + "/app.conf", Err: context.Canceled}), plan: plan, res: Result{Copied: 3}})
+		if l := statusLine(h); !strings.Contains(l, "app.conf may be partly written") || !strings.HasPrefix(l, "test:") {
+			t.Errorf("width %d, partly written: %q", w, l)
+		}
+		h.send(transferDoneMsg{err: fmt.Errorf("x: %w", context.Canceled), plan: plan, res: Result{Partial: deep + "/new.bin"}})
+		if l := statusLine(h); !strings.HasPrefix(l, "removed the unfinished new file test:") || !strings.Contains(l, "new.bin") {
+			t.Errorf("width %d, removed: %q", w, l)
+		}
+	}
+}
+
+func TestDeleteQuestionFitsNarrowTerminals(t *testing.T) {
+	for _, w := range []int{60, 80} {
+		left, right := t.TempDir(), t.TempDir()
+		dir := filepath.Join(right, "very-long-directory-name-for-a-narrow-terminal", "and-another-level")
+		write(t, filepath.Join(dir, "config"), "x", 0o644)
+		h := newHarness(t, left, dir)
+		h.send(tea.WindowSizeMsg{Width: w, Height: 20})
+		h.keys("tab", "d")
+		l := statusLine(h)
+		if !strings.HasPrefix(l, "y = delete · other key = cancel · test:") || !strings.HasSuffix(l, "/config") {
+			t.Errorf("width %d: %q", w, l)
+		}
+		if w == 80 && !strings.Contains(l, "and-another-level/config") {
+			t.Errorf("width %d: %q, want more of the directory", w, l)
+		}
+	}
+}
+
+// A batch that stops part way logs the files it did copy, not everything
+// it was asked to.
+func TestStoppedBatchLogsWhatWasCopied(t *testing.T) {
+	left, right := t.TempDir(), t.TempDir()
+	h := newHarness(t, left, right)
+	plan := Plan{Src: Local{}, Dst: h.model().opts.Right, DstDir: right, Items: []string{filepath.Join(left, "a.bin"), filepath.Join(left, "b.txt")}}
+	h.events = nil
+	h.send(transferDoneMsg{err: fmt.Errorf("x: %w", context.Canceled), plan: plan, res: Result{Copied: 1, Bytes: 3, Files: []string{filepath.Join(right, "a.bin")}}})
+	if len(h.events) != 1 || !strings.Contains(h.events[0].detail, "a.bin") || strings.Contains(h.events[0].detail, "b.txt") {
+		t.Errorf("events = %+v", h.events)
 	}
 }

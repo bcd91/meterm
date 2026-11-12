@@ -145,11 +145,15 @@ type Model struct {
 
 	status    string
 	statusErr bool
-	progress  *Progress
-	cancel    context.CancelFunc
-	stopAfter context.CancelFunc // stop once the file being overwritten is done
-	stopping  bool               // stopAfter was asked for: the next esc stops at once
-	events    chan tea.Msg
+	// statusPath and confirmPath are a path inside status or confirmText,
+	// shortened from the left when the line is too wide, so the words stay.
+	statusPath  string
+	confirmPath string
+	progress    *Progress
+	cancel      context.CancelFunc
+	stopAfter   context.CancelFunc // stop once the file being overwritten is done
+	stopping    bool               // stopAfter was asked for: the next esc stops at once
+	events      chan tea.Msg
 }
 
 // New returns a model; Init loads both directories.
@@ -219,7 +223,14 @@ func (m Model) rows() int {
 	return r
 }
 
-func (m *Model) setStatus(s string, isErr bool) { m.status, m.statusErr = s, isErr }
+func (m *Model) setStatus(s string, isErr bool) { m.status, m.statusErr, m.statusPath = s, isErr, "" }
+
+// setStatusPath is setStatus for a message holding a path that may be
+// shortened to fit.
+func (m *Model) setStatusPath(s, path string, isErr bool) {
+	m.setStatus(s, isErr)
+	m.statusPath = path
+}
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
@@ -288,6 +299,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.pendingPlan = &plan
 			m.mode, m.confirmKind = modeConfirm, confirmOverwrite
 			m.confirmText = fmt.Sprintf("%d of %d file(s) already exist on %s.  o = overwrite   s = skip those   esc = cancel", n, len(plan.Files), plan.Dst.Label())
+			m.confirmPath = ""
 			return m, nil
 		}
 		return m.startTransfer(msg.plan, false)
@@ -304,26 +316,31 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			p.sel = map[string]bool{}
 		}
 		var partly *PartlyWrittenError
+		side := msg.plan.Dst.Label() + ":"
 		switch {
 		case errors.As(msg.err, &partly):
-			what := fmt.Sprintf("copy failed (%v)", partly.Err)
+			what := fmt.Sprintf("copy failed: %v", partly.Err)
 			if errors.Is(msg.err, context.Canceled) {
 				what = fmt.Sprintf("cancelled after %d file(s)", msg.res.Copied)
 			}
-			where := msg.plan.Dst.Label() + ":" + partly.Path
-			m.setStatus(fmt.Sprintf("%s; %s may be partly written", what, where), true)
+			m.setStatusPath(fmt.Sprintf("%s%s may be partly written; %s", side, partly.Path, what), partly.Path, true)
 			if m.opts.OnEvent != nil {
 				kind, remote := m.transferKind(msg.plan)
-				m.opts.OnEvent(kind, fmt.Sprintf("%s may be partly written (%v)", where, partly.Err), remote)
+				m.opts.OnEvent(kind, fmt.Sprintf("%s%s may be partly written (%v)", side, partly.Path, partly.Err), remote)
 			}
-		case errors.Is(msg.err, context.Canceled):
-			st := fmt.Sprintf("cancelled after %d file(s)", msg.res.Copied)
-			if msg.res.RemovedPartial != "" {
-				st += "; the unfinished new file " + msg.res.RemovedPartial + " was removed"
-			}
-			m.setStatus(st, true)
 		case msg.err != nil:
-			m.setStatus("copy failed: "+msg.err.Error(), true)
+			what := "copy failed: " + msg.err.Error()
+			if errors.Is(msg.err, context.Canceled) {
+				what = fmt.Sprintf("cancelled after %d file(s)", msg.res.Copied)
+			}
+			switch {
+			case msg.res.Partial == "":
+				m.setStatus(what, true)
+			case msg.res.PartialErr != nil:
+				m.setStatusPath(fmt.Sprintf("couldn't remove the unfinished new file %s%s (%v); %s", side, msg.res.Partial, msg.res.PartialErr, what), msg.res.Partial, true)
+			default:
+				m.setStatusPath(fmt.Sprintf("removed the unfinished new file %s%s; %s", side, msg.res.Partial, what), msg.res.Partial, true)
+			}
 		default:
 			s := fmt.Sprintf("copied %d file(s), %s to %s:%s", msg.res.Copied, HumanBytes(msg.res.Bytes), msg.plan.Dst.Label(), m.panes[dst].dir)
 			if msg.res.Skipped > 0 {
@@ -335,7 +352,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.setStatus(s, false)
 		}
 		if msg.res.Copied > 0 {
-			m.report(msg.plan, msg.res)
+			m.report(msg.plan, msg.res, msg.err != nil)
 		}
 		return m, tea.Batch(m.load(0, m.panes[0].dir), m.load(1, m.panes[1].dir))
 
@@ -371,7 +388,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "enter", "esc":
 				m.dismiss = false
 				m.setStatus("", false)
-			case "q", "ctrl+c":
+			case "ctrl+c": // not q: it may have been typed into a rename box
 				return m, tea.Quit
 			}
 			return m, nil
@@ -384,16 +401,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case modeBusy:
 			switch {
 			case (msg.String() == "esc" || msg.String() == "ctrl+c") && m.cancel != nil:
-				// A file being overwritten finishes first: stopping it now
-				// leaves it partly written. A second esc does that anyway.
-				if p := m.progress; p != nil && p.Overwriting && !m.stopping && m.stopAfter != nil {
+				// The first esc only asks to stop after the current file: the
+				// copy stops a new file at once and lets a file being
+				// overwritten finish (the progress shown may be behind, so
+				// it isn't asked). A second esc stops at once.
+				if !m.stopping && m.stopAfter != nil {
 					m.stopAfter()
 					m.stopping = true
-					m.setStatus(fmt.Sprintf("stopping after %s finishes — esc again to stop now (it will be left partly written)", m.panes[1-m.active].fs.Base(p.Dst)), true)
+					m.setStatus(stopNowHint+" · stopping after the current file", true)
 					return m, nil
-				}
-				if m.stopAfter != nil {
-					m.stopAfter()
 				}
 				m.cancel()
 				m.setStatus("cancelling…", true)
@@ -496,7 +512,14 @@ func (m Model) updateNormal(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if len(ts) > 1 {
 			what = fmt.Sprintf("%d items", len(ts))
 		}
-		m.confirmText = fmt.Sprintf("Delete %s in %s on %s (directories with everything inside)?  y = delete   any other key = cancel", what, p.dir, p.fs.Label())
+		where := p.dir
+		if len(ts) == 1 {
+			where = p.fs.Join(p.dir, ts[0].Name)
+			m.confirmText = fmt.Sprintf("y = delete · other key = cancel · %s:%s", p.fs.Label(), where)
+		} else {
+			m.confirmText = fmt.Sprintf("y = delete %s · other key = cancel · in %s:%s", what, p.fs.Label(), where)
+		}
+		m.confirmPath = where
 	case "r", "f6":
 		if e, ok := p.current(); ok {
 			m.asked = &asked{pane: m.active, fs: p.fs, dir: p.dir, entry: e.Name}
@@ -725,20 +748,27 @@ func (m Model) transferKind(plan Plan) (kind string, remote bool) {
 }
 
 // report tells OnEvent what a finished copy did.
-func (m Model) report(plan Plan, res Result) {
+func (m Model) report(plan Plan, res Result, stopped bool) {
 	if m.opts.OnEvent == nil {
 		return
 	}
 	kind, remote := m.transferKind(plan)
+	names, base := plan.Items, plan.Src.Base
+	if stopped { // only what was copied before it stopped
+		names, base = res.Files, plan.Dst.Base
+	}
 	var tops []string
-	for _, it := range plan.Items {
+	for _, it := range names {
 		if len(tops) == 5 {
-			tops = append(tops, fmt.Sprintf("+%d more", len(plan.Items)-5))
+			tops = append(tops, fmt.Sprintf("+%d more", len(names)-5))
 			break
 		}
-		tops = append(tops, plan.Src.Base(it))
+		tops = append(tops, base(it))
 	}
 	detail := fmt.Sprintf("%s -> %s (%d file(s), %s)", strings.Join(tops, ", "), plan.DstDir, res.Copied, HumanBytes(res.Bytes))
+	if stopped {
+		detail += "; stopped before the rest"
+	}
 	m.opts.OnEvent(kind, detail, remote)
 }
 
@@ -853,7 +883,7 @@ func (m Model) viewStatus() string {
 	case m.mode == modeInput:
 		return m.input.View()
 	case m.mode == modeConfirm:
-		return selStyle.Render(ansi.Truncate(m.confirmText, m.w, "…"))
+		return selStyle.Render(fitPath(m.confirmText, m.confirmPath, m.w))
 	case m.progress != nil:
 		p := m.progress
 		pct := 0.0
@@ -867,24 +897,36 @@ func (m Model) viewStatus() string {
 		if p.File != "" {
 			name = m.panes[m.active].fs.Base(p.File) + "  "
 		}
-		hint := "esc cancels"
-		switch {
-		case m.stopping:
-			hint = m.status // "stopping after <file> finishes — esc again ..."
-		case p.Overwriting:
-			hint = "esc stops after this file"
+		// what esc does first: the rest may be cut on a narrow terminal
+		hint := "esc: stop (an overwrite finishes first)"
+		if m.stopping {
+			hint = stopNowHint
 		}
-		s := fmt.Sprintf("%s%s %3.0f%%  %s / %s  %s/s  file %d/%d  (%s)",
-			name, bar, pct*100, HumanBytes(p.Done), HumanBytes(p.Total), HumanBytes(int64(p.Rate())), min(p.Files+1, p.FilesTotal), p.FilesTotal, hint)
+		s := fmt.Sprintf("%s · %s%s %3.0f%%  %s / %s  %s/s  file %d/%d",
+			hint, name, bar, pct*100, HumanBytes(p.Done), HumanBytes(p.Total), HumanBytes(int64(p.Rate())), min(p.Files+1, p.FilesTotal), p.FilesTotal)
 		return ansi.Truncate(s, m.w, "…")
 	case m.status != "":
 		st := okStyle
 		if m.statusErr {
 			st = errStyle
 		}
-		return st.Render(ansi.Truncate(m.status, m.w, "…"))
+		return st.Render(fitPath(m.status, m.statusPath, m.w))
 	}
 	return ""
+}
+
+const stopNowHint = "esc again: stop now (an overwrite is left partly written)"
+
+// fitPath fits s into w columns by shortening path (which s contains) from
+// the left, keeping at least its last 12 columns, then cutting the end.
+func fitPath(s, path string, w int) string {
+	if over := lipgloss.Width(s) - w; over > 0 && path != "" && strings.Contains(s, path) {
+		keep := max(lipgloss.Width(path)-over, 12)
+		if keep < lipgloss.Width(path) {
+			s = strings.Replace(s, path, truncLeft(path, keep), 1)
+		}
+	}
+	return ansi.Truncate(s, w, "…")
 }
 
 func (m Model) viewHelp() string {

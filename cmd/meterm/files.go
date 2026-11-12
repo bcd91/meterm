@@ -29,7 +29,8 @@ func newFilesCmd() *cobra.Command {
 			"  R          reload                 q                  quit\n" +
 			"  esc        stop a running copy: a new file being written is removed; a\n" +
 			"             file being overwritten is finished first (esc again stops it\n" +
-			"             at once, leaving it partly written). An existing file is never deleted.\n\n" +
+			"             at once, leaving it partly written). meterm never removes an existing\n" +
+			"             file it is overwriting.\n\n" +
 			"Copying over existing files asks first: overwrite them, or skip them.\n" +
 			"It runs SFTP through your own ssh, so jump hosts and keys work as for\n" +
 			"`meterm connect`. Uploads, downloads, deletes and renames on the host are\n" +
