@@ -167,7 +167,10 @@ v0.23.1 asked about nothing but deleting a host in the picker.
   jump host by name, as in v0.23.1; a raw `user@host:port` jump with an
   invisible character is refused. `team push`, `team approve` and `team
   resolve --theirs` take such a host too, so a member can still sync a host
-  someone else created. A team host with what v0.23.1 refused as well
+  someone else created, and a member's proposal to change one says so. A
+  host the team doesn't have yet (a new `team share`, or a member's new
+  proposal) is held to the new rules and reported `rejected`, so a
+  look-alike or invisible name never reaches everyone with only a warning. A team host with what v0.23.1 refused as well
   (control characters such as escape sequences and line breaks, bidi
   controls, ssh options that run commands) is not applied: `team pull` and
   `team sync` report it as `rejected`, `team status` lists it, `list` and the

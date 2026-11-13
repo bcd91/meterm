@@ -206,9 +206,10 @@ func Sync(ctx context.Context, b Backend, teamID string, role Role, cfg *config.
 				if rok {
 					p.BaseRev = r.Rev
 				}
+				var warn error
 				if !lok {
 					p.Host = r
-				} else if _, err := ls.ApplyTo(config.Host{}, teamID).CheckFromTeam(); err != nil {
+				} else if warn, err = checkOutgoing(ls.ApplyTo(config.Host{}, teamID), rok); err != nil {
 					add(name, Rejected, "not proposed: "+err.Error())
 					continue
 				}
@@ -221,7 +222,11 @@ func Sync(ctx context.Context, b Backend, teamID string, role Role, cfg *config.
 						return res, fmt.Errorf("propose %s: %w", name, err)
 					}
 				}
-				add(name, Proposed, "waiting for an owner or admin: meterm team approve "+name)
+				detail := "waiting for an owner or admin: meterm team approve " + name
+				if warn != nil {
+					detail += "; " + flagged(warn)
+				}
+				add(name, Proposed, detail)
 				continue
 			}
 			var expected int64
@@ -242,7 +247,7 @@ func Sync(ctx context.Context, b Backend, teamID string, role Role, cfg *config.
 				add(name, PushedRemoval, "")
 				continue
 			}
-			warn, err := ls.ApplyTo(config.Host{}, teamID).CheckFromTeam()
+			warn, err := checkOutgoing(ls.ApplyTo(config.Host{}, teamID), rok)
 			if err != nil {
 				keepBase()
 				add(name, Rejected, "not shared: "+err.Error())
@@ -271,6 +276,20 @@ func Sync(ctx context.Context, b Backend, teamID string, role Role, cfg *config.
 		}
 	}
 	return res, nil
+}
+
+// checkOutgoing checks a host on its way to the team. One the team already
+// has (onTeam) only has to pass what v0.23.1 did, and what this version
+// adds comes back as warn: someone else may have created it, and refusing
+// would only stop the edit, not the name. One the team doesn't have yet —
+// a new share, or a new proposal — is held to this version's rules
+// (config.Host.CheckShared), so a look-alike or invisible name never
+// reaches everyone with only a warning.
+func checkOutgoing(h config.Host, onTeam bool) (warn, err error) {
+	if !onTeam {
+		return nil, h.CheckShared()
+	}
+	return h.CheckFromTeam()
 }
 
 // flagged is the Detail for a host kept or sent although this version would
