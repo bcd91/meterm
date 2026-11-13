@@ -21,6 +21,8 @@ import (
 	"time"
 
 	"github.com/pkg/sftp"
+
+	"meterm/internal/termsafe"
 )
 
 // Entry is one item in a directory listing.
@@ -154,9 +156,31 @@ func sortEntries(es []Entry) {
 // "web1:/etc/x".
 func where(fsys FS, p string) string {
 	if l := fsys.Label(); l != "local" {
-		return l + ":" + p
+		return l + ":" + shown(p)
 	}
-	return "local " + p
+	return "local " + shown(p)
+}
+
+// shown is a name or path from a host for a message, a row or the log: as
+// it is when every character in it shows as itself, otherwise quoted with
+// each hidden one spelled out (termsafe.Quote), as the picker shows such a
+// host name. Cleaned up instead, "ev\x1b]0;x\a il\u202etxt.exe" would show
+// as "ev ilexe.txt", pass for another file, and the log would keep U+FFFD
+// where the escape was.
+func shown(s string) string {
+	if termsafe.Label(s) == s {
+		return s
+	}
+	return termsafe.Quote(s)
+}
+
+// shownAll is shown for each of ps.
+func shownAll(ps []string) []string {
+	out := make([]string, len(ps))
+	for i, p := range ps {
+		out[i] = shown(p)
+	}
+	return out
 }
 
 // cause is err without the path an *fs.PathError adds, for a message that

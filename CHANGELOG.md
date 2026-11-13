@@ -146,8 +146,8 @@ v0.23.1 asked about nothing but deleting a host in the picker.
   can still be edited.
 - **Team pulls keep and flag, and never drop a host silently.** A team host
   that v0.23.1 accepted but these rules refuse (an invisible character, a
-  word mixing alphabets) is still pulled, kept and listed with a warning
-  naming the host and the field, as a host saved locally with one still
+  word mixing alphabets) is still pulled and kept, and the pull prints a
+  warning naming the host and the field, as a host saved locally with one still
   loads; fix it with `meterm edit`. `team push`, `team approve` and `team
   resolve --theirs` take such a host too, so a member can still sync a host
   someone else created. A team host with what v0.23.1 refused as well
@@ -282,6 +282,9 @@ v0.23.1 an overwrite truncated the target and wrote into it.
   part way are events of their own, each leading with how it went
   (`failed:`, `partial:`, `asked:` …). Deleting something already gone says
   so. A copy whose only file was skipped now logs its end too.
-- Names from the host are shown with escape sequences, control and invisible
-  characters dropped (tabs and line breaks as spaces);
-  `?` shows what the last operation did, in full.
+- A name from the host with an escape sequence, control or invisible
+  character in it is shown quoted with each such character spelled out
+  (`"ev\x1b]0;x\a name\u202etxt.exe"`), as the picker shows such a host
+  name: in its row, the delete and rename questions, the status line, `?`,
+  and the activity log, which keeps the exact name rather than `�`. A clean
+  name is shown as it is. `?` shows what the last operation did, in full.

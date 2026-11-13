@@ -538,8 +538,8 @@ func (m Model) dropQuestion(why string) Model {
 // question's choices still fit.
 func (m Model) shortWhere(fsys FS, dir string) string {
 	w := where(fsys, dir)
-	side := strings.TrimSuffix(w, dir)
-	return side + cellwidth.TruncLeft(dir, max(12, m.w/3))
+	side := strings.TrimSuffix(w, shown(dir))
+	return side + cellwidth.TruncLeft(shown(dir), max(12, m.w/3))
 }
 
 // boxPrompt is a name box's prompt: what it does, and where, cut from the
@@ -1092,34 +1092,34 @@ func (m Model) updateInput(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 				// A directory already there isn't made, nor logged: nothing
 				// changes.
 				if e, lerr := fsys.Lstat(target); lerr == nil && e.IsDir {
-					return opDoneMsg{panes: []int{i}, status: name + " already exists; nothing was created", focus: name}
+					return opDoneMsg{panes: []int{i}, status: shown(name) + " already exists; nothing was created", focus: name}
 				}
 				op := newOp()
 				// Before it's asked for: a session that dies meanwhile
 				// still shows it was.
 				if on != nil {
-					on(Event{Op: op, Kind: "mkdir", Outcome: "started", Detail: target, Remote: remote})
+					on(Event{Op: op, Kind: "mkdir", Outcome: "started", Detail: shown(target), Remote: remote})
 				}
 				// Mkdir, not MkdirAll: only a directory this made is
 				// logged as made.
 				if err := fsys.Mkdir(target); err != nil {
 					if e, lerr := fsys.Lstat(target); lerr == nil && e.IsDir {
 						if on != nil {
-							on(Event{Op: op, Kind: "mkdir", Outcome: "already there", Detail: target + ": already a directory; nothing was created", More: true, Remote: remote})
+							on(Event{Op: op, Kind: "mkdir", Outcome: "already there", Detail: shown(target) + ": already a directory; nothing was created", More: true, Remote: remote})
 						}
-						return opDoneMsg{panes: []int{i}, status: name + " already exists; nothing was created", focus: name}
+						return opDoneMsg{panes: []int{i}, status: shown(name) + " already exists; nothing was created", focus: name}
 					} else if lerr == nil {
-						err = fmt.Errorf("%s already exists and isn't a directory", name)
+						err = fmt.Errorf("%s already exists and isn't a directory", shown(name))
 					}
 					if on != nil {
-						on(Event{Op: op, Kind: "mkdir", Outcome: "failed", Detail: target + ": " + cause(err).Error(), More: true, Remote: remote})
+						on(Event{Op: op, Kind: "mkdir", Outcome: "failed", Detail: shown(target) + ": " + cause(err).Error(), More: true, Remote: remote})
 					}
 					return opDoneMsg{panes: []int{i}, err: fmt.Errorf("mkdir: %w", err)}
 				}
 				if on != nil {
-					on(Event{Op: op, Kind: "mkdir", Outcome: "ok", Detail: target, Remote: remote})
+					on(Event{Op: op, Kind: "mkdir", Outcome: "ok", Detail: shown(target), Remote: remote})
 				}
-				return opDoneMsg{panes: []int{i}, status: "created " + target, focus: name}
+				return opDoneMsg{panes: []int{i}, status: "created " + shown(target), focus: name}
 			}
 		case inputRename:
 			if a.name == name {
@@ -1128,25 +1128,26 @@ func (m Model) updateInput(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 			return m, func() tea.Msg {
 				from, to := a.from, fsys.Join(dir, name)
+				move := shown(from) + " -> " + shown(to)
 				op := newOp()
 				if on != nil {
-					on(Event{Op: op, Kind: "rename", Outcome: "started", Detail: from + " -> " + to, Remote: remote})
+					on(Event{Op: op, Kind: "rename", Outcome: "started", Detail: move, Remote: remote})
 				}
 				// Rename itself refuses an existing target; a separate look
 				// first would leave a gap for something to appear in.
 				if err := fsys.Rename(from, to); err != nil {
 					if _, lerr := fsys.Lstat(to); errors.Is(err, fs.ErrExist) || lerr == nil {
-						err = fmt.Errorf("%s already exists", name)
+						err = fmt.Errorf("%s already exists", shown(name))
 					}
 					if on != nil {
-						on(Event{Op: op, Kind: "rename", Outcome: "failed", Detail: from + " -> " + to + ": " + cause(err).Error(), More: true, Remote: remote})
+						on(Event{Op: op, Kind: "rename", Outcome: "failed", Detail: move + ": " + cause(err).Error(), More: true, Remote: remote})
 					}
 					return opDoneMsg{panes: []int{i}, err: fmt.Errorf("rename: %w", err)}
 				}
 				if on != nil {
-					on(Event{Op: op, Kind: "rename", Outcome: "ok", Detail: from + " -> " + to, Remote: remote})
+					on(Event{Op: op, Kind: "rename", Outcome: "ok", Detail: move, Remote: remote})
 				}
-				return opDoneMsg{panes: []int{i}, status: "renamed to " + name, focus: name}
+				return opDoneMsg{panes: []int{i}, status: "renamed to " + shown(name), focus: name}
 			}
 		}
 		return m, nil
@@ -1268,13 +1269,14 @@ func (m Model) updateConfirm(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		on := m.opts.OnEvent
 		m.panes[i].sel = map[string]bool{}
 		all := a.paths
-		ctx, tick := m.startBusy(busyDelete, strings.Join(all, ", "))
+		say := func(ps []string) string { return strings.Join(shownAll(ps), ", ") }
+		ctx, tick := m.startBusy(busyDelete, say(all))
 		op := newOp()
 		m.busyRemote, m.busyOp = remote, op
 		// Say what's about to go before any of it does: if this session
 		// dies part way, the log still shows what was asked for.
 		if on != nil {
-			on(Event{Op: op, Kind: "delete", Outcome: "started", Detail: strings.Join(all, ", "), Remote: remote})
+			on(Event{Op: op, Kind: "delete", Outcome: "started", Detail: say(all), Remote: remote})
 		}
 		return m, tea.Batch(func() tea.Msg {
 			var names, gone, removed []string // the items finished, those already gone, and every path removed
@@ -1295,28 +1297,28 @@ func (m Model) updateConfirm(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 					continue
 				}
 				outcome := "failed"
-				d := "failed on " + target + ": " + err.Error()
-				status := fmt.Sprintf("delete %s stopped: %s", fsys.Base(target), err)
+				d := "failed on " + shown(target) + ": " + err.Error()
+				status := fmt.Sprintf("delete %s stopped: %s", shown(fsys.Base(target)), err)
 				if errors.Is(err, context.Canceled) {
 					outcome = "cancelled"
-					d = "cancelled at " + target
+					d = "cancelled at " + shown(target)
 					status = fmt.Sprintf("delete cancelled after %d of %d item(s)", len(names)+len(gone), len(ts))
 				}
 				if len(removed) > 0 {
 					outcome = "partial" // something went before it stopped
 				}
-				d = strings.Join(all, ", ") + ": " + d
+				d = say(all) + ": " + d
 				if len(names) > 0 {
-					d += "; deleted: " + strings.Join(names, ", ")
+					d += "; deleted: " + say(names)
 				}
 				if len(gone) > 0 {
-					d += "; already gone: " + strings.Join(gone, ", ")
+					d += "; already gone: " + say(gone)
 				}
 				if inside > 0 {
-					d += fmt.Sprintf("; %d %s inside %s removed before it stopped", inside, plural(inside, "entry", "entries"), target)
+					d += fmt.Sprintf("; %d %s inside %s removed before it stopped", inside, plural(inside, "entry", "entries"), shown(target))
 				}
 				if len(removed) > 0 {
-					d += "; removed: " + capList(removed, logCap)
+					d += "; removed: " + capList(shownAll(removed), logCap)
 					rel := make([]string, len(removed))
 					for k, p := range removed {
 						rel[k] = relTo(fsys, dir, p)
@@ -1326,37 +1328,37 @@ func (m Model) updateConfirm(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 					status += "; nothing was removed"
 				}
 				if rest := all[n+1:]; len(rest) > 0 {
-					d += "; not reached: " + strings.Join(rest, ", ")
+					d += "; not reached: " + say(rest)
 				}
 				if on != nil {
 					on(Event{Op: op, Kind: "delete", Outcome: outcome, Detail: d, More: true, Remote: remote})
 				}
-				detail := []string{"Delete on " + fsys.Label() + ": " + status, "", "Failed on: " + target, "  " + err.Error(), "",
+				detail := []string{"Delete on " + fsys.Label() + ": " + status, "", "Failed on: " + shown(target), "  " + err.Error(), "",
 					fmt.Sprintf("Removed before it stopped (%d):", len(removed))}
 				for k, p := range removed {
 					if k == logCap {
 						detail = append(detail, fmt.Sprintf("  +%d more", len(removed)-logCap))
 						break
 					}
-					detail = append(detail, "  "+p)
+					detail = append(detail, "  "+shown(p))
 				}
 				if rest := all[n+1:]; len(rest) > 0 {
 					detail = append(detail, "", "Not reached:")
 					for _, p := range rest {
-						detail = append(detail, "  "+p)
+						detail = append(detail, "  "+shown(p))
 					}
 				}
 				return opDoneMsg{panes: []int{i}, err: errors.New(status), detail: detail}
 			}
-			end := Event{Op: op, Kind: "delete", Outcome: "ok", Detail: strings.Join(names, ", "), Remote: remote}
+			end := Event{Op: op, Kind: "delete", Outcome: "ok", Detail: say(names), Remote: remote}
 			status := fmt.Sprintf("deleted %d item(s)", len(names))
 			if len(gone) > 0 {
-				end.Detail += "; already gone: " + strings.Join(gone, ", ")
+				end.Detail += "; already gone: " + say(gone)
 				end.More = true
 				status += fmt.Sprintf("; %d already gone", len(gone))
 			}
 			if len(names) == 0 {
-				end.Outcome, end.Detail = "already gone", strings.Join(gone, ", ")
+				end.Outcome, end.Detail = "already gone", say(gone)
 				status = fmt.Sprintf("nothing deleted: %s already gone", plural(len(gone), "it was", fmt.Sprintf("all %d were", len(gone))))
 			}
 			if on != nil {
@@ -1364,12 +1366,12 @@ func (m Model) updateConfirm(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 			detail := []string{fmt.Sprintf("Deleted on %s (%d item(s)):", fsys.Label(), len(names))}
 			for _, p := range names {
-				detail = append(detail, "  "+p)
+				detail = append(detail, "  "+shown(p))
 			}
 			if len(gone) > 0 {
 				detail = append(detail, "", "Already gone:")
 				for _, p := range gone {
-					detail = append(detail, "  "+p)
+					detail = append(detail, "  "+shown(p))
 				}
 			}
 			return opDoneMsg{panes: []int{i}, status: status, detail: detail}
@@ -1386,11 +1388,11 @@ func deleteWhat(ts []Entry) string {
 		e := ts[0]
 		switch {
 		case e.Link:
-			return "the symlink " + e.Name + " (not what it leads to)"
+			return "the symlink " + shown(e.Name) + " (not what it leads to)"
 		case e.IsDir:
-			return "the directory " + e.Name + " and everything inside it"
+			return "the directory " + shown(e.Name) + " and everything inside it"
 		}
-		return "the file " + e.Name
+		return "the file " + shown(e.Name)
 	}
 	var files, dirs, links int
 	for _, e := range ts {
@@ -1501,9 +1503,9 @@ func (m Model) prodWarning(fsys FS) string {
 // relTo is p as a path under base, or p itself when it isn't under base.
 func relTo(fsys FS, base, p string) string {
 	if rest, ok := strings.CutPrefix(p, strings.TrimSuffix(fsys.Join(base, "x"), "x")); ok && rest != "" {
-		return rest
+		return shown(rest)
 	}
-	return p
+	return shown(p)
 }
 
 // firstFew is the first n items, and how many more there are.
@@ -1579,9 +1581,9 @@ func (m Model) transferSummary(plan Plan) string {
 			tops = append(tops, fmt.Sprintf("+%d more", len(plan.Items)-5))
 			break
 		}
-		tops = append(tops, plan.Src.Base(it))
+		tops = append(tops, shown(plan.Src.Base(it)))
 	}
-	return strings.Join(tops, ", ") + " -> " + plan.DstDir
+	return strings.Join(tops, ", ") + " -> " + shown(plan.DstDir)
 }
 
 // logStart tells OnEvent a copy is starting, before a byte is written: if
@@ -1858,7 +1860,7 @@ func (m Model) viewHeader(i, width int) string {
 		}
 	}
 	host := termsafe.Label(p.fs.Label()) + ":"
-	path := termsafe.Label(p.dir)
+	path := shown(p.dir)
 	count := ""
 	if n := p.selected(); n > 0 {
 		count = fmt.Sprintf("  [%d selected]", n)
@@ -1903,7 +1905,7 @@ func (m Model) viewRow(p *pane, e Entry, width int, cursor, cursorInactive bool)
 	if p.sel[e.Name] {
 		mark = "*"
 	}
-	name := termsafe.Label(e.Name)
+	name := shown(e.Name)
 	if e.IsDir {
 		name += "/"
 	}
@@ -2014,7 +2016,7 @@ func (m Model) viewStatus() string {
 		bar := strings.Repeat("█", filled) + strings.Repeat("░", barW-filled)
 		name := ""
 		if p.File != "" {
-			name = termsafe.Label(m.panes[m.active].fs.Base(p.File)) + "  "
+			name = shown(m.panes[m.active].fs.Base(p.File)) + "  "
 		}
 		rate := ""
 		if r, ok := m.rate(); ok {
