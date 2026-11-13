@@ -97,3 +97,24 @@ func TestStaleIndexLockIsCleared(t *testing.T) {
 		t.Errorf("index.lock still there: %v", err)
 	}
 }
+
+// A busy clone isn't a team you're not in: Router.Teams still lists it,
+// saying it's busy, and the other teams as usual.
+func TestRouterTeamsKeepsABusyTeam(t *testing.T) {
+	a, _ := twoProcesses(t)
+	defer SetRepoLockWait(100 * time.Millisecond)()
+	r := &Router{Git: map[string]*GitStore{a.ID: a}}
+	unlock, err := lockfile.Acquire(a.Dir+".lock", 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	teams, err := r.Teams(ctx)
+	unlock()
+	if err != nil || len(teams) != 1 || teams[0].ID != a.ID || teams[0].Name != "ACME" || !errors.Is(teams[0].Err, ErrRepoBusy) {
+		t.Fatalf("busy: teams %+v, err %v; want ACME, busy", teams, err)
+	}
+	teams, err = r.Teams(ctx)
+	if err != nil || len(teams) != 1 || teams[0].Err != nil || teams[0].Role != RoleOwner {
+		t.Errorf("after: teams %+v, err %v", teams, err)
+	}
+}

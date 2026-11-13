@@ -71,3 +71,12 @@ func lockClone(dir string) (unlock func(), err error) {
 	}
 	return release, err
 }
+
+// SetRepoLockWait sets how long git work waits for a busy clone, and
+// returns a func that puts it back: for tests elsewhere, which can't wait
+// the real ten seconds per command.
+func SetRepoLockWait(d time.Duration) (restore func()) {
+	old := repoLockWait
+	repoLockWait = d
+	return func() { repoLockWait = old }
+}

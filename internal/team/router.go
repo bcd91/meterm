@@ -36,17 +36,21 @@ func (r *Router) IdentityFor(ctx context.Context, teamID string) (Identity, erro
 	return b.Identity(ctx)
 }
 
-// Teams lists every team. One whose repository can't be read is left out
-// rather than hiding the rest.
+// Teams lists every team. One whose repository can't be read just now is
+// still listed, by this machine's ID and name, with Err saying why: left
+// out, a busy clone would read as "you are not in that team".
 func (r *Router) Teams(ctx context.Context) ([]Team, error) {
 	if len(r.Git) == 0 {
 		return nil, ErrNotSignedIn
 	}
 	var out []Team
 	for _, g := range r.Git {
-		if ts, err := g.Teams(ctx); err == nil {
-			out = append(out, ts...)
+		ts, err := g.Teams(ctx)
+		if err != nil {
+			out = append(out, Team{ID: g.ID, Name: g.Name, Err: err})
+			continue
 		}
+		out = append(out, ts...)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	return out, nil

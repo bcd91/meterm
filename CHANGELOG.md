@@ -138,7 +138,9 @@ v0.23.1 asked about nothing but deleting a host in the picker.
 - Team commands run quickly one after another no longer collide with the
   background sync on the team's clone ("cannot lock ref", "index.lock: File
   exists"): git work on a clone is one at a time, and a command that can't
-  get it within 10s says "team sync busy … retry".
+  get it within 10s says "team sync busy … retry" (not "you are not in a
+  team called …"), and `team list` shows that team as "(busy, try again)"
+  and exits non-zero rather than leaving it out.
 
 ### File manager
 

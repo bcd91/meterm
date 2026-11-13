@@ -673,6 +673,10 @@ func backgroundSync(ctx context.Context, tc *teamCtx, hosts, upload bool) error 
 		}
 	}
 	for _, t := range teams {
+		if t.Err != nil {
+			keep(t.Err)
+			continue
+		}
 		tc.state.TeamNames[t.ID] = t.Name
 		if hosts {
 			keep(backgroundPull(ctx, tc, t, path))

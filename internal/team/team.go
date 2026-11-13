@@ -54,6 +54,11 @@ type Team struct {
 	// MovedFrom is the ID of the old cloud team this one was migrated from,
 	// so hosts this machine still has under that ID can be adopted.
 	MovedFrom string
+	// Err, from Router.Teams, is why the team's repository couldn't be read
+	// just now (ErrRepoBusy: another meterm is using it). ID and Name are
+	// this machine's; Role is unknown. Nothing about it is to be trusted
+	// but that it's there.
+	Err error
 }
 
 // Member is one person's membership of a team.
