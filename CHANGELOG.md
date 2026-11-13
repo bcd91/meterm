@@ -163,7 +163,9 @@ v0.23.1 asked about nothing but deleting a host in the picker.
   that v0.23.1 accepted but these rules refuse (an invisible character, a
   word mixing alphabets) is still pulled and kept, and the pull prints a
   warning naming the host and the field, as a host saved locally with one still
-  loads; fix it with `meterm edit`. `team push`, `team approve` and `team
+  loads; fix it with `meterm edit`. Such a host can still be used as a
+  jump host by name, as in v0.23.1; a raw `user@host:port` jump with an
+  invisible character is refused. `team push`, `team approve` and `team
   resolve --theirs` take such a host too, so a member can still sync a host
   someone else created. A team host with what v0.23.1 refused as well
   (control characters such as escape sequences and line breaks, bidi

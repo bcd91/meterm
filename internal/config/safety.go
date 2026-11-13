@@ -45,12 +45,17 @@ func CheckUser(s string) error {
 func CheckJump(spec string) error { return checkJump(spec, refused) }
 
 func checkJump(spec string, ctl func(rune) bool) error {
+	return checkJumpBy(spec, func(string) func(rune) bool { return ctl })
+}
+
+// checkJumpBy is checkJump with the characters refused chosen per hop.
+func checkJumpBy(spec string, pick func(hop string) func(rune) bool) error {
 	if spec == "" {
 		return nil
 	}
 	for _, hop := range strings.Split(spec, ",") {
 		hop = strings.TrimSpace(hop)
-		if hop == "" || strings.HasPrefix(hop, "-") || has(hop, ctl) || strings.ContainsAny(hop, " \t'\"`$\\;&|<>()*?") {
+		if hop == "" || strings.HasPrefix(hop, "-") || has(hop, pick(hop)) || strings.ContainsAny(hop, " \t'\"`$\\;&|<>()*?") {
 			return fmt.Errorf("jump host %q isn't a host name or [user@]host[:port]", hop)
 		}
 		host := hop
@@ -278,7 +283,33 @@ func checkSharedExtraArgs(args []string, ctl func(rune) bool) error {
 // host is shared with a team.
 func (h Host) CheckConnection() error { return h.checkConnection(refused) }
 
+// checkConnection checks what reaches ssh's command line; jump paths are
+// held to the characters ctl refuses.
 func (h Host) checkConnection(ctl func(rune) bool) error {
+	return h.checkConnectionJump(ctl, func(spec string) error { return checkJump(spec, ctl) })
+}
+
+// checkConnection is CheckConnection as connect runs it, against this file.
+// A hop naming a saved host is held only to what v0.23.1 refused
+// (refusedBefore): the name never reaches ssh, the saved host's address
+// does, and a host v0.23.1 saved or a team handed over with a zero-width
+// space in its name is still reachable through. A raw [user@]host[:port]
+// hop goes to ssh as it is and keeps the strict rule.
+func (c *Config) checkConnection(h Host) error {
+	return h.checkConnectionJump(refused, c.checkJump)
+}
+
+// checkJump is CheckJump with the saved-host leniency of checkConnection.
+func (c *Config) checkJump(spec string) error {
+	return checkJumpBy(spec, func(hop string) func(rune) bool {
+		if jh, _ := c.Find(hop); jh != nil {
+			return refusedBefore
+		}
+		return refused
+	})
+}
+
+func (h Host) checkConnectionJump(ctl func(rune) bool, checkJump func(string) error) error {
 	if err := CheckAddress(h.Address); err != nil {
 		return err
 	}
@@ -293,7 +324,7 @@ func (h Host) checkConnection(ctl func(rune) bool) error {
 			return err
 		}
 	}
-	if err := checkJump(h.ProxyJump, ctl); err != nil {
+	if err := checkJump(h.ProxyJump); err != nil {
 		return err
 	}
 	for _, rt := range h.Routes {
@@ -302,7 +333,7 @@ func (h Host) checkConnection(ctl func(rune) bool) error {
 				return fmt.Errorf("route %q: %w", rt.Name, err)
 			}
 		}
-		if err := checkJump(rt.ProxyJump, ctl); err != nil {
+		if err := checkJump(rt.ProxyJump); err != nil {
 			return fmt.Errorf("route %q: %w", rt.Name, err)
 		}
 		if rt.Port < 0 || rt.Port > 65535 {

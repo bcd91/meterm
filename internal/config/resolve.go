@@ -76,9 +76,9 @@ func (c *Config) resolve(h Host, rt *Route, seen map[string]bool) Resolved {
 		Env:          c.Env(h),
 		Route:        routeName,
 	}
-	if err := h.CheckConnection(); err != nil {
+	if err := c.checkConnection(h); err != nil {
 		r.Err = fmt.Errorf("%s: %w (fix it with `meterm edit %s`)", h.Name, err, h.Name)
-	} else if err := CheckJump(g.ProxyJump); err != nil {
+	} else if err := c.checkJump(g.ProxyJump); err != nil {
 		r.Err = fmt.Errorf("%s: group %s: %w", h.Name, h.Group, err)
 	}
 	if r.IdentityFile == "" {
