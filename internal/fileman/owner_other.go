@@ -8,3 +8,5 @@ import "io/fs"
 func sysOwner(fs.FileInfo) (uid, gid uint32, nlink uint64, ok bool) { return 0, 0, 0, false }
 
 func localIdentity() (identity, bool) { return identity{}, false }
+
+func readOnlyFS(error) bool { return false }

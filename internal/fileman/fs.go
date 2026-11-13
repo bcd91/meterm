@@ -86,10 +86,14 @@ func entryOf(name string, fi fs.FileInfo) Entry {
 
 // identity is who a side acts as: its uid and the groups it's in.
 // groupsKnown says gids is all of them; otherwise it's only those seen.
+// rootAll says uid 0 really is root, who may write anything: true of this
+// machine, never of a host, where a server that sends no owners makes
+// every file, ours included, look like root's.
 type identity struct {
 	uid         uint32
 	gids        []uint32
 	groupsKnown bool
+	rootAll     bool
 }
 
 func (id identity) inGroup(g uint32) bool {
@@ -123,7 +127,7 @@ func mayWrite(e Entry, id identity, idOK bool) (ok, known bool) {
 		return true, false
 	}
 	switch {
-	case id.uid == 0:
+	case id.uid == 0 && id.rootAll:
 		return true, true
 	case id.uid == e.Uid:
 		return perm&0o200 != 0, true
@@ -188,6 +192,7 @@ func (Local) OpenWrite(p string) (io.WriteCloser, error) {
 	return os.OpenFile(p, os.O_WRONLY|os.O_TRUNC, 0)
 }
 func (Local) identity() (identity, bool) { return localIdentity() }
+func (Local) thisMachine()               {}
 func (Local) CreateTemp(target string, mode fs.FileMode) (io.WriteCloser, string, error) {
 	tmp := filepath.Join(filepath.Dir(target), tempName(filepath.Base(target)))
 	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, mode.Perm()) // the umask applies, as to any new file
@@ -208,7 +213,9 @@ func checkThenRename(lstat func(string) error, rename func(a, b string) error, a
 }
 
 // tempName is the name a file being written goes under until it's complete:
-// hidden, recognisably meterm's, and short enough for any filesystem.
+// hidden, recognisably meterm's, and short enough for any filesystem: the
+// name it's for is cut to 64 bytes, so the whole is at most 90, inside
+// eCryptfs's 143 however long the name is.
 func tempName(base string) string { return hiddenName(base, "part") }
 
 // backupName is where a file being replaced waits, on a server that can't

@@ -3,6 +3,7 @@
 package fileman
 
 import (
+	"errors"
 	"io/fs"
 	"os"
 	"syscall"
@@ -25,10 +26,16 @@ func localIdentity() (id identity, ok bool) {
 	if err != nil {
 		return identity{}, false
 	}
-	id = identity{uid: uint32(os.Getuid()), groupsKnown: true}
-	id.gids = append(id.gids, uint32(os.Getgid()))
+	id = identity{uid: uint32(os.Geteuid()), groupsKnown: true, rootAll: true}
+	id.gids = append(id.gids, uint32(os.Getegid()))
 	for _, g := range gids {
 		id.gids = append(id.gids, uint32(g))
 	}
 	return id, true
 }
+
+// readOnlyFS says err is this machine's filesystem refusing to create a file
+// because it's mounted read-only. A file in it may still be writable: one
+// bind-mounted read-write from elsewhere (docker --read-only -v file:file, a
+// Kubernetes subPath under readOnlyRootFilesystem).
+func readOnlyFS(err error) bool { return errors.Is(err, syscall.EROFS) }
