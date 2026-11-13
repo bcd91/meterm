@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"os"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/charmbracelet/bubbles/cursor"
@@ -22,14 +23,11 @@ import (
 type Options struct {
 	Left, Right       FS // left is normally this machine, right the host
 	LeftDir, RightDir string
-	// OnEvent is told about everything that changed something, for the
-	// activity log: kind is upload, download, copy, delete, rename or
-	// mkdir; remote reports whether it happened on the host (Right).
-	// detail is the whole line, and starts with how it went, then kind:
-	// "started: upload a.txt -> /srv", "ok: …", "failed: …", "cancelled:
-	// …", "aborted: …", "partial: …", "stopped: …", "already gone: …", or
-	// "asked: …" for an answer to a question part way.
-	OnEvent func(kind, detail string, remote bool)
+	// OnEvent is told about everything that changes something, for the
+	// activity log: each operation's start before it touches anything,
+	// any answer the person gives part way, and how it ended. See Event.
+	// It may be called from other goroutines than the one running Update.
+	OnEvent func(Event)
 	// Abort drops the connection to the host. It's the way out when the
 	// host stops answering mid-operation: a cancel can't reach a peer that
 	// says nothing, and the SFTP calls waiting on it never return.
@@ -38,6 +36,40 @@ type Options struct {
 	// ""): a production host's pane and its destructive questions say so.
 	Env string
 }
+
+// Event is one entry about an operation, for the activity log.
+type Event struct {
+	// Op is the operation it belongs to: its start, the answers given part
+	// way, and its end all have the same Op.
+	Op int64
+	// Kind is upload, download, copy, delete, rename or mkdir.
+	Kind string
+	// Outcome is "started", "asked" (an answer part way), or how it ended:
+	// "ok", "failed", "partial", "cancelled", "stopped", "aborted",
+	// "already gone" (a delete) or "already there" (a mkdir).
+	Outcome string
+	// Detail is what it is: for a start, what's about to happen; for an
+	// end, what happened, in full.
+	Detail string
+	// More says an end tells something its start didn't (a file written
+	// in place, an error, what was done before it stopped): worth keeping
+	// in words, not just as an outcome.
+	More bool
+	// Remote says it happened on the host (Right).
+	Remote bool
+}
+
+// Line is the event as one line: how it went, then what it was:
+// "ok: upload a.txt -> /srv (1 file(s), 3 B)".
+func (e Event) Line() string { return e.Outcome + ": " + e.Kind + " " + e.Detail }
+
+// Ends says the event is how its operation ended.
+func (e Event) Ends() bool { return e.Outcome != "started" && e.Outcome != "asked" }
+
+// opSeq numbers operations within this process.
+var opSeq atomic.Int64
+
+func newOp() int64 { return opSeq.Add(1) }
 
 type mode int
 
@@ -234,6 +266,8 @@ type Model struct {
 	busy       busyKind
 	busyDetail string // what the busy operation is working on, for the log if it's abandoned
 	busyRemote bool   // whether that's on the host
+	busyOp     int64  // and which operation it is
+	copyOp     int64  // the copy under way, or stopped to ask: from its start to its end
 	cancelling bool
 	// stopAfter stops a copy the gentle way (RunOptions.After): a file
 	// written in place is let finish. stopping says it was asked for, so the
@@ -360,24 +394,24 @@ func (m Model) abort() (tea.Model, tea.Cmd) {
 				done, temp = m.progress.Files, m.progress.Temp
 			}
 			kind, remote := m.transferKind(*m.running)
-			d := fmt.Sprintf("aborted: %s %s: connection dropped after %d of %d file(s)", kind, m.transferSummary(*m.running), done, len(m.running.Files))
+			d := fmt.Sprintf("%s: connection dropped after %d of %d file(s)", m.transferSummary(*m.running), done, len(m.running.Files))
 			if temp != "" {
-				d += "; unfinished temporary file may remain: " + temp
+				d += "; unfinished temporary file may remain: " + where(m.running.Dst, temp)
 			}
 			if m.progress != nil && m.progress.InPlace != "" {
 				d += "; was writing in place, may be partly written: " + where(m.running.Dst, m.progress.InPlace)
 			}
-			m.emit(kind, d, remote)
+			m.emit(Event{Op: m.copyOp, Kind: kind, Outcome: "aborted", Detail: d, More: true, Remote: remote})
 		}
 	case busyDelete:
 		what = "a delete"
-		m.emit("delete", "aborted: delete "+m.busyDetail+": connection dropped; may be partly deleted", m.busyRemote)
+		m.emit(Event{Op: m.busyOp, Kind: "delete", Outcome: "aborted", Detail: m.busyDetail + ": connection dropped; may be partly deleted", More: true, Remote: m.busyRemote})
 	case busyPlan:
 		what = "working out a copy"
 	}
 	m.exitErr = fmt.Errorf("stopped waiting for %s during %s: the connection was dropped", host, what)
-	if m.progress != nil && m.progress.Temp != "" {
-		m.exitErr = fmt.Errorf("%w; an unfinished temporary file may be left at %s", m.exitErr, m.progress.Temp)
+	if m.progress != nil && m.progress.Temp != "" && m.running != nil {
+		m.exitErr = fmt.Errorf("%w; an unfinished temporary file may be left at %s", m.exitErr, where(m.running.Dst, m.progress.Temp))
 	}
 	if m.progress != nil && m.progress.InPlace != "" && m.running != nil {
 		m.exitErr = fmt.Errorf("%w; %s was being written in place and may be partly written", m.exitErr, where(m.running.Dst, m.progress.InPlace))
@@ -386,14 +420,11 @@ func (m Model) abort() (tea.Model, tea.Cmd) {
 	return m, tea.Quit
 }
 
-func (m Model) emit(kind, detail string, remote bool) {
+func (m Model) emit(e Event) {
 	if m.opts.OnEvent != nil {
-		m.opts.OnEvent(kind, detail, remote)
+		m.opts.OnEvent(e)
 	}
 }
-
-// logged is the line OnEvent gets: how it went, then what it was.
-func logged(outcome, kind, rest string) string { return outcome + ": " + kind + " " + rest }
 
 type dirLoadedMsg struct {
 	pane    int
@@ -657,13 +688,26 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		var partial *PartialWrite
 		if msg.err != nil {
-			if errors.As(msg.err, &partial) {
-				m.setStatus(fmt.Sprintf("copy stopped after %d file(s): %v", msg.res.Copied, partial), true)
-			} else if errors.Is(msg.err, context.Canceled) {
-				m.setStatus(fmt.Sprintf("cancelled after %d file(s); the unfinished one was discarded and the file it would have replaced left as it was", msg.res.Copied), true)
-			} else {
-				m.setStatus("copy failed: "+msg.err.Error(), true)
+			var s string
+			switch {
+			case errors.Is(msg.err, context.Canceled):
+				s = fmt.Sprintf("%s; %d of %d file(s) copied before that", stopNote(msg.err), msg.res.Copied, len(msg.plan.Files))
+			case errors.As(msg.err, &partial):
+				s = fmt.Sprintf("copy stopped after %d file(s): %v", msg.res.Copied, partial)
+			default:
+				s = fmt.Sprintf("copy failed after %d of %d file(s): %v", msg.res.Copied, len(msg.plan.Files), msg.err)
 			}
+			if n := len(msg.res.Files); n > 0 {
+				rel := make([]string, n)
+				for k, f := range msg.res.Files {
+					rel[k] = relTo(msg.plan.Dst, msg.plan.DstDir, f)
+				}
+				s += "; already copied: " + firstFew(rel, 3) + " (? for all)"
+			}
+			if n := len(msg.res.Leftovers); n > 0 {
+				s += "; unfinished temporary file left: " + firstFew(msg.res.Leftovers, 2)
+			}
+			m.setStatus(s, true)
 		} else {
 			s := fmt.Sprintf("copied %d file(s), %s to %s:%s", msg.res.Copied, HumanBytes(msg.res.Bytes), msg.plan.Dst.Label(), msg.plan.DstDir)
 			if n := len(msg.res.InPlace); n > 0 {
@@ -682,6 +726,9 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if msg.res.Skipped > 0 {
 				s += fmt.Sprintf("; kept %d existing", msg.res.Skipped)
 			}
+			if n := len(msg.res.Leftovers); n > 0 {
+				s += "; unfinished temporary file left: " + firstFew(msg.res.Leftovers, 2)
+			}
 			if len(msg.plan.Skipped) > 0 {
 				s += fmt.Sprintf("; skipped %d symlink(s)/special file(s)", len(msg.plan.Skipped))
 			}
@@ -689,10 +736,12 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if w := warningsText(msg.res.Warnings); w != "" {
 				s += "; " + w
 			}
-			m.setStatus(s, len(msg.res.Warnings) > 0)
+			m.setStatus(s, len(msg.res.Warnings) > 0 || len(msg.res.Leftovers) > 0)
 		}
+		// Its end is always logged: the start was.
+		d := m.report(msg.plan, msg.res, msg.err)
 		if msg.res.Copied > 0 || msg.err != nil || len(msg.plan.Dirs) > 0 || len(msg.res.Warnings) > 0 {
-			m.lastOp = detailLines(m.report(msg.plan, msg.res, msg.err))
+			m.lastOp = detailLines(d)
 		}
 		return m, tea.Batch(m.load(0, m.panes[0].dir), m.load(1, m.panes[1].dir))
 
@@ -1005,21 +1054,35 @@ func (m Model) updateInput(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case inputMkdir:
 			return m, func() tea.Msg {
 				target := fsys.Join(dir, name)
+				// A directory already there isn't made, nor logged: nothing
+				// changes.
+				if e, lerr := fsys.Lstat(target); lerr == nil && e.IsDir {
+					return opDoneMsg{panes: []int{i}, status: name + " already exists; nothing was created", focus: name}
+				}
+				op := newOp()
+				// Before it's asked for: a session that dies meanwhile
+				// still shows it was.
+				if on != nil {
+					on(Event{Op: op, Kind: "mkdir", Outcome: "started", Detail: target, Remote: remote})
+				}
 				// Mkdir, not MkdirAll: only a directory this made is
 				// logged as made.
 				if err := fsys.Mkdir(target); err != nil {
 					if e, lerr := fsys.Lstat(target); lerr == nil && e.IsDir {
+						if on != nil {
+							on(Event{Op: op, Kind: "mkdir", Outcome: "already there", Detail: target + ": already a directory; nothing was created", More: true, Remote: remote})
+						}
 						return opDoneMsg{panes: []int{i}, status: name + " already exists; nothing was created", focus: name}
 					} else if lerr == nil {
 						err = fmt.Errorf("%s already exists and isn't a directory", name)
 					}
 					if on != nil {
-						on("mkdir", logged("failed", "mkdir", target+": "+cause(err).Error()), remote)
+						on(Event{Op: op, Kind: "mkdir", Outcome: "failed", Detail: target + ": " + cause(err).Error(), More: true, Remote: remote})
 					}
 					return opDoneMsg{panes: []int{i}, err: fmt.Errorf("mkdir: %w", err)}
 				}
 				if on != nil {
-					on("mkdir", logged("ok", "mkdir", target), remote)
+					on(Event{Op: op, Kind: "mkdir", Outcome: "ok", Detail: target, Remote: remote})
 				}
 				return opDoneMsg{panes: []int{i}, status: "created " + target, focus: name}
 			}
@@ -1030,6 +1093,10 @@ func (m Model) updateInput(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 			return m, func() tea.Msg {
 				from, to := a.from, fsys.Join(dir, name)
+				op := newOp()
+				if on != nil {
+					on(Event{Op: op, Kind: "rename", Outcome: "started", Detail: from + " -> " + to, Remote: remote})
+				}
 				// Rename itself refuses an existing target; a separate look
 				// first would leave a gap for something to appear in.
 				if err := fsys.Rename(from, to); err != nil {
@@ -1037,12 +1104,12 @@ func (m Model) updateInput(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 						err = fmt.Errorf("%s already exists", name)
 					}
 					if on != nil {
-						on("rename", logged("failed", "rename", from+" -> "+to+": "+cause(err).Error()), remote)
+						on(Event{Op: op, Kind: "rename", Outcome: "failed", Detail: from + " -> " + to + ": " + cause(err).Error(), More: true, Remote: remote})
 					}
 					return opDoneMsg{panes: []int{i}, err: fmt.Errorf("rename: %w", err)}
 				}
 				if on != nil {
-					on("rename", logged("ok", "rename", from+" -> "+to), remote)
+					on(Event{Op: op, Kind: "rename", Outcome: "ok", Detail: from + " -> " + to, Remote: remote})
 				}
 				return opDoneMsg{panes: []int{i}, status: "renamed to " + name, focus: name}
 			}
@@ -1110,7 +1177,7 @@ func (m Model) updateConfirm(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 			LossReplace: "chose to replace",
 			LossSkip:    "chose to skip",
 		}[choice]
-		m.emit(kind, logged("asked", kind, fmt.Sprintf("%s: %s for %s (replacing it: %s); the same for any other such file in this copy", m.transferSummary(*plan), said, loses.Where, loses.what())), remote)
+		m.emit(Event{Op: m.copyOp, Kind: kind, Outcome: "asked", Detail: fmt.Sprintf("%s: %s for %s (replacing it: %s); the same for any other such file in this copy", m.transferSummary(*plan), said, loses.Where, loses.what()), Remote: remote})
 		opts.OnLoss, opts.From = choice, loses.Index
 		return m.startTransfer(*plan, opts, m.carry)
 	case confirmInPlace:
@@ -1120,7 +1187,7 @@ func (m Model) updateConfirm(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.pendingPlan, m.pendingInPlace = nil, nil
 			// The person's decision goes in the log before a byte is written.
 			kind, remote := m.transferKind(*plan)
-			m.emit(kind, logged("asked", kind, fmt.Sprintf("%s: agreed to write in place (not atomic): %s; %s", m.transferSummary(*plan), where(plan.Dst, need.Target), need.Error())), remote)
+			m.emit(Event{Op: m.copyOp, Kind: kind, Outcome: "asked", Detail: fmt.Sprintf("%s: agreed to write in place (not atomic): %s; %s", m.transferSummary(*plan), where(plan.Dst, need.Target), need.Error()), Remote: remote})
 			in := map[string]bool{}
 			for k := range opts.InPlace {
 				in[k] = true
@@ -1165,11 +1232,12 @@ func (m Model) updateConfirm(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.panes[i].sel = map[string]bool{}
 		all := a.paths
 		ctx, tick := m.startBusy(busyDelete, strings.Join(all, ", "))
-		m.busyRemote = remote
+		op := newOp()
+		m.busyRemote, m.busyOp = remote, op
 		// Say what's about to go before any of it does: if this session
 		// dies part way, the log still shows what was asked for.
 		if on != nil {
-			on("delete", logged("started", "delete", strings.Join(all, ", ")), remote)
+			on(Event{Op: op, Kind: "delete", Outcome: "started", Detail: strings.Join(all, ", "), Remote: remote})
 		}
 		return m, tea.Batch(func() tea.Msg {
 			var names, gone, removed []string // the items finished, those already gone, and every path removed
@@ -1224,7 +1292,7 @@ func (m Model) updateConfirm(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 					d += "; not reached: " + strings.Join(rest, ", ")
 				}
 				if on != nil {
-					on("delete", logged(outcome, "delete", d), remote)
+					on(Event{Op: op, Kind: "delete", Outcome: outcome, Detail: d, More: true, Remote: remote})
 				}
 				detail := []string{"Delete on " + fsys.Label() + ": " + status, "", "Failed on: " + target, "  " + err.Error(), "",
 					fmt.Sprintf("Removed before it stopped (%d):", len(removed))}
@@ -1243,18 +1311,19 @@ func (m Model) updateConfirm(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 				}
 				return opDoneMsg{panes: []int{i}, err: errors.New(status), detail: detail}
 			}
-			line := logged("ok", "delete", strings.Join(names, ", "))
+			end := Event{Op: op, Kind: "delete", Outcome: "ok", Detail: strings.Join(names, ", "), Remote: remote}
 			status := fmt.Sprintf("deleted %d item(s)", len(names))
 			if len(gone) > 0 {
-				line += "; already gone: " + strings.Join(gone, ", ")
+				end.Detail += "; already gone: " + strings.Join(gone, ", ")
+				end.More = true
 				status += fmt.Sprintf("; %d already gone", len(gone))
 			}
 			if len(names) == 0 {
-				line = logged("already gone", "delete", strings.Join(gone, ", "))
+				end.Outcome, end.Detail = "already gone", strings.Join(gone, ", ")
 				status = fmt.Sprintf("nothing deleted: %s already gone", plural(len(gone), "it was", fmt.Sprintf("all %d were", len(gone))))
 			}
 			if on != nil {
-				on("delete", line, remote)
+				on(end)
 			}
 			detail := []string{fmt.Sprintf("Deleted on %s (%d item(s)):", fsys.Label(), len(names))}
 			for _, p := range names {
@@ -1479,8 +1548,10 @@ func (m Model) transferSummary(plan Plan) string {
 }
 
 // logStart tells OnEvent a copy is starting, before a byte is written: if
-// the session dies part way, the log still shows what was under way.
-func (m Model) logStart(plan Plan, replace bool) {
+// the session dies part way, the log still shows what was under way. It
+// opens the copy's operation, which its end closes.
+func (m *Model) logStart(plan Plan, replace bool) {
+	m.copyOp = newOp()
 	kind, remote := m.transferKind(plan)
 	d := fmt.Sprintf("%s (%d file(s), %s", m.transferSummary(plan), len(plan.Files), HumanBytes(plan.TotalBytes))
 	if n := plan.Conflicts(); n > 0 {
@@ -1500,7 +1571,7 @@ func (m Model) logStart(plan Plan, replace bool) {
 			d += fmt.Sprintf(", keeping %d existing", n)
 		}
 	}
-	m.emit(kind, logged("started", kind, d+")"), remote)
+	m.emit(Event{Op: m.copyOp, Kind: kind, Outcome: "started", Detail: d + ")", Remote: remote})
 }
 
 // report tells OnEvent what a copy did, finished or not, and returns what
@@ -1533,7 +1604,9 @@ func (m Model) reportAs(outcome string, plan Plan, res Result, err error) string
 			d += ": " + err.Error()
 		}
 	}
-	d = logged(outcome, kind, d)
+	if err != nil && len(res.Files) > 0 {
+		d += "; copied before it stopped: " + capList(res.Files, logCap)
+	}
 	if res.Replaced > 0 {
 		d += fmt.Sprintf("; replaced %d existing: %s", res.Replaced, capList(res.ReplacedPaths, logCap))
 	}
@@ -1549,14 +1622,42 @@ func (m Model) reportAs(outcome string, plan Plan, res Result, err error) string
 	if w := warningsText(res.Warnings); w != "" {
 		d += "; " + w
 	}
+	if len(res.Leftovers) > 0 {
+		d += "; unfinished temporary files left: " + capList(res.Leftovers, logCap)
+	}
 	switch {
 	case errors.As(err, &partial):
 		d += "; stopped: " + partial.Error()
 	case errors.Is(err, context.Canceled):
-		d += "; cancelled, the unfinished file discarded"
+		d += "; " + stopNote(err)
 	}
-	m.emit(kind, d, remote)
-	return d
+	more := err != nil || res.Skipped > 0 || len(res.InPlace) > 0 || len(res.Lost) > 0 || len(res.Warnings) > 0 || len(res.Leftovers) > 0
+	m.emit(Event{Op: m.copyOp, Kind: kind, Outcome: outcome, Detail: d, More: more, Remote: remote})
+	return outcome + ": " + kind + " " + d
+}
+
+// stopNote says what a cancel left of the file it stopped in: unchanged,
+// not created, or partly written, and any temporary file left behind.
+func stopNote(err error) string {
+	var u *Unchanged
+	var partial *PartialWrite
+	switch {
+	case errors.As(err, &partial):
+		return "cancelled: " + partial.Where + " may be partly written"
+	case errors.As(err, &u):
+		s := "cancelled: " + u.Where + " unchanged, the unfinished copy discarded"
+		if u.New {
+			s = "cancelled: " + u.Where + " not created, the unfinished copy discarded"
+		}
+		if u.Leftover != "" {
+			s = "cancelled: " + u.Where + " unchanged; the unfinished copy is still at " + u.Leftover + " (" + u.LeftoverErr.Error() + ")"
+			if u.New {
+				s = "cancelled: " + u.Where + " not created; couldn't remove the unfinished new file " + u.Leftover + " (" + u.LeftoverErr.Error() + ")"
+			}
+		}
+		return s
+	}
+	return "cancelled between files: none was being written"
 }
 
 // warningsText sums up what went wrong without stopping a copy: the first

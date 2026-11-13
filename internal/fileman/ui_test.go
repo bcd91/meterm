@@ -34,7 +34,10 @@ func newHarness(t *testing.T, left, right string) *harness {
 	h := &harness{t: t, clock: time.Now()}
 	remote := newRemote(t)
 	model := New(Options{Left: Local{}, Right: remote, LeftDir: left, RightDir: right,
-		OnEvent: func(kind, detail string, isRemote bool) { h.events = append(h.events, event{kind, detail, isRemote}) }})
+		OnEvent: func(e Event) {
+			kind, detail, isRemote := e.Kind, e.Line(), e.Remote
+			h.events = append(h.events, event{kind, detail, isRemote})
+		}})
 	model.now = func() time.Time { return h.clock }
 	h.m = model
 	h.run(model.Init())
@@ -394,7 +397,10 @@ func startGatedOverwrite(t *testing.T) (m Model, gate chan struct{}, right strin
 	gate = make(chan struct{})
 	events = &[]event{}
 	m = New(Options{Left: gatedFS{open: gate}, Right: newRemote(t), LeftDir: left, RightDir: right,
-		OnEvent: func(kind, detail string, remote bool) { *events = append(*events, event{kind, detail, remote}) }})
+		OnEvent: func(e Event) {
+			kind, detail, remote := e.Kind, e.Line(), e.Remote
+			*events = append(*events, event{kind, detail, remote})
+		}})
 	clock := time.Now()
 	m.now = func() time.Time { return clock }
 	for i := 0; i < 2; i++ {
@@ -584,7 +590,10 @@ func TestDeleteCanBeCancelled(t *testing.T) {
 	var removed []string
 	var events []event
 	m := New(Options{Left: blockingFS{open: gate, removed: &removed}, Right: Local{}, LeftDir: left, RightDir: right,
-		OnEvent: func(kind, detail string, remote bool) { events = append(events, event{kind, detail, remote}) }})
+		OnEvent: func(e Event) {
+			kind, detail, remote := e.Kind, e.Line(), e.Remote
+			events = append(events, event{kind, detail, remote})
+		}})
 	clock := time.Unix(1000, 0)
 	m.now = func() time.Time { return clock }
 	for i := 0; i < 2; i++ {
@@ -667,7 +676,10 @@ func (f failFS) Open(p string) (io.ReadCloser, error) {
 func newFailHarness(t *testing.T, left, right, bad string) *harness {
 	h := &harness{t: t, clock: time.Now()}
 	model := New(Options{Left: failFS{bad: bad}, Right: Local{}, LeftDir: left, RightDir: right,
-		OnEvent: func(kind, detail string, isRemote bool) { h.events = append(h.events, event{kind, detail, isRemote}) }})
+		OnEvent: func(e Event) {
+			kind, detail, isRemote := e.Kind, e.Line(), e.Remote
+			h.events = append(h.events, event{kind, detail, isRemote})
+		}})
 	model.now = func() time.Time { return h.clock }
 	h.m = model
 	h.run(model.Init())
@@ -1011,7 +1023,10 @@ func TestPermissionWarningIsShownAndLogged(t *testing.T) {
 	write(t, filepath.Join(left, "a.txt"), "a", 0o644)
 	h := &harness{t: t, clock: time.Now()}
 	model := New(Options{Left: Local{}, Right: chmodFailFS{}, LeftDir: left, RightDir: right,
-		OnEvent: func(kind, detail string, isRemote bool) { h.events = append(h.events, event{kind, detail, isRemote}) }})
+		OnEvent: func(e Event) {
+			kind, detail, isRemote := e.Kind, e.Line(), e.Remote
+			h.events = append(h.events, event{kind, detail, isRemote})
+		}})
 	model.now = func() time.Time { return h.clock }
 	h.m = model
 	h.run(model.Init())

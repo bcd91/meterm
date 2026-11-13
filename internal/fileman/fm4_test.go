@@ -296,7 +296,9 @@ func TestLogLeadsWithTheOutcome(t *testing.T) {
 	h.keys("b.txt", "enter")
 	h.keys("m", "d1", "enter")
 	h.keys("G", "d", "y")
-	for i, w := range []string{"ok: rename " + filepath.Join(right, "a.txt") + " -> " + filepath.Join(right, "b.txt"),
+	for i, w := range []string{"started: rename " + filepath.Join(right, "a.txt") + " -> " + filepath.Join(right, "b.txt"),
+		"ok: rename " + filepath.Join(right, "a.txt") + " -> " + filepath.Join(right, "b.txt"),
+		"started: mkdir " + filepath.Join(right, "d1"),
 		"ok: mkdir " + filepath.Join(right, "d1"),
 		"started: delete " + filepath.Join(right, "b.txt"),
 		"ok: delete " + filepath.Join(right, "b.txt")} {

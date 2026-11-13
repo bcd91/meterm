@@ -3,15 +3,18 @@ package main
 import (
 	"errors"
 	"fmt"
-	"meterm/internal/prodask"
 	"os"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/pkg/sftp"
 	"github.com/spf13/cobra"
 
+	"meterm/internal/activity"
 	"meterm/internal/config"
 	"meterm/internal/fileman"
+	"meterm/internal/prodask"
 	"meterm/internal/sshrun"
 )
 
@@ -150,15 +153,9 @@ func newFilesCmd() *cobra.Command {
 				Left: fileman.Local{}, Right: remote, LeftDir: ldir, RightDir: rdir,
 				// Killing ssh closes the pipe, which ends every SFTP call
 				// still waiting on a host that has stopped answering.
-				Abort: func() { _ = c.Process.Kill() },
-				Env:   cfg.Env(host),
-				// detail is the whole line, how it went first: "failed:
-				// upload a.txt -> /srv: …".
-				OnEvent: func(kind, detail string, onHost bool) {
-					if onHost {
-						recordActivity(cfg, host, "sftp", detail)
-					}
-				},
+				Abort:   func() { _ = c.Process.Kill() },
+				Env:     cfg.Env(host),
+				OnEvent: fileEventLogger(cfg, host, note),
 			})
 			run.end(err)
 			// A full-screen app needs no "press enter" pause when it ends
@@ -171,6 +168,60 @@ func newFilesCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&shell, "shell", false, "open the plain sftp prompt instead of the two-pane manager")
 	cmd.Flags().BoolVarP(&yes, "yes", "y", false, "don't ask before opening a production host")
 	return cmd
+}
+
+// fileEventLogger is the file manager's OnEvent for a session on host:
+// each copy, delete, rename and mkdir there is a start, logged before it
+// touches anything (with note, the production note, as cp has it), and an
+// outcome pointing back at it, as connect, exec and cp are. An answer given
+// part way is an event of its own. What only the end knows (a file written
+// in place, an error, what was done before a stop) can't go in an outcome,
+// whose note is a word from this code, so it's logged in words first, as
+// the file manager has always said it. Events on this machine aren't logged.
+func fileEventLogger(cfg *config.Config, host config.Host, note string) func(fileman.Event) {
+	var mu sync.Mutex // the file manager calls from more than one goroutine
+	runs := map[int64]*activityRun{}
+	return func(e fileman.Event) {
+		if !e.Remote {
+			return
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		switch {
+		case e.Outcome == "started":
+			runs[e.Op] = beginActivity(cfg, host, "sftp", noteDetail(note, e.Kind+" "+e.Detail))
+		case !e.Ends():
+			recordActivity(cfg, host, "sftp", e.Line())
+		default:
+			run := runs[e.Op]
+			delete(runs, e.Op)
+			if e.More || run == nil {
+				recordActivity(cfg, host, "sftp", e.Line())
+			}
+			if run != nil {
+				run.outcome(fileOutcome(e.Outcome, time.Since(run.began)))
+			}
+		}
+	}
+}
+
+// fileOutcome is how a file manager operation ended, for the log: exit 0
+// for one that did what was asked (or found it done already), otherwise no
+// exit code and the file manager's word for it.
+func fileOutcome(word string, took time.Duration) activity.Outcome {
+	o := activity.Outcome{Took: took}
+	zero := 0
+	switch word {
+	case "ok":
+		o.ExitCode = &zero
+	case "already gone", "already there":
+		o.ExitCode, o.Note = &zero, word
+	case "failed", "partial", "cancelled", "stopped", "aborted":
+		o.Note = word
+	default:
+		o.Note = "ended" // a word this code doesn't know: not repeated
+	}
+	return o
 }
 
 // filesProductionOK asks before the file manager opens on a production

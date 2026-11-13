@@ -216,7 +216,8 @@ func TestStricterModeIsNeverLoosened(t *testing.T) {
 }
 
 // m on a name that's already a directory says so and logs nothing: it
-// didn't create anything. A mkdir or rename that fails is logged as failed.
+// didn't create anything. A mkdir or rename that fails is logged as
+// started, then failed.
 func TestMkdirAndRenameLogWhatHappened(t *testing.T) {
 	left, right := t.TempDir(), t.TempDir()
 	os.Mkdir(filepath.Join(right, "deep"), 0o755)
@@ -232,8 +233,8 @@ func TestMkdirAndRenameLogWhatHappened(t *testing.T) {
 	}
 
 	h.keys("esc", "m", "a.txt", "enter") // a file has the name
-	if !h.model().statusErr || len(h.events) != 1 || h.events[0].kind != "mkdir" || !strings.Contains(h.events[0].detail, "failed") ||
-		!strings.Contains(h.events[0].detail, filepath.Join(right, "a.txt")) {
+	if !h.model().statusErr || len(h.events) != 2 || h.events[1].kind != "mkdir" || !strings.HasPrefix(h.events[1].detail, "failed") ||
+		!strings.Contains(h.events[1].detail, filepath.Join(right, "a.txt")) {
 		t.Errorf("status %q, log %q: want a failed mkdir, logged", h.model().status, h.allEvents())
 	}
 
@@ -241,8 +242,8 @@ func TestMkdirAndRenameLogWhatHappened(t *testing.T) {
 	h.keys("esc", "g", "j", "R") // the cursor on a.txt
 	h.send(tea.KeyMsg{Type: tea.KeyCtrlU})
 	h.keys("b.txt", "enter")
-	if len(h.events) != 1 || h.events[0].kind != "rename" || !strings.Contains(h.events[0].detail, "failed") ||
-		!strings.Contains(h.events[0].detail, filepath.Join(right, "a.txt")+" -> "+filepath.Join(right, "b.txt")) {
+	if len(h.events) != 2 || h.events[1].kind != "rename" || !strings.HasPrefix(h.events[1].detail, "failed") ||
+		!strings.Contains(h.events[1].detail, filepath.Join(right, "a.txt")+" -> "+filepath.Join(right, "b.txt")) {
 		t.Errorf("log %q: want the refused rename, logged as failed", h.allEvents())
 	}
 }
@@ -260,7 +261,8 @@ func TestAbortedDeleteIsLogged(t *testing.T) {
 	aborted := false
 	m := New(Options{Left: Local{}, Right: blockingFS{open: gate, removed: &[]string{}}, LeftDir: left, RightDir: right,
 		Abort: func() { aborted = true },
-		OnEvent: func(kind, detail string, remote bool) {
+		OnEvent: func(e Event) {
+			kind, detail, remote := e.Kind, e.Line(), e.Remote
 			mu.Lock()
 			defer mu.Unlock()
 			events = append(events, event{kind, detail, remote})

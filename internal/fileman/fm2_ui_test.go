@@ -20,7 +20,10 @@ import (
 func newHarnessWith(t *testing.T, left, right string, set func(*Options)) *harness {
 	h := &harness{t: t, clock: time.Now()}
 	o := Options{Left: Local{}, Right: newRemote(t), LeftDir: left, RightDir: right,
-		OnEvent: func(kind, detail string, isRemote bool) { h.events = append(h.events, event{kind, detail, isRemote}) }}
+		OnEvent: func(e Event) {
+			kind, detail, isRemote := e.Kind, e.Line(), e.Remote
+			h.events = append(h.events, event{kind, detail, isRemote})
+		}}
 	if set != nil {
 		set(&o)
 	}
@@ -442,7 +445,10 @@ func startInPlace(t *testing.T) (Model, chan struct{}, *[]event) {
 	gate := make(chan struct{})
 	events := &[]event{}
 	m := New(Options{Left: gatedFS{open: gate}, Right: newRemote(t), LeftDir: left, RightDir: ro,
-		OnEvent: func(kind, detail string, remote bool) { *events = append(*events, event{kind, detail, remote}) }})
+		OnEvent: func(e Event) {
+			kind, detail, remote := e.Kind, e.Line(), e.Remote
+			*events = append(*events, event{kind, detail, remote})
+		}})
 	clock := time.Now()
 	m.now = func() time.Time { return clock }
 	for i := 0; i < 2; i++ {
