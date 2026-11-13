@@ -181,7 +181,9 @@ func newActivityCmd() *cobra.Command {
 			"written). On a narrow terminal ACTOR, USER, HOST and ACTION are cut to fit\n" +
 			"the row, ACTOR to its kind (agent). A cut detail writes\n" +
 			"its production note short: ⚑asked (asked here), ⚑picker (asked in the picker),\n" +
-			"⚑--yes, ⚑no prompt (stdin wasn't a terminal), ⚑ (production, nothing asked).\n" +
+			"⚑--yes, ⚑no prompt (stdin wasn't a terminal), ⚑named (named on the command\n" +
+			"line), ⚑not asked (the picker started it without asking); ⚑via … behind a\n" +
+			"production jump host, ⚑tunnel … for a tunnel that leads there.\n" +
 			"A TARGET column (user@address) is added from 140 columns. --full wraps the\n" +
 			"detail instead, note as written, and always has TARGET. Piped or redirected,\n" +
 			"nothing is cut. --host takes a name as meterm shows it.",

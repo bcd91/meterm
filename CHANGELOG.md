@@ -26,7 +26,8 @@ map now, so some keys moved. `?` in the picker lists the picker's first.
   address, group, tags, last connected), dropping the least useful columns
   first on a narrow one; the selected host's details on the line under it.
   `s` cycles the order: recent, name, group, env. Under 40×10 it says the
-  terminal is too small, and a question open at that moment is cancelled.
+  terminal is too small, and any key pressed then (`y` included) cancels a
+  question that was open.
 - Health checks follow the routes `connect` tries, where v0.23.1 dialled
   the saved address and port and didn't check a host behind a jump host at
   all: each of a host's routes in the order connect tries them (the one
@@ -52,7 +53,8 @@ map now, so some keys moved. `?` in the picker lists the picker's first.
 - A name with hidden characters (`zw\u200bsp`) is spelled out and quoted in
   its row, so it can't pass for the plain one, and the line under the table
   says so. A name that mixes Latin, Cyrillic or Greek letters is flagged
-  there too. `x`, `R` and `L` put such a name in the palette as a reference,
+  there too. `x`, `R` and `L` put a name with hidden characters, spaces or
+  quotes in the palette as a reference,
   `‹zw\u200bsp›`, that stands for exactly that host. Quotes you type in the
   palette are taken as typed, as in v0.23.1.
 - A host whose group no longer exists says so under the table.
@@ -67,13 +69,14 @@ v0.23.1 asked about nothing but deleting a host in the picker.
 - The picker asks before anything that runs on a production host, or on a
   host reached through one (a production jump host): connect, a login,
   exec, a tunnel, logs, files, audit and the rest. A tunnel whose name or
-  note says it leads to production asks too. Only `y` goes ahead, and only
-  once the question has been up 150ms; `enter` cancels, like any other key.
+  note says it leads to production asks too. Only `y` (or `Y`) goes ahead,
+  and only once the question has been up 150ms; a key typed sooner is
+  ignored, and after that `enter` cancels, like any other key.
   The question shows the command it would run.
 - On the command line, `exec --all`/`--tag`/`--group` asks about the
   production hosts it swept in (hosts named outright aren't asked about
   again), and so do `cp --sync … --delete` and `tunnel enable` on
-  production. Only `y` goes ahead; `--yes` goes ahead without asking and
+  production. Only `y` (or `Y`) goes ahead; `--yes` goes ahead without asking and
   warns. With stdin not a terminal `exec` and `cp` warn on stderr and go
   on; `tunnel enable`, which leaves a tunnel open from every login, refuses
   without `--yes`, as `group rm` does. `tunnel enable` on a host that isn't
@@ -92,7 +95,8 @@ v0.23.1 asked about nothing but deleting a host in the picker.
 
 ### Evidence and activity
 
-- Every start on a production host says how it went ahead, first in its
+- Every connect, exec, cp, files, sftp, logs, dev and tunnel start on a
+  production host says how it went ahead, first in its
   detail: `(production, asked)`, `(production, picker asked)`,
   `(production, --yes)`, `(production, no prompt: not a terminal)`,
   `(production, named on the command line)` or `(production, picker didn't
@@ -130,8 +134,8 @@ v0.23.1 asked about nothing but deleting a host in the picker.
   characters; a name two hosts show as is an error naming both.
 - `add`, `edit`, `rename` and `import`, like hosts from a team, refuse
   control and invisible characters (zero-width, bidi, soft hyphen, BOM) in
-  names, notes and tags. `add`, `edit`, `rename`, `group add`, `tunnel add`
-  and team hosts refuse a name that mixes Latin, Cyrillic or Greek letters
+  names, notes and tags. `add`, `edit`, `rename`, `group add`, `tunnel add`,
+  `import` and team hosts refuse a name that mixes Latin, Cyrillic or Greek letters
   (`pаy1` with a Cyrillic `а`); one already saved still works.
 - `add` and `edit` refuse an address, user or jump that ssh would read as an
   option or split (`--address=-oProxyCommand=…`), and an identity file
@@ -140,16 +144,19 @@ v0.23.1 asked about nothing but deleting a host in the picker.
   Thai and emoji names, and shows `pay (no such group)` (`group_missing` in
   JSON) for a host whose group was removed. JSON output spells C1 and bidi
   controls and invisible characters as `\u` escapes.
-- Commands start at once on a terminal that doesn't answer a colour query;
-  they waited 5 seconds.
+- Commands other than the picker start at once on a terminal that doesn't
+  answer a colour query; they waited 5 seconds. The picker itself still
+  waits up to 5 seconds there unless `$COLORFGBG` is set.
 - Team commands run quickly one after another no longer collide with the
   background sync on the team's clone ("cannot lock ref", "index.lock: File
   exists"): git work on a clone is one at a time, and a command that can't
   get it within 10s says "team sync busy … retry" (not "you are not in a
   team called …"), and `team list` shows that team as "(busy, try again)"
   and exits non-zero rather than leaving it out. A git lock file left in the
-  clone by a git that was stopped is removed once it's 30s old, saying so;
-  a newer one may be a live git meterm didn't start, and is left.
+  clone is taken for a stopped git's once it's 30s old (by its time) and
+  removed, saying so; a newer one may be a live git meterm didn't start, and
+  is left. A git of your own in that clone that holds a lock longer (a
+  `git commit` waiting in its editor) would lose it.
 
 ### File manager
 
@@ -167,16 +174,18 @@ v0.23.1 an overwrite truncated the target and wrote into it.
   opened it before its mode was set and read the new contents. A directory
   that can't be made private, where a new file would start more open than
   the copy, counts as a temporary file that can't be made (asked about or
-  stopped, below). A new file never replaces one that appeared since
-  the copy was worked out. On a server without `posix-rename` the old file
+  stopped, below). A new file doesn't replace one that appeared since the
+  copy was worked out: refused in one step on Linux and by OpenSSH's
+  server, elsewhere checked just before the rename. On a server without `posix-rename` the old file
   is moved aside, the new one moved in, and only then the old one removed;
   if that fails part way, one of the two is always left and the message
   says where. The temporary name cuts the file's name to 64 bytes, so a
   long name (a 78-character Thai one is 234 bytes) can still be
   overwritten, on eCryptfs's 143-byte limit too.
-- **No room is not a reason to truncate.** If the temporary file can't be
-  made for want of space, inodes or quota, the copy stops with the target
-  as it was. If only the rename fails (a bind-mounted file, such as a
+- **No room is not a reason to truncate.** On this machine, if the
+  temporary file can't be made for want of space, inodes or quota, the copy
+  stops with the target as it was; on a host, where SFTP says only
+  "failure", it asks first (below). If only the rename fails (a bind-mounted file, such as a
   container's `/etc/hosts`), the target is untouched and is written in
   place, as v0.23.1 did, and the copy says "couldn't replace … in one
   step; wrote it in place".
@@ -240,7 +249,8 @@ v0.23.1 an overwrite truncated the target and wrote into it.
   terminal)`.
 - **A host that stops answering** no longer freezes it: the progress line
   says "no data for 12s", `esc` cancels, and `esc` again drops the
-  connection and quits, saying what may be left behind.
+  connection and quits, saying what may be left behind (a copy writing a
+  file in place first lets that file finish, so it takes one `esc` more).
 - **The activity log** has each copy, delete, rename and new directory on
   the host as a start, written before anything is touched and carrying the
   production note, and an `outcome` event pointing back at it (`ref_seq`,
