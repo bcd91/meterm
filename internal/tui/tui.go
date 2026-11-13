@@ -13,8 +13,10 @@ import (
 	"io/fs"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 	"unicode/utf8"
 
@@ -1489,10 +1491,33 @@ func Run(cfgPath, notice string) error {
 	lipgloss.SetHasDarkBackground(darkBackground())
 	m := New(cfgPath, selfPath)
 	m.notice = notice
+	// Made here, not on first use, so it's known here to remove however
+	// the picker ends; and what pickers killed before left is cleared.
+	sweepOutcomeDirs("")
+	if d, err := newOutcomeDir(""); err == nil {
+		m.outcomeDir = d
+		defer os.RemoveAll(d)
+	}
 	p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithReportFocus())
+	// Bubble Tea quits on SIGTERM (and then the deferred removal runs), but
+	// not on SIGHUP, which is what a closed terminal sends: without this it
+	// would kill the picker before anything is removed. SIGKILL can't be
+	// caught; the next picker's sweep clears what that leaves.
+	hup := make(chan os.Signal, 1)
+	signal.Notify(hup, syscall.SIGHUP)
+	defer signal.Stop(hup)
+	ended := make(chan struct{})
+	defer close(ended)
+	go func() {
+		select {
+		case <-hup:
+			p.Kill()
+		case <-ended:
+		}
+	}()
 	final, err := p.Run()
-	if fm, ok := final.(model); ok && fm.outcomeDir != "" {
-		_ = os.RemoveAll(fm.outcomeDir)
+	if fm, ok := final.(model); ok && fm.outcomeDir != "" && fm.outcomeDir != m.outcomeDir {
+		_ = os.RemoveAll(fm.outcomeDir) // made on first use after all
 	}
 	return err
 }

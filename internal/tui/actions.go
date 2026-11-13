@@ -504,7 +504,7 @@ const SessionOutcomeEnv = "METERM_SESSION_OUTCOME"
 // a directory of the picker's own, made on first use; "" when it can't be.
 func (m *model) outcomeFile() string {
 	if m.outcomeDir == "" {
-		d, err := os.MkdirTemp("", "meterm-tui-")
+		d, err := newOutcomeDir("")
 		if err != nil {
 			return ""
 		}

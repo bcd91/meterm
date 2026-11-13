@@ -52,8 +52,8 @@ map now, so some keys moved. `?` in the picker lists the picker's first.
   `meterm list`.
 - A name with hidden characters (`zw\u200bsp`) is spelled out and quoted in
   its row, so it can't pass for the plain one, and the line under the table
-  says so. A name that mixes Latin, Cyrillic or Greek letters is flagged
-  there too. `x`, `R` and `L` put a name with hidden characters, spaces or
+  says so. A name with a word that mixes Latin, Cyrillic or Greek letters
+  is flagged there too. `x`, `R` and `L` put a name with hidden characters, spaces or
   quotes in the palette as a reference,
   `‹zw\u200bsp›`, that stands for exactly that host. Quotes you type in the
   palette are taken as typed, as in v0.23.1.
@@ -61,6 +61,11 @@ map now, so some keys moved. `?` in the picker lists the picker's first.
 - Deleting a jump host lists the hosts that go through it.
 - `?` lists the keys that moved first, every key, the marks, and the last
   message in full.
+- The picker's private temporary directory (`meterm-tui-<pid>-…`) is
+  removed when its terminal closes (SIGHUP) or it's sent SIGTERM, not only
+  when it quits. One left by a picker that was killed outright is removed
+  by the next picker, once that PID isn't running and the directory holds
+  only what a picker puts there (not on Windows).
 
 ### Safety prompts
 
