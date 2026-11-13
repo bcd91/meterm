@@ -106,7 +106,7 @@ func runCopy(src, dst string, recursive, sync bool, rsyncFlags []string, yes boo
 	}
 	noteFor, ok := productionNotes(cfg, []config.Host{*host}, named, what, yes)
 	if !ok {
-		return nil
+		return cancelled("nothing copied")
 	}
 	note := noteFor(*host)
 	// A start before it runs, so a crash or a kill still leaves evidence it

@@ -92,6 +92,14 @@ v0.23.1 asked about nothing but deleting a host in the picker.
   group that made them production, say), listing the hosts and the change;
   `--yes` skips the question, and without a terminal it refuses, naming
   the hosts and the change. Before, it took production away silently.
+- **Answering no exits 1.** Every question answered anything but yes ends
+  the command with `meterm: cancelled: …` on stderr (`web1 not removed`,
+  `nothing ran`, `tunnel not enabled`) and exit status 1: `rm` (which
+  exited 0 in v0.23.1), `group rm`, `exec` and `cp` on production,
+  `tunnel enable`, `files`, `keys revoke`, `team push`, `team approve`,
+  `team remove`, and the relay commands. A script that relied on exit 0
+  after "no" must check for 1. From the picker, it shows as cancelled, not
+  failed.
 
 ### Evidence and activity
 

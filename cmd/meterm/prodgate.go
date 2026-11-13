@@ -124,8 +124,7 @@ func gateWith(p pickerAnswerT, prod []config.Host, what string, yes bool) (strin
 	fmt.Print("Go on? Only y goes. [y/N] ")
 	resp, _ := bufio.NewReader(os.Stdin).ReadString('\n')
 	if strings.TrimSpace(resp) != "y" && strings.TrimSpace(resp) != "Y" {
-		fmt.Println("Cancelled.")
-		return "", false
+		return "", false // the caller returns errCancelled, which says so
 	}
 	return prodAsked, true
 }

@@ -63,7 +63,11 @@ func main() {
 }
 
 // errCancelled is a command the person said n to: not done, but not failed.
+// It still exits 1, with "meterm: cancelled: …" on stderr.
 var errCancelled = errors.New("cancelled")
+
+// cancelled is errCancelled saying what didn't happen: "nothing removed".
+func cancelled(what string) error { return fmt.Errorf("%w: %s", errCancelled, what) }
 
 // tellPicker says to the picker that started this command, through the file
 // it named (tui.SessionOutcomeEnv), how it ended when that wasn't a failure

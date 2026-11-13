@@ -71,8 +71,7 @@ func newRelayInitCmd() *cobra.Command {
 			fmt.Println("  - check the config with `sshd -t` (putting the old one back if it fails), then restart sshd")
 			fmt.Println("Open SSH sessions stay up across the restart.")
 			if !yes && !confirm("Go ahead?") {
-				fmt.Println("Nothing changed.")
-				return nil
+				return cancelled("nothing changed")
 			}
 			out, err := runAsRoot(cfg, *h, relay.InitScript())
 			if err := scriptResult(h.Name, out, err); err != nil {
@@ -158,8 +157,7 @@ func newRelayEnrollCmd() *cobra.Command {
 			fmt.Printf("On %s (as root): allow that key to listen on localhost:%d, nothing else.\n", lbl(rh.Name), port)
 			fmt.Printf("Here: route %q on %s (127.0.0.1:%d via %s).\n", routeName, lbl(node.Name), port, lbl(rh.Name))
 			if !yes && !confirm("Go ahead?") {
-				fmt.Println("Nothing changed.")
-				return nil
+				return cancelled("nothing changed")
 			}
 
 			fmt.Printf("\n[1/3] %s\n", lbl(node.Name))
@@ -302,8 +300,7 @@ func newRelayRemoveCmd() *cobra.Command {
 			}
 			fmt.Printf("Stop and remove %s's tunnel through %s (%s).\n", lbl(node.Name), relayName, routeName)
 			if !yes && !confirm("Go ahead?") {
-				fmt.Println("Nothing changed.")
-				return nil
+				return cancelled("nothing changed")
 			}
 			var problems []string
 			out, err := runAsRoot(cfg, *node, relay.NodeRemoveScript(relayName))

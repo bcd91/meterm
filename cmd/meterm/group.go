@@ -172,8 +172,7 @@ func newGroupRmCmd() *cobra.Command {
 				fmt.Print("Remove it? Only y goes. [y/N] ")
 				resp, _ := bufio.NewReader(os.Stdin).ReadString('\n')
 				if r := strings.TrimSpace(resp); r != "y" && r != "Y" {
-					fmt.Println("Cancelled.")
-					return nil
+					return cancelled("group " + exactName(name) + " not removed")
 				}
 			}
 			err = cfg.Update(func(c *config.Config) error {

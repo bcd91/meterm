@@ -107,7 +107,7 @@ func newTunnelEnableCmd() *cobra.Command {
 			}
 			note, ok := tunnelGate(cfg, sets[0].host, f, what+")", yes)
 			if !ok {
-				return nil
+				return cancelled("tunnel not enabled")
 			}
 
 			exe, err := svc.binary()

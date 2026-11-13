@@ -373,8 +373,7 @@ func teamRemoveCmd(teamFlag *string) *cobra.Command {
 				fmt.Print(what + " [y/N] ")
 				resp, _ := bufio.NewReader(os.Stdin).ReadString('\n')
 				if r := strings.ToLower(strings.TrimSpace(resp)); r != "y" && r != "yes" {
-					fmt.Println("Nothing changed.")
-					return nil
+					return cancelled("nothing changed")
 				}
 			}
 			if err := tc.be.RemoveMember(cmd.Context(), t.ID, target.UID); err != nil {

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"strings"
 	"testing"
 
@@ -60,7 +61,7 @@ func TestGroupRmAsksBeforeTakingProductionAway(t *testing.T) {
 
 	asTerminal(t, true)
 	o, _, err := groupCmd(t, "n\n", "rm", "pay")
-	if err != nil || !strings.Contains(o, "pay1") || !strings.Contains(o, "production → none") || strings.Contains(o, "pay2:") || !groupExists(t, "pay") {
+	if !errors.Is(err, errCancelled) || !strings.Contains(o, "pay1") || !strings.Contains(o, "production → none") || strings.Contains(o, "pay2:") || !groupExists(t, "pay") {
 		t.Errorf("answered n: %q %v, group still there: %v", o, err, groupExists(t, "pay"))
 	}
 	asTerminal(t, false)

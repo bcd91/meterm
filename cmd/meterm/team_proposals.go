@@ -143,8 +143,7 @@ func teamApproveCmd(teamFlag *string) *cobra.Command {
 				}
 				ans, _ := promptLine(fmt.Sprintf("Apply this to %q for everyone? [y/N] ", t.Name))
 				if strings.ToLower(ans) != "y" {
-					fmt.Println("Nothing changed; the proposal is still waiting.")
-					return nil
+					return cancelled("nothing changed; the proposal is still waiting")
 				}
 			}
 			if _, err := team.Approve(ctx, tc.be, tc.be, t.ID, t.Role, args[0]); err != nil {

@@ -241,8 +241,7 @@ func newRelayAcceptCmd() *cobra.Command {
 			fmt.Println("  ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub")
 			fmt.Println("If it doesn't match, the reply was changed on the way: don't accept it.")
 			if !yes && !confirm("Fingerprint checked; accept?") {
-				fmt.Println("Nothing changed.")
-				return nil
+				return cancelled("nothing changed")
 			}
 
 			add, err := relay.AddKeyScript(reply.TunnelKey, name, inv.Port)

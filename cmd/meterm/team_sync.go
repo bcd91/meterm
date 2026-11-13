@@ -184,8 +184,7 @@ func runTeamSync(ctx context.Context, tc *teamCtx, t team.Team, cfg *config.Conf
 				}
 				ans, _ := promptLine("Push these changes? [y/N] ")
 				if strings.ToLower(ans) != "y" {
-					fmt.Println("Nothing pushed.")
-					return nil
+					return cancelled("nothing pushed")
 				}
 			}
 		}

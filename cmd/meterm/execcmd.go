@@ -92,7 +92,7 @@ func newExecCmd() *cobra.Command {
 			}
 			noteFor, ok := productionNotes(cfg, hosts, named, "exec "+commandDetail(command, false), yes)
 			if !ok {
-				return nil
+				return cancelled("nothing ran")
 			}
 			detail := commandDetail(command, logArgs)
 			// A start per host before it runs, so a crash or a kill still leaves

@@ -188,8 +188,7 @@ func newRmCmd() *cobra.Command {
 				fmt.Printf("Remove host %q? [y/N] ", lbl(name))
 				resp, _ := bufio.NewReader(os.Stdin).ReadString('\n')
 				if strings.ToLower(strings.TrimSpace(resp)) != "y" {
-					fmt.Println("Cancelled.")
-					return nil
+					return cancelled(exactName(name) + " not removed")
 				}
 			}
 			var removed config.Host

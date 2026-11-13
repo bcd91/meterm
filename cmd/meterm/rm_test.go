@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"io"
 	"os"
 	"strings"
@@ -57,9 +58,10 @@ func TestRmSaysProduction(t *testing.T) {
 		return c.Execute()
 	}
 	var out string
-	withStdin(t, "n\n", func() { out = stdout(t, func() { _ = rm("pay1") }) })
-	if !strings.Contains(out, "PRODUCTION") || !strings.Contains(out, "Cancelled") {
-		t.Errorf("prompt for a production host: %q", out)
+	var err error
+	withStdin(t, "n\n", func() { out = stdout(t, func() { err = rm("pay1") }) })
+	if !strings.Contains(out, "PRODUCTION") || !errors.Is(err, errCancelled) {
+		t.Errorf("prompt for a production host: %q, %v", out, err)
 	}
 	errOut := stderrOf(t, func() { _ = rm("pay1", "--yes") })
 	if !strings.Contains(errOut, "PRODUCTION") {
@@ -109,8 +111,9 @@ func TestRmNamesHostsThatJumpThroughIt(t *testing.T) {
 		return c.Execute()
 	}
 	var out string
-	withStdin(t, "n\n", func() { out = stdout(t, func() { _ = rm("bastion") }) })
-	if !strings.Contains(out, "web11") || !strings.Contains(out, "jump") || !strings.Contains(out, "Cancelled") {
+	var err error
+	withStdin(t, "n\n", func() { out = stdout(t, func() { err = rm("bastion") }) })
+	if !strings.Contains(out, "web11") || !strings.Contains(out, "jump") || !errors.Is(err, errCancelled) {
 		t.Errorf("rm bastion: %q", out)
 	}
 	errOut := stderrOf(t, func() { _ = stdout(t, func() { _ = rm("bastion", "--yes") }) })

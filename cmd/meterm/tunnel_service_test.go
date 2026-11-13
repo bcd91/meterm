@@ -195,6 +195,7 @@ func TestTunnelEnableAsksOnProduction(t *testing.T) {
 		t.Fatal(err)
 	}
 	asTerminal(t, true)
+	var lastErr error
 	enable := func(stdin string, args ...string) string {
 		var o string
 		withStdin(t, stdin, func() {
@@ -202,14 +203,14 @@ func TestTunnelEnableAsksOnProduction(t *testing.T) {
 				_ = stderrOf(t, func() {
 					c := newTunnelEnableCmd()
 					c.SetArgs(args)
-					_ = c.Execute()
+					lastErr = c.Execute()
 				})
 			})
 		})
 		return o
 	}
-	if o := enable("n\n", "pay1/ui"); !strings.Contains(o, "PRODUCTION") || !strings.Contains(o, "Cancelled") || len(*calls) != 0 {
-		t.Errorf("answered n: %q, systemctl %q", o, *calls)
+	if o := enable("n\n", "pay1/ui"); !strings.Contains(o, "PRODUCTION") || !errors.Is(lastErr, errCancelled) || len(*calls) != 0 {
+		t.Errorf("answered n: %q, %v, systemctl %q", o, lastErr, *calls)
 	}
 	if enable("y\n", "pay1/ui"); len(*calls) != 2 {
 		t.Errorf("answered y: systemctl %q", *calls)

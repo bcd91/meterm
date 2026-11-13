@@ -214,6 +214,7 @@ func TestExecAsksBeforeProductionItSweepsIn(t *testing.T) {
 	t.Setenv("METERM_TEST_SSH_LOG", sshLog)
 	saveHosts(t, config.Host{Name: "pay1", Address: "192.0.2.50", Env: config.EnvProduction, Tags: []string{"web"}},
 		config.Host{Name: "web1", Address: "192.0.2.51", Tags: []string{"web"}})
+	var lastErr error
 	execute := func(stdin string, args ...string) (string, string) {
 		var o, e string
 		withStdin(t, stdin, func() {
@@ -221,7 +222,7 @@ func TestExecAsksBeforeProductionItSweepsIn(t *testing.T) {
 				e = stderrOf(t, func() {
 					c := newExecCmd()
 					c.SetArgs(args)
-					_ = c.Execute()
+					lastErr = c.Execute()
 				})
 			})
 		})
@@ -231,11 +232,11 @@ func TestExecAsksBeforeProductionItSweepsIn(t *testing.T) {
 
 	asTerminal(t, true)
 	o, _ := execute("n\n", "--tag", "web", "--", "uptime")
-	if !strings.Contains(o, "PRODUCTION") || !strings.Contains(o, "pay1") || !strings.Contains(o, "Cancelled") || ran() != "" {
+	if !strings.Contains(o, "PRODUCTION") || !strings.Contains(o, "pay1") || !errors.Is(lastErr, errCancelled) || ran() != "" {
 		t.Errorf("answered n: %q", o)
 	}
 	o, _ = execute("yes\n", "--tag", "web", "--", "uptime")
-	if !strings.Contains(o, "Cancelled") || ran() != "" {
+	if !errors.Is(lastErr, errCancelled) || ran() != "" {
 		t.Errorf("answered yes (only y goes): %q", o)
 	}
 	_, _ = execute("y\n", "--tag", "web", "--", "uptime")
@@ -278,10 +279,11 @@ func TestSyncDeleteAsksOnProduction(t *testing.T) {
 	ran := func() string { b, _ := os.ReadFile(rsLog); os.Remove(rsLog); return string(b) }
 	asTerminal(t, true)
 	var o string
+	var cerr error
 	withStdin(t, "n\n", func() {
-		o = stdout(t, func() { _ = runCopy(local, "pay1:/srv/", false, true, []string{"-a", "--delete"}, false) })
+		o = stdout(t, func() { cerr = runCopy(local, "pay1:/srv/", false, true, []string{"-a", "--delete"}, false) })
 	})
-	if !strings.Contains(o, "PRODUCTION") || !strings.Contains(o, "Cancelled") || ran() != "" {
+	if !strings.Contains(o, "PRODUCTION") || !errors.Is(cerr, errCancelled) || ran() != "" {
 		t.Errorf("answered n: %q", o)
 	}
 	withStdin(t, "", func() {

@@ -345,8 +345,7 @@ func revokeKeys(cfg *config.Config, hosts []config.Host, m authkeys.Matcher, yes
 		fmt.Printf("\nRemove these %d key line(s) from %d file(s)? [y/N] ", n, len(plan))
 		resp, _ := bufio.NewReader(os.Stdin).ReadString('\n')
 		if r := strings.ToLower(strings.TrimSpace(resp)); r != "y" && r != "yes" {
-			fmt.Println("Nothing changed.")
-			return nil
+			return cancelled("nothing changed")
 		}
 	}
 	failed := 0
