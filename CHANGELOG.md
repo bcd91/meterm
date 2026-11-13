@@ -71,9 +71,11 @@ v0.23.1 asked about nothing but deleting a host in the picker.
   production hosts it swept in (hosts named outright aren't asked about
   again), and so do `cp --sync … --delete` and `tunnel enable` on
   production. Only `y` goes ahead; `--yes` goes ahead without asking and
-  warns. With stdin not a terminal they warn on stderr and go on. `tunnel
-  enable` on a host that isn't production, for a tunnel that leads there,
-  says the tunnel leads to production.
+  warns. With stdin not a terminal `exec` and `cp` warn on stderr and go
+  on; `tunnel enable`, which leaves a tunnel open from every login, refuses
+  without `--yes`, as `group rm` does. `tunnel enable` on a host that isn't
+  production, for a tunnel that leads there, says the tunnel leads to
+  production.
 - The picker's `y` reaches the command it starts as a one-use token: a
   random value in a 0600 file in the picker's private temp directory, which
   the command checks and deletes before anything else runs. An environment
@@ -82,8 +84,8 @@ v0.23.1 asked about nothing but deleting a host in the picker.
   who means it.
 - `meterm group rm` asks when removing the group changes hosts' env (a
   group that made them production, say), listing the hosts and the change;
-  `--yes` skips the question, and without a terminal it refuses. Before, it
-  took production away silently.
+  `--yes` skips the question, and without a terminal it refuses, naming
+  the hosts and the change. Before, it took production away silently.
 
 ### Evidence and activity
 

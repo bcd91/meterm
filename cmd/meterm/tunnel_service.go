@@ -69,7 +69,8 @@ func newTunnelEnableCmd() *cobra.Command {
 			"~/Library/Logs/meterm/<the label this prints>.log on macOS.\n\n" +
 			"A tunnel to a production host, or whose note says it reaches production, asks\n" +
 			"first, and only y goes ahead; --yes goes ahead without asking. When stdin\n" +
-			"isn't a terminal it warns and goes on.",
+			"isn't a terminal there's no one to ask, and since the tunnel stays open it\n" +
+			"refuses without --yes, as `meterm group rm` does.",
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if err := checkServiceSupport(); err != nil {
@@ -98,6 +99,11 @@ func newTunnelEnableCmd() *cobra.Command {
 			what := "tunnel enable " + lbl(spec) + " (open from every login on"
 			if f.Note != "" {
 				what += "; " + lbl(f.Note)
+			}
+			// Persistent, so as group rm: with no one to ask, it takes --yes
+			// (or the picker's answer), rather than warning and going ahead.
+			if !yes && !stdinTerminal() && (cfg.TouchesProduction(sets[0].host) || f.MentionsProduction()) && !pickerAsked().asked {
+				return fmt.Errorf("tunnel enable %s reaches PRODUCTION and would stay open from every login; stdin isn't a terminal to ask: run it in a terminal, or add --yes", lbl(spec))
 			}
 			note, ok := tunnelGate(cfg, sets[0].host, f, what+")", yes)
 			if !ok {

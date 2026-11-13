@@ -548,7 +548,8 @@ restarted, though it shows as failed. The tunnel's start
 is one entry in the activity log, however long that takes, and `enable` and `disable`
 each log a start and how it ended. A tunnel on a production host,
 or whose name or note mentions production, asks before it's enabled (only `y`;
-`--yes` skips it; with stdin not a terminal it warns and goes on).
+`--yes` skips it; with stdin not a terminal there's no one to ask, and since the
+tunnel stays open it refuses without `--yes`, as `meterm group rm` does).
 
 **On macOS** the job is `~/Library/LaunchAgents/com.github.bcd91.meterm.tunnel.<name>-<hash>.plist`,
 loaded with `launchctl bootstrap gui/<uid>`, and its output goes to

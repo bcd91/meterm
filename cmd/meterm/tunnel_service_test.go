@@ -247,7 +247,7 @@ func TestTunnelEnableAndDisableAreLogged(t *testing.T) {
 	run(newTunnelEnableCmd(), "y\n", "pay1/ui")
 	run(newTunnelEnableCmd(), "", "box/web")
 	asTerminal(t, false)
-	run(newTunnelEnableCmd(), "", "pay1/ui")
+	run(newTunnelEnableCmd(), "", "pay1/ui") // refused: no one to ask, no --yes
 	run(newTunnelDisableCmd(), "", "pay1/ui")
 	systemctlUser = func(args ...string) error {
 		*calls = append(*calls, strings.Join(args, " "))
@@ -261,7 +261,6 @@ func TestTunnelEnableAndDisableAreLogged(t *testing.T) {
 	want := []string{
 		"tunnel-enable pay1: (production, asked) ui => exit 0",
 		"tunnel-enable box: web => exit 0",
-		"tunnel-enable pay1: (production, no prompt: not a terminal) ui => exit 0",
 		"tunnel-disable pay1: (production) ui => exit 0",
 		"tunnel-enable pay1: (production, --yes) ui => failed",
 	}
@@ -330,5 +329,52 @@ func TestTunnelEnableSaysTheTunnelLeadsToProduction(t *testing.T) {
 	}
 	if ev := events(t); !has(ev, "tunnel-enable dev1: (tunnel to production, --yes) db") {
 		t.Errorf("events: %q", ev)
+	}
+}
+
+// enable leaves a tunnel open from every login: on production, with no one
+// to ask (stdin not a terminal), it refuses without --yes, as group rm
+// does, rather than warning and going ahead. A tunnel that only leads to
+// production by its note is refused too.
+func TestTunnelEnableRefusesProductionWithoutATerminal(t *testing.T) {
+	calls, _ := serviceEnv(t)
+	host := "version: 1\nhosts:\n- name: pay1\n  env: production\n  address: 192.0.2.1\n  forwards:\n" +
+		"  - {name: ui, type: L, local_port: 8080, remote_host: localhost, remote_port: 80}\n" +
+		"- name: dev1\n  address: 192.0.2.3\n  forwards:\n" +
+		"  - {name: db, type: L, local_port: 5432, remote_host: db.example.com, remote_port: 5432, note: prod db}\n" +
+		"- name: box\n  address: 192.0.2.2\n  forwards:\n" +
+		"  - {name: web, type: L, local_port: 8081, remote_host: localhost, remote_port: 80}\n"
+	if err := os.WriteFile(os.Getenv("METERM_CONFIG"), []byte(host), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	asTerminal(t, false)
+	enable := func(args ...string) error {
+		var err error
+		withStdin(t, "", func() {
+			_ = stdout(t, func() {
+				_ = stderrOf(t, func() {
+					c := newTunnelEnableCmd()
+					c.SetArgs(args)
+					c.SilenceUsage, c.SilenceErrors = true, true
+					err = c.Execute()
+				})
+			})
+		})
+		return err
+	}
+	for _, spec := range []string{"pay1/ui", "dev1/db"} {
+		if err := enable(spec); err == nil || !strings.Contains(err.Error(), "--yes") || len(*calls) != 0 {
+			t.Errorf("%s with no terminal: err %v, systemctl %q; want a refusal", spec, err, *calls)
+		}
+	}
+	if err := enable("pay1/ui", "--yes"); err != nil || len(*calls) != 2 {
+		t.Errorf("--yes: err %v, systemctl %q", err, *calls)
+	}
+	*calls = nil
+	if err := enable("box/web"); err != nil || len(*calls) != 2 {
+		t.Errorf("not production: err %v, systemctl %q", err, *calls)
+	}
+	if ev := events(t); has(ev, "no prompt") {
+		t.Errorf("went ahead unasked: %q", ev)
 	}
 }

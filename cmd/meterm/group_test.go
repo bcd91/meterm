@@ -64,7 +64,7 @@ func TestGroupRmAsksBeforeTakingProductionAway(t *testing.T) {
 		t.Errorf("answered n: %q %v, group still there: %v", o, err, groupExists(t, "pay"))
 	}
 	asTerminal(t, false)
-	if _, _, err := groupCmd(t, "", "rm", "pay"); err == nil || !strings.Contains(err.Error(), "--yes") || !groupExists(t, "pay") {
+	if _, _, err := groupCmd(t, "", "rm", "pay"); err == nil || !strings.Contains(err.Error(), "--yes") || !strings.Contains(err.Error(), "pay1 (production → none)") || strings.Contains(err.Error(), "pay2") || !groupExists(t, "pay") {
 		t.Errorf("not a terminal, no --yes: %v", err)
 	}
 	if ev := events(t); len(ev) != 0 {

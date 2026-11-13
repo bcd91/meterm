@@ -158,7 +158,12 @@ func newGroupRmCmd() *cobra.Command {
 			changes := envChanges(cfg, after)
 			if len(changes) > 0 && !yes {
 				if !stdinTerminal() {
-					return fmt.Errorf("removing group %s changes the env of %d host(s); run it in a terminal to be asked, or add --yes", exactName(name), len(changes))
+					list := make([]string, len(changes))
+					for i, ch := range changes {
+						list[i] = exactName(ch.host.Name) + " (" + ch.text() + ")"
+					}
+					return fmt.Errorf("removing group %s changes the env of %d host(s): %s; run it in a terminal to be asked, or add --yes",
+						exactName(name), len(changes), strings.Join(list, ", "))
 				}
 				fmt.Printf("Removing group %s changes these hosts' env:\n", exactName(name))
 				for _, ch := range changes {
