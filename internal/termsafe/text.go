@@ -21,9 +21,7 @@ const Replacement = '�'
 // whatever else shows as nothing: the rest of Default_Ignorable_Code_Point (variation
 // selectors, Hangul fillers) and the blank braille pattern.
 func unsafeRune(r rune) bool {
-	return unicode.IsControl(r) || unicode.In(r, unicode.Cf, unicode.Zl, unicode.Zp,
-		unicode.Other_Default_Ignorable_Code_Point, unicode.Variation_Selector) ||
-		r == 0x2800 || (r >= 0xFDD0 && r <= 0xFDEF) || r&0xFFFE == 0xFFFE
+	return unicode.IsControl(r) || Invisible(r) || unicode.Is(unicode.Variation_Selector, r)
 }
 
 // Text returns s on one line with everything unsafe replaced. Bytes that aren't

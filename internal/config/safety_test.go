@@ -61,3 +61,52 @@ func TestResolveFlagsUnsafeHostsAndTheirJumps(t *testing.T) {
 		t.Error("host behind an unsafe jump not flagged")
 	}
 }
+
+func TestCheckPrintableNamesTheField(t *testing.T) {
+	ok := Host{Name: "web1", Address: "192.0.2.1", User: "deploy", Group: "g", Tags: []string{"a"}, Notes: "fine — ünïcode"}
+	if err := ok.CheckPrintable(); err != nil {
+		t.Fatalf("plain host refused: %v", err)
+	}
+	for field, h := range map[string]Host{
+		"name":          {Name: "x\x1b]0;own\x07y"},
+		"group":         {Name: "x", Group: "g\x1b[5m"},
+		"address":       {Name: "x", Address: "192.0.2.1\x1b[2J"},
+		"user":          {Name: "x", User: "r\noot"},
+		"users":         {Name: "x", Users: []string{"a\x1bb"}},
+		"tag":           {Name: "x", Tags: []string{"t‮ag"}},
+		"notes":         {Name: "x", Notes: "n\x1b]8;;u\x07"},
+		"identity_file": {Name: "x", IdentityFile: "~/.ssh/k\x1b"},
+		"proxy_jump":    {Name: "x", ProxyJump: "j\x07"},
+		"route name":    {Name: "x", Routes: []Route{{Name: "r\x1b"}}},
+		"tunnel note":   {Name: "x", Forwards: []Forward{{Name: "f", Note: "\x1b[2J"}}},
+	} {
+		err := h.CheckPrintable()
+		if err == nil || !strings.Contains(err.Error(), field) {
+			t.Errorf("%s: err = %v, want one naming %q", field, err, field)
+		}
+	}
+}
+
+// Every character termsafe.Label leaves out is refused in text a host
+// file gets from here or from a team: otherwise "zw\u200bsp" and "zwsp"
+// show as the same host and a command typed for one reaches the other.
+func TestInvisibleCharactersAreRefused(t *testing.T) {
+	for _, r := range []rune{0x200b, 0x200c, 0x200d, 0x2060, 0x00ad, 0xfeff, 0x200e, 0x200f, 0x061c, 0x180e, 0x2061, 0xe0001, 0x034f, 0x3164, 0x9b, 0x85, 0x1b, 0x2028} {
+		name := "zw" + string(r) + "sp"
+		h := Host{Name: name, Address: "192.0.2.1"}
+		if err := h.CheckShared(); err == nil {
+			t.Errorf("team host %q (%U) accepted", name, r)
+		}
+		if err := h.CheckPrintable(); err == nil {
+			t.Errorf("host %q (%U) accepted by add/edit", name, r)
+		}
+		if err := CheckText("a tag", name); err == nil {
+			t.Errorf("CheckText(%q) passed", name)
+		}
+	}
+	for _, s := range []string{"สวัสดี", "web-1", "日本", "\U0001F680", "❤️", "\U0001F44D\U0001F3FD"} {
+		if err := CheckText("name", s); err != nil {
+			t.Errorf("CheckText(%q): %v", s, err)
+		}
+	}
+}

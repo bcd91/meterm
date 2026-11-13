@@ -5,6 +5,8 @@ import (
 	"regexp"
 	"strings"
 	"unicode"
+
+	"meterm/internal/termsafe"
 )
 
 // What a host may contain before meterm hands it to ssh, scp, sftp or
@@ -69,9 +71,13 @@ func CheckJump(spec string) error {
 	return nil
 }
 
+// hasControl says s holds a character termsafe.Label wouldn't show as it
+// is: a control character, a bidi control, or an invisible one (zero-width
+// space or joiner, soft hyphen, BOM...). Refusing them keeps two names
+// that show alike from being two hosts.
 func hasControl(s string) bool {
 	for _, r := range s {
-		if unicode.IsControl(r) || r == ' ' || r == ' ' || (r >= '‪' && r <= '‮') || (r >= '⁦' && r <= '⁩') {
+		if unicode.IsControl(r) || termsafe.Drops(r) {
 			return true
 		}
 	}
@@ -79,12 +85,12 @@ func hasControl(s string) bool {
 }
 
 // CheckText rejects control characters — terminal escapes, line breaks,
-// bidi overrides — in text that gets printed: names, notes, tags, groups.
+// bidi overrides, invisible characters — in text that gets printed: names, notes, tags, groups.
 // A team-shared note with an escape sequence could otherwise rewrite the
 // terminal or set the clipboard.
 func CheckText(field, s string) error {
 	if hasControl(s) {
-		return fmt.Errorf("%s contains control characters", field)
+		return fmt.Errorf("%s contains control or invisible characters", field)
 	}
 	return nil
 }
@@ -227,6 +233,41 @@ func (h Host) CheckShared() error {
 		}
 		if len(f.Note) > 200 {
 			return fmt.Errorf("tunnel %q: note is longer than 200 characters", f.Name)
+		}
+	}
+	return nil
+}
+
+// CheckPrintable rejects control characters in every field of h that gets
+// printed, naming the field. add, edit, rename and import run it on what
+// they're given, so an escape sequence never gets into the host file from
+// this machine. Hosts already saved with one still load: everything that
+// shows them cleans them up for display.
+func (h Host) CheckPrintable() error {
+	fields := []struct{ name, val string }{
+		{"name", h.Name}, {"address", h.Address}, {"user", h.User}, {"group", h.Group},
+		{"notes", h.Notes}, {"identity_file", h.IdentityFile}, {"proxy_jump", h.ProxyJump},
+		{"env", h.Env},
+	}
+	for _, u := range h.Users {
+		fields = append(fields, struct{ name, val string }{"users", u})
+	}
+	for _, t := range h.Tags {
+		fields = append(fields, struct{ name, val string }{"a tag", t})
+	}
+	for _, rt := range h.Routes {
+		fields = append(fields, struct{ name, val string }{"a route name", rt.Name},
+			struct{ name, val string }{"a route address", rt.Address},
+			struct{ name, val string }{"a route proxy_jump", rt.ProxyJump})
+	}
+	for _, f := range h.Forwards {
+		fields = append(fields, struct{ name, val string }{"a tunnel name", f.Name},
+			struct{ name, val string }{"a tunnel note", f.Note},
+			struct{ name, val string }{"a tunnel remote_host", f.RemoteHost})
+	}
+	for _, f := range fields {
+		if err := CheckText(f.name, f.val); err != nil {
+			return err
 		}
 	}
 	return nil
