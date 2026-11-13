@@ -86,7 +86,7 @@ func TestHealthFollowsRoutesAndSaysWhyAndWhen(t *testing.T) {
 		t.Errorf("dead detail: %q", d)
 	}
 	// inner goes through box, which connect reaches over its vpn route.
-	if d := detailOf(m, "inner"); !strings.Contains(d, "via box: up, 30s ago") {
+	if d := detailOf(m, "inner"); !strings.Contains(d, "via box: box up, the host itself not checked, 30s ago") {
 		t.Errorf("inner detail: %q", d)
 	}
 }

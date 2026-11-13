@@ -322,6 +322,11 @@ func (i item) statusMark() string {
 	}
 	switch i.status {
 	case healthUp:
+		if i.check.Via != "" {
+			// Only the jump host answered: past it nothing is checked
+			// without logging in, so the host itself may be down.
+			return up.Render("◐")
+		}
 		return up.Render("●")
 	case healthDown:
 		return down.Render("✕")
@@ -359,6 +364,10 @@ func (i item) healthText() string {
 		// What answered, or didn't, is the first hop: past a jump host
 		// nothing is checked, so the answer is the jump host's.
 		switch rt, via := termsafe.Label(i.check.Route), termsafe.Label(i.check.Via); {
+		case via != "" && i.status == healthUp && rt != "":
+			return "via " + via + " (route " + rt + "): " + via + " up, the host itself not checked" + ago
+		case via != "" && i.status == healthUp:
+			return "via " + via + ": " + via + " up, the host itself not checked" + ago
 		case via != "" && rt != "":
 			return "via " + via + " (route " + rt + "): " + state + ago
 		case via != "":

@@ -73,12 +73,14 @@ line each, filling the terminal:
 
 The first mark is the live status, checked the way `connect` goes: each
 route's first hop, which for a host behind a `proxy_jump` is the jump host,
-wanting an SSH greeting. `●` up, `✕` down (behind a jump host: the jump host
-didn't answer), `?` still checking or unsure (the port took the connection
+wanting an SSH greeting. `●` up, `◐` the jump host answered (the host behind
+it isn't checked), `✕` down (behind a jump host: the jump host didn't
+answer), `?` still checking or unsure (the port took the connection
 but no SSH greeting came within 2s: a multiplexer such as sslh that waits for
 the client, or a slow server), `◌` not checked (a host meterm won't
 connect to as it stands). The line under the table says which way and when:
-"up via vpn", "via bastion: down: connection refused, 30s ago". Past the
+"up via vpn", "via bastion: down: connection refused, 30s ago", "via bastion:
+bastion up, the host itself not checked". Past the
 first hop nothing can be checked without logging in. After the address: `⚷` a key installed by
 `copy-id`, `⇄2` two other routes, `⇶1` a saved tunnel (red when it reaches
 production), `⧉` shared with a team, `↑` a team change not pushed yet and

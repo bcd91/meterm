@@ -107,3 +107,25 @@ func TestSilentPortShowsUnsure(t *testing.T) {
 		t.Errorf("text = %q", h)
 	}
 }
+
+// Behind a jump host only the jump host is checked: its answer up isn't the
+// host's, so the mark isn't ●, and the line says what was checked.
+func TestJumpHostUpIsNotTheHostUp(t *testing.T) {
+	now := time.Date(2026, 11, 11, 9, 0, 0, 0, time.UTC)
+	res := health.Result{State: health.Up, Via: "bastion", At: now}
+	it := item{host: config.Host{Name: "inner"}, status: res.State, check: res, now: now}
+	if m := stripANSI(it.statusMark()); m != "◐" {
+		t.Errorf("mark = %q", m)
+	}
+	if h := it.healthText(); h != "via bastion: bastion up, the host itself not checked, 0s ago" {
+		t.Errorf("text = %q", h)
+	}
+	res.Via = ""
+	it.check = res
+	if m := stripANSI(it.statusMark()); m != "●" {
+		t.Errorf("direct: mark = %q", m)
+	}
+	if !strings.Contains(strings.Join(pickerHelp, "\n"), "◐ its jump host up") {
+		t.Error("? doesn't explain ◐")
+	}
+}
