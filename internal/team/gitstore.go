@@ -91,6 +91,14 @@ func OpenGitStore(ctx context.Context, dir string, gt GitTeam) (*GitStore, error
 		if err := os.MkdirAll(filepath.Dir(g.Dir), 0o700); err != nil {
 			return nil, err
 		}
+		unlock, err := lockClone(g.Dir)
+		if err != nil {
+			return nil, err
+		}
+		defer unlock()
+		if _, err := os.Stat(filepath.Join(g.Dir, ".git")); err == nil {
+			return g, nil // another meterm cloned it while this one waited
+		}
 		if out, err := quiet(exec.CommandContext(ctx, "git", "clone", "-q", "--", gt.Remote, g.Dir)).CombinedOutput(); err != nil {
 			return nil, fmt.Errorf("git clone %s: %s", gt.Remote, strings.TrimSpace(string(out)))
 		}
@@ -190,8 +198,11 @@ func (g *GitStore) change(ctx context.Context, msg string, edit func() error) er
 // changeOn is change on another branch of the repository. The clone is
 // left on the team's branch afterwards.
 func (g *GitStore) changeOn(ctx context.Context, branch, msg string, edit func() error) error {
-	g.mu.Lock()
-	defer g.mu.Unlock()
+	unlock, err := g.lockRepo()
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	if branch != g.Branch {
 		defer func() { _ = g.onTeamBranch(ctx) }()
 	}
@@ -236,14 +247,23 @@ func (g *GitStore) changeOn(ctx context.Context, branch, msg string, edit func()
 }
 
 // read refreshes the clone for a read-only call, or with WithNoFetch only makes sure
-// it's on the team's branch, which takes no network.
-func (g *GitStore) read(ctx context.Context) error {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	if noFetch, _ := ctx.Value(noFetchKey{}).(bool); noFetch {
-		return g.onTeamBranch(ctx)
+// it's on the team's branch, which takes no network. The clone stays locked until
+// the caller calls done, so what it reads isn't reset under it by another meterm.
+func (g *GitStore) read(ctx context.Context) (done func(), err error) {
+	unlock, err := g.lockRepo()
+	if err != nil {
+		return nil, err
 	}
-	return g.refresh(ctx)
+	if noFetch, _ := ctx.Value(noFetchKey{}).(bool); noFetch {
+		err = g.onTeamBranch(ctx)
+	} else {
+		err = g.refresh(ctx)
+	}
+	if err != nil {
+		unlock()
+		return nil, err
+	}
+	return unlock, nil
 }
 
 type noFetchKey struct{}
@@ -353,14 +373,17 @@ func (g *GitStore) Teams(ctx context.Context) ([]Team, error) {
 	if err != nil {
 		return nil, err
 	}
-	g.mu.Lock()
+	unlock, err := g.lockRepo()
+	if err != nil {
+		return nil, err
+	}
 	err = g.onTeamBranch(ctx)
 	var tf gitTeamFile
 	found := false
 	if err == nil {
 		found, err = g.readYAML("meterm-team.yaml", &tf)
 	}
-	g.mu.Unlock()
+	unlock()
 	if err != nil {
 		return nil, err
 	}
@@ -391,9 +414,11 @@ func (g *GitStore) onTeamBranch(ctx context.Context) error {
 }
 
 func (g *GitStore) Members(ctx context.Context, teamID string) ([]Member, error) {
-	if err := g.read(ctx); err != nil {
+	done, err := g.read(ctx)
+	if err != nil {
 		return nil, err
 	}
+	defer done()
 	tf, err := g.teamFile()
 	if err != nil {
 		return nil, err
@@ -464,9 +489,11 @@ func (g *GitStore) RemoveMember(ctx context.Context, teamID, uid string) error {
 }
 
 func (g *GitStore) ListHosts(ctx context.Context, teamID string) ([]SharedHost, error) {
-	if err := g.read(ctx); err != nil {
+	done, err := g.read(ctx)
+	if err != nil {
 		return nil, err
 	}
+	defer done()
 	return g.hosts()
 }
 
@@ -640,9 +667,11 @@ func (g *GitStore) readEvents(path string) ([]gitEvent, error) {
 }
 
 func (g *GitStore) ListEvents(ctx context.Context, teamID string, flt EventFilter) ([]TeamEvent, error) {
-	if err := g.read(ctx); err != nil {
+	done, err := g.read(ctx)
+	if err != nil {
 		return nil, err
 	}
+	defer done()
 	files, _ := filepath.Glob(g.path("events/*.jsonl"))
 	var out []TeamEvent
 	for _, f := range files {
@@ -688,9 +717,11 @@ func marshalAudit(a AuditRecord) ([]byte, error) {
 }
 
 func (g *GitStore) ListAudits(ctx context.Context, teamID string) ([]AuditRecord, error) {
-	if err := g.read(ctx); err != nil {
+	done, err := g.read(ctx)
+	if err != nil {
 		return nil, err
 	}
+	defer done()
 	files, _ := filepath.Glob(g.path("audits/*.json"))
 	out := make([]AuditRecord, 0, len(files))
 	for _, f := range files {
