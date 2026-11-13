@@ -179,9 +179,9 @@ v0.23.1 asked about nothing but deleting a host in the picker.
   exists"): git work on a clone is one at a time, and a command that can't
   get it within 10s says "team sync busy … retry" (not "you are not in a
   team called …"), and `team list` shows that team as "(busy, try again)"
-  and exits non-zero rather than leaving it out. A git lock file left in the
-  clone is taken for a stopped git's once it's 30s old (by its time) and
-  removed, saying so; a newer one may be a live git meterm didn't start, and
+  and exits non-zero rather than leaving it out. A git lock file in the
+  clone that is older than 30s (by its time) is removed, saying "removed a
+  git lock older than 30s: <path>"; a newer one may be a live git meterm didn't start, and
   is left. A git of your own in that clone that holds a lock longer (a
   `git commit` waiting in its editor) would lose it.
 

@@ -83,7 +83,9 @@ func clearGitLocks(dir string) {
 			continue
 		}
 		if os.Remove(p) == nil {
-			fmt.Fprintf(lockNote, "meterm: removed a stale git lock %s (%s old, left by a git that was stopped)\n", p, age.Round(time.Second))
+			// All it knows is the lock's age by its time, not that no git
+			// holds it: say only that.
+			fmt.Fprintf(lockNote, "meterm: removed a git lock older than %s: %s (%s old by its time)\n", staleGitLock, p, age.Round(time.Second))
 		}
 	}
 }

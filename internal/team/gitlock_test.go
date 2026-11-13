@@ -107,7 +107,7 @@ func TestStaleIndexLockIsCleared(t *testing.T) {
 		if _, err := os.Stat(filepath.Join(a.Dir, ".git", f)); !os.IsNotExist(err) {
 			t.Errorf("%s still there: %v", f, err)
 		}
-		if !strings.Contains(said.String(), "removed a stale git lock "+filepath.Join(a.Dir, ".git", f)) {
+		if !strings.Contains(said.String(), "removed a git lock older than 30s: "+filepath.Join(a.Dir, ".git", f)) || strings.Contains(said.String(), "stopped") {
 			t.Errorf("not said: %s; said %q", f, said.String())
 		}
 	}
