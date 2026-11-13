@@ -264,11 +264,20 @@ meterm files WEB /var/www --local ~/site
 | `d` / `F8` | delete, recursively, after a `y` |
 | `r` / `F6`, `m` / `F7` | rename, new directory |
 | `.`, `~`, `R`, `q` | hidden files, home, reload, quit |
-| `esc` | cancel a running copy |
+| `esc` | stop a running copy (see below); `esc` again stops at once |
 
 - **Copying over existing files asks first:** overwrite them, or skip them.
 - **Progress:** a running copy shows a progress bar and its speed.
-- **Cancelling:** a cancelled copy removes the half-written file.
+- **Overwriting:** a file is overwritten in place, as it always was (no
+  temp file), and meterm never removes an existing file it is
+  overwriting. `esc` during an overwrite lets that file finish, then
+  stops; `esc` again stops at once and leaves it partly written. A dropped
+  connection or another failure can also leave it partly written. Either
+  way meterm says "`<side>:<path>` may be partly written", on screen and in
+  the activity log, which also lists the files copied before the stop.
+- **Cancelling a new file:** `esc` stops at once and removes the
+  half-written new file, which this copy created, and says so; if it
+  can't be removed (the connection dropped), it says that instead.
 - **Permissions:** permission bits are kept, so scripts stay executable.
 - **Symlinks:** a symlink to a file is copied as the file; a symlink to a
   directory is skipped, to avoid loops.
@@ -1226,7 +1235,18 @@ log in `activity/` (override with `$METERM_ACTIVITY_DIR`). Other tools should re
 
 Nothing is ever stored in `~/.ssh/config` unless you run `meterm export
 --write-include`, which is entirely optional and only adds one `Include`
-line.
+line. `meterm export` (either format) leaves out, and names on stderr, any
+host meterm itself refuses to connect to (shell characters in a jump, an
+address starting with `-`, ...), and any whose name, address, user or jump
+would be read as more than one value: whitespace, control or invisible
+characters, quotes, a backslash, `=`, an Ansible `{{`, `#` outside a name
+or at its start, or `* ? ! ,` in a name. A host that jumps through a host
+with `#`, `@` or `:` in its name is left out too, since ssh reads those in
+a jump as a comment, a user or a port (the jump host itself is kept). An identity file may hold a Windows path
+(`C:\Users\me\.ssh\id_ed25519`) and is double-quoted when it has a space,
+`#`, `'` or `=`; one with a `"`, a control or invisible character, or a
+backslash before `\`, a quote, a space or at the end is left out. Hosts
+that jump through a left-out host are left out too.
 
 ## Upgrading from v0.22.0
 

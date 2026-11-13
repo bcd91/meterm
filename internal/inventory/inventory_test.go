@@ -170,3 +170,29 @@ func TestToAnsibleRoundTrips(t *testing.T) {
 		t.Errorf("web1 tags = %v", w.Tags)
 	}
 }
+
+// Ansible splits ansible_ssh_common_args like a shell, so a field with a
+// space can add ssh options: such hosts are left out, as for ssh_config.
+func TestToAnsibleLeavesOutUnsafeHosts(t *testing.T) {
+	cfg := &config.Config{Hosts: []config.Host{
+		{Name: "gw", Address: "192.0.2.1", User: "ops"},
+		{Name: "web1", Address: "192.0.2.2", ProxyJump: "gw.example.com -oProxyCommand=touch"},
+		{Name: "web2", Address: "192.0.2.3", User: "ops -oProxyCommand=touch"},
+		{Name: "bad gw", Address: "192.0.2.4"},
+		{Name: "web3", Address: "192.0.2.5", ProxyJump: "bad gw"},
+		{Name: "web4", Address: "192.0.2.6", ProxyJump: "gw"},
+		// Ansible (before 2.19) templates inventory values: no quotes or
+		// spaces needed to run a command through lookup('pipe').
+		{Name: "tpl", Address: "{{lookup(ansible_user,ansible_ssh_private_key_file)}}", User: "pipe", IdentityFile: "touch${IFS}/tmp/x"},
+	}}
+	out, err := ToAnsible(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(out), "ProxyCommand") || strings.Contains(string(out), "192.0.2.4") || strings.Contains(string(out), "192.0.2.5") || strings.Contains(string(out), "lookup") {
+		t.Errorf("an unsafe host was exported:\n%s", out)
+	}
+	if !strings.Contains(string(out), "web4") || !strings.Contains(string(out), "-J ops@192.0.2.1") {
+		t.Errorf("a safe host is missing:\n%s", out)
+	}
+}

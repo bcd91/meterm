@@ -12,6 +12,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"meterm/internal/config"
+	"meterm/internal/sshconfig"
 )
 
 // ansibleInv is an inventory in either format, flattened to groups and hosts.
@@ -348,12 +349,19 @@ func groupName(s string) string {
 
 // ToAnsible renders hosts as a YAML inventory: every host under all.hosts
 // with its effective connection settings, and one group per meterm group
-// and per tag listing its members.
+// and per tag listing its members. Hosts in sshconfig.LeftOut are not in it.
 func ToAnsible(cfg *config.Config) ([]byte, error) {
 	type hostVars map[string]any
 	all := map[string]hostVars{}
 	groups := map[string]map[string]hostVars{}
+	skip := map[string]bool{}
+	for _, l := range sshconfig.LeftOut(cfg) {
+		skip[l.Name] = true
+	}
 	for _, h := range cfg.SortedHosts() {
+		if skip[h.Name] {
+			continue // ansible_ssh_common_args is split like a shell would
+		}
 		r := cfg.Resolve(h)
 		v := hostVars{"ansible_host": r.Address}
 		if r.User != "" {

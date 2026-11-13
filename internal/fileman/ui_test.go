@@ -1,6 +1,8 @@
 package fileman
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -310,5 +312,286 @@ func TestCursorStaysVisibleWhileScrolling(t *testing.T) {
 		check("pgdown")
 		h.keys("G")
 		check("G")
+	}
+}
+
+// hold sends a key but keeps back what it started (a directory listing),
+// to deliver later: the slow-server case where the answer to a question
+// comes before the listing that was already on its way.
+func (h *harness) hold(k string) tea.Cmd {
+	var cmd tea.Cmd
+	h.m, cmd = h.m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(k)})
+	return cmd
+}
+
+func TestDeleteActsOnTheDirectoryItAskedAbout(t *testing.T) {
+	left, right := t.TempDir(), t.TempDir()
+	write(t, filepath.Join(right, "config"), "top", 0o644)
+	write(t, filepath.Join(right, "A", "config"), "inner", 0o644)
+	h := newHarness(t, left, right)
+	h.keys("tab", "l") // into A
+	if h.cursorName(1) != "config" {
+		t.Fatalf("cursor on %q", h.cursorName(1))
+	}
+	inA := h.model().panes[1].dir
+	listing := h.hold("h") // back to right/, listing still on its way
+	h.keys("d")
+	if !strings.Contains(h.model().confirmText, inA) {
+		t.Errorf("question %q doesn't say which directory", h.model().confirmText)
+	}
+	h.run(listing) // lands while the question is open
+	if st := h.model().status; !strings.Contains(st, "cancelled: the directory changed while asking") {
+		t.Errorf("status = %q, want the question cancelled", st)
+	}
+	h.keys("y") // typed as the answer: must not act, not even as "copy"
+	for _, p := range []string{filepath.Join(right, "config"), filepath.Join(right, "A", "config")} {
+		if _, err := os.Stat(p); err != nil {
+			t.Errorf("%s deleted: %v", p, err)
+		}
+	}
+	if des, _ := os.ReadDir(left); len(des) != 0 {
+		t.Errorf("the y acted as a copy: left holds %d entries", len(des))
+	}
+	h.keys("enter") // dismisses the notice; keys work again after it
+	h.keys("j")
+	if h.model().mode != modeNormal {
+		t.Errorf("mode = %v after dismissing", h.model().mode)
+	}
+}
+
+func TestDeleteUsesWhatItAskedAboutWhenTheDirectoryStays(t *testing.T) {
+	left, right := t.TempDir(), t.TempDir()
+	write(t, filepath.Join(right, "config"), "top", 0o644)
+	write(t, filepath.Join(right, "A", "config"), "inner", 0o644)
+	h := newHarness(t, left, right)
+	h.keys("tab", "l", "d")
+	h.run(h.model().load(1, h.model().panes[1].dir)) // a fresh listing of the same directory doesn't cancel
+	h.keys("y")
+	if _, err := os.Stat(filepath.Join(right, "A", "config")); !os.IsNotExist(err) {
+		t.Errorf("A/config not deleted (status %q)", h.model().status)
+	}
+	if _, err := os.Stat(filepath.Join(right, "config")); err != nil {
+		t.Errorf("the wrong config was deleted: %v", err)
+	}
+}
+
+func TestRenameActsOnTheDirectoryItAskedAbout(t *testing.T) {
+	left, right := t.TempDir(), t.TempDir()
+	write(t, filepath.Join(right, "A", "config"), "inner", 0o644)
+	write(t, filepath.Join(right, "other"), "o", 0o644)
+	h := newHarness(t, left, right)
+	h.keys("tab", "l")
+	listing := h.hold("h")
+	h.keys("r")
+	h.run(listing)
+	if st := h.model().status; !strings.Contains(st, "cancelled: the directory changed while asking") {
+		t.Errorf("status = %q, want the rename cancelled", st)
+	}
+	h.keys("x", "enter")
+	for _, p := range []string{filepath.Join(right, "A", "config"), filepath.Join(right, "other")} {
+		if _, err := os.Stat(p); err != nil {
+			t.Errorf("%s renamed away: %v", p, err)
+		}
+	}
+	des, _ := os.ReadDir(right)
+	if len(des) != 2 {
+		t.Errorf("right holds %d entries, want A and other untouched", len(des))
+	}
+}
+
+// A fresh listing of the same directory can move what's under the cursor;
+// the rename still renames what the box was opened for.
+func TestRenameRenamesWhatItWasOpenedFor(t *testing.T) {
+	left, right := t.TempDir(), t.TempDir()
+	write(t, filepath.Join(right, "b"), "b", 0o644)
+	h := newHarness(t, left, right)
+	h.keys("tab", "r")
+	write(t, filepath.Join(right, "a"), "a", 0o644) // sorts first: the cursor row now shows a
+	h.run(h.model().load(1, right))
+	h.send(tea.KeyMsg{Type: tea.KeyCtrlU})
+	h.keys("c", "enter")
+	for name, want := range map[string]string{"a": "a", "c": "b"} {
+		if got, err := os.ReadFile(filepath.Join(right, name)); string(got) != want {
+			t.Errorf("%s = %q (%v), want %q (status %q)", name, got, err, want, h.model().status)
+		}
+	}
+}
+
+// After a question was cancelled because the directory changed, the next
+// key must be enter or esc: a stray q (typed into what was a rename box)
+// doesn't quit either. ctrl+c still does.
+func TestOnlyCtrlCQuitsAfterACancelledQuestion(t *testing.T) {
+	for _, tc := range []struct {
+		key  tea.KeyMsg
+		quit bool
+	}{{tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("q")}, false}, {tea.KeyMsg{Type: tea.KeyCtrlC}, true}} {
+		left, right := t.TempDir(), t.TempDir()
+		write(t, filepath.Join(right, "A", "config"), "inner", 0o644)
+		h := newHarness(t, left, right)
+		h.keys("tab", "l")
+		listing := h.hold("h")
+		h.keys("r")
+		h.run(listing)
+		if !h.model().dismiss {
+			t.Fatal("question wasn't cancelled")
+		}
+		_, cmd := h.m.Update(tc.key)
+		quit := false
+		if cmd != nil {
+			_, quit = cmd().(tea.QuitMsg)
+		}
+		if quit != tc.quit {
+			t.Errorf("%s: quit = %v, want %v", tc.key, quit, tc.quit)
+		}
+	}
+}
+
+// busyCopying puts the model in the middle of a copy with spies for both
+// ways to stop.
+func busyCopying(h *harness, overwriting bool) (stoppedAfter, stoppedNow *bool) {
+	m := h.model()
+	a, n := false, false
+	m.mode = modeBusy
+	m.progress = &Progress{File: "/src/app.conf", Dst: "/dst/app.conf", FileSize: 10, Total: 10, FilesTotal: 1, Overwriting: overwriting}
+	m.stopAfter = func() { a = true }
+	m.cancel = func() { n = true }
+	h.m = m
+	return &a, &n
+}
+
+// The first esc only asks to stop after the current file: a file being
+// overwritten finishes, a new one stops at once (the copy itself knows
+// which; the progress shown may be behind). The second esc stops at once.
+func TestFirstEscOnlyStopsAfterTheCurrentFile(t *testing.T) {
+	for _, overwriting := range []bool{true, false} { // false: a stale progress
+		for _, key := range []tea.KeyMsg{{Type: tea.KeyEsc}, {Type: tea.KeyCtrlC}} {
+			h := newHarness(t, t.TempDir(), t.TempDir())
+			after, now := busyCopying(h, overwriting)
+			h.send(key)
+			if !*after || *now {
+				t.Errorf("overwriting=%v %s: stop after = %v, stop now = %v; want only stop after", overwriting, key, *after, *now)
+			}
+			h.send(key)
+			if !*now {
+				t.Errorf("overwriting=%v %s again didn't stop at once", overwriting, key)
+			}
+		}
+	}
+}
+
+// Run wraps the error with the file name, so a cancel must be recognised
+// through the wrapping, and the status must only say a file was removed
+// when one was, naming its side.
+func TestCancelIsReportedAccurately(t *testing.T) {
+	left, right := t.TempDir(), t.TempDir()
+	h := newHarness(t, left, right)
+	plan := Plan{Src: Local{}, Dst: h.model().opts.Right, DstDir: right}
+	cancel := fmt.Errorf("%s: %w", filepath.Join(left, "big.bin"), context.Canceled)
+	h.send(transferDoneMsg{err: cancel, plan: plan, res: Result{Copied: 2}})
+	if st := h.model().status; st != "cancelled after 2 file(s)" {
+		t.Errorf("status = %q", st)
+	}
+	partial := filepath.Join(right, "big.bin")
+	h.send(transferDoneMsg{err: cancel, plan: plan, res: Result{Partial: partial}})
+	if st := h.model().status; st != "removed the unfinished new file test:"+partial+"; cancelled after 0 file(s)" {
+		t.Errorf("status = %q", st)
+	}
+	h.send(transferDoneMsg{err: cancel, plan: plan, res: Result{Partial: partial, PartialErr: errors.New("connection lost")}})
+	if st := h.model().status; st != "couldn't remove the unfinished new file test:"+partial+" (connection lost); cancelled after 0 file(s)" {
+		t.Errorf("status = %q", st)
+	}
+}
+
+// A copy over an existing file that failed or was stopped at once says the
+// file may be partly written, naming the side, on screen and in the log.
+func TestPartlyWrittenIsReported(t *testing.T) {
+	left, right := t.TempDir(), t.TempDir()
+	h := newHarness(t, left, right)
+	for _, tc := range []struct {
+		plan   Plan
+		target string
+		kind   string
+		remote bool
+	}{
+		{Plan{Src: Local{}, Dst: h.model().opts.Right, DstDir: right}, filepath.Join(right, "app.conf"), "upload", true},
+		{Plan{Src: h.model().opts.Right, Dst: Local{}, DstDir: left}, filepath.Join(left, "app.conf"), "download", true},
+	} {
+		for _, cause := range []error{context.Canceled, errors.New("connection lost")} {
+			h.events = nil
+			err := fmt.Errorf("x: %w", &PartlyWrittenError{Path: tc.target, Err: cause})
+			h.send(transferDoneMsg{err: err, plan: tc.plan})
+			where := tc.plan.Dst.Label() + ":" + tc.target
+			if st := h.model().status; !strings.Contains(st, where+" may be partly written") || strings.Contains(st, "removed") {
+				t.Errorf("status = %q, want %s named", st, where)
+			}
+			if len(h.events) != 1 || h.events[0].kind != tc.kind || h.events[0].remote != tc.remote || !strings.Contains(h.events[0].detail, where+" may be partly written") {
+				t.Errorf("events = %+v", h.events)
+			}
+		}
+	}
+}
+
+// statusLine is the line under the panes, as drawn.
+func statusLine(h *harness) string {
+	lines := strings.Split(stripANSI(h.m.View()), "\n")
+	return lines[len(lines)-2]
+}
+
+const deep = "/srv/releases/2026/very-long-directory-name-for-a-narrow-terminal/and-another-level"
+
+// What to press, and what happens, must stay on screen at 60 and 80
+// columns; long paths are shortened from the left instead.
+func TestKeyWordsFitNarrowTerminals(t *testing.T) {
+	for _, w := range []int{60, 80} {
+		h := newHarness(t, t.TempDir(), t.TempDir())
+		h.send(tea.WindowSizeMsg{Width: w, Height: 20})
+		busyCopying(h, true)
+		m := h.model()
+		m.progress.Dst = deep + "/app.conf"
+		h.m = m
+		h.send(tea.KeyMsg{Type: tea.KeyEsc})
+		if l := statusLine(h); !strings.Contains(l, "esc again: stop now (an overwrite is left partly written)") {
+			t.Errorf("width %d, stopping: %q", w, l)
+		}
+		plan := Plan{Src: Local{}, Dst: h.model().opts.Right, DstDir: deep}
+		h.send(transferDoneMsg{err: fmt.Errorf("x: %w", &PartlyWrittenError{Path: deep + "/app.conf", Err: context.Canceled}), plan: plan, res: Result{Copied: 3}})
+		if l := statusLine(h); !strings.Contains(l, "app.conf may be partly written") || !strings.HasPrefix(l, "test:") {
+			t.Errorf("width %d, partly written: %q", w, l)
+		}
+		h.send(transferDoneMsg{err: fmt.Errorf("x: %w", context.Canceled), plan: plan, res: Result{Partial: deep + "/new.bin"}})
+		if l := statusLine(h); !strings.HasPrefix(l, "removed the unfinished new file test:") || !strings.Contains(l, "new.bin") {
+			t.Errorf("width %d, removed: %q", w, l)
+		}
+	}
+}
+
+func TestDeleteQuestionFitsNarrowTerminals(t *testing.T) {
+	for _, w := range []int{60, 80} {
+		left, right := t.TempDir(), t.TempDir()
+		dir := filepath.Join(right, "very-long-directory-name-for-a-narrow-terminal", "and-another-level")
+		write(t, filepath.Join(dir, "config"), "x", 0o644)
+		h := newHarness(t, left, dir)
+		h.send(tea.WindowSizeMsg{Width: w, Height: 20})
+		h.keys("tab", "d")
+		l := statusLine(h)
+		if !strings.HasPrefix(l, "y = delete · other key = cancel · test:") || !strings.HasSuffix(l, "/config") {
+			t.Errorf("width %d: %q", w, l)
+		}
+		if w == 80 && !strings.Contains(l, "and-another-level/config") {
+			t.Errorf("width %d: %q, want more of the directory", w, l)
+		}
+	}
+}
+
+// A batch that stops part way logs the files it did copy, not everything
+// it was asked to.
+func TestStoppedBatchLogsWhatWasCopied(t *testing.T) {
+	left, right := t.TempDir(), t.TempDir()
+	h := newHarness(t, left, right)
+	plan := Plan{Src: Local{}, Dst: h.model().opts.Right, DstDir: right, Items: []string{filepath.Join(left, "a.bin"), filepath.Join(left, "b.txt")}}
+	h.events = nil
+	h.send(transferDoneMsg{err: fmt.Errorf("x: %w", context.Canceled), plan: plan, res: Result{Copied: 1, Bytes: 3, Files: []string{filepath.Join(right, "a.bin")}}})
+	if len(h.events) != 1 || !strings.Contains(h.events[0].detail, "a.bin") || strings.Contains(h.events[0].detail, "b.txt") {
+		t.Errorf("events = %+v", h.events)
 	}
 }
