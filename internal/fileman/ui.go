@@ -300,6 +300,11 @@ func New(o Options) Model {
 	}
 }
 
+// ErrDropped is in a session's ExitError when the person dropped a
+// connection that had stopped answering (esc, esc): stopped on purpose, not
+// failed.
+var ErrDropped = errors.New("the connection was dropped")
+
 // ExitError is why the session ended, when it ended other than by q.
 func (m Model) ExitError() error { return m.exitErr }
 
@@ -409,7 +414,7 @@ func (m Model) abort() (tea.Model, tea.Cmd) {
 	case busyPlan:
 		what = "working out a copy"
 	}
-	m.exitErr = fmt.Errorf("stopped waiting for %s during %s: the connection was dropped", host, what)
+	m.exitErr = fmt.Errorf("stopped waiting for %s during %s: %w", host, what, ErrDropped)
 	if m.progress != nil && m.progress.Temp != "" && m.running != nil {
 		m.exitErr = fmt.Errorf("%w; an unfinished temporary file may be left at %s", m.exitErr, where(m.running.Dst, m.progress.Temp))
 	}

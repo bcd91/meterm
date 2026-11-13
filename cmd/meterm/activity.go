@@ -18,6 +18,7 @@ import (
 	"meterm/internal/activity"
 	"meterm/internal/cellwidth"
 	"meterm/internal/config"
+	"meterm/internal/fileman"
 	"meterm/internal/termsafe"
 )
 
@@ -86,6 +87,10 @@ func outcomeOf(err error, took time.Duration) activity.Outcome {
 		o.ExitCode = &code
 	case errors.As(err, &exit):
 		o.Note = "killed"
+	case errors.Is(err, fileman.ErrDropped):
+		o.Note = "stopped" // on purpose: the person dropped a stalled connection
+	case errors.Is(err, errCancelled):
+		o.Note = "cancelled"
 	default:
 		o.Note = "failed"
 	}

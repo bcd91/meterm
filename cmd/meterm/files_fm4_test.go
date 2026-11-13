@@ -1,12 +1,15 @@
 package main
 
 import (
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"meterm/internal/config"
+	"meterm/internal/fileman"
 )
 
 // The picker's one-time token is the only thing that skips the production
@@ -142,5 +145,33 @@ func TestFilesViaProductionAsks(t *testing.T) {
 	withStdin(t, "", func() { errOut = stderrOf(t, func() { _ = runRoot(t, "files", "inner", "/b") }) })
 	if l := lastLine(); !strings.Contains(l, "(via production, no prompt: not a terminal)") || !strings.Contains(errOut, "reached through a PRODUCTION host") {
 		t.Errorf("not a terminal: stderr %q, log %s", errOut, l)
+	}
+}
+
+// n to the files question is a cancel: exit 1, and the picker is told it
+// was cancelled, not failed. A dropped stalled connection is logged as
+// stopped.
+func TestFilesCancelAndDropAreNotFailures(t *testing.T) {
+	cliSandbox(t)
+	fakeHostileSSH(t)
+	saveHosts(t, config.Host{Name: "web1", Address: "192.0.2.60", Env: config.EnvProduction})
+	said := filepath.Join(t.TempDir(), "session")
+	t.Setenv("METERM_SESSION_OUTCOME", said)
+	asTerminal(t, true)
+	var err error
+	withStdin(t, "n\n", func() { stdout(t, func() { err = runRoot(t, "files", "web1") }) })
+	if !errors.Is(err, errCancelled) {
+		t.Fatalf("n: err %v; want a cancel", err)
+	}
+	afterRun(err)
+	if b, _ := os.ReadFile(said); strings.TrimSpace(string(b)) != "cancelled" {
+		t.Errorf("the picker was told %q", b)
+	}
+	o := outcomeOf(fmt.Errorf("stopped waiting for web1 during a copy: %w", fileman.ErrDropped), 0)
+	if o.Note != "stopped" || o.ExitCode != nil {
+		t.Errorf("a dropped connection's outcome: %+v", o)
+	}
+	if o := outcomeOf(errors.New("couldn't open SFTP"), 0); o.Note != "failed" {
+		t.Errorf("a real failure's outcome: %+v", o)
 	}
 }

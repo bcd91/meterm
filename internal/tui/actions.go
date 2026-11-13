@@ -513,17 +513,26 @@ func (m *model) outcomeFile() string {
 	return filepath.Join(m.outcomeDir, "session")
 }
 
-// sessionRan reads, and removes, what the last dispatched connect left: true
-// when it says its session ran to an end.
-func (m *model) sessionRan() bool {
+// childSaid reads, and removes, what the last dispatched command left in
+// the outcome file: connect's exit code once its session ran, or a word
+// for a command that exits non-zero without having failed ("cancelled": the
+// person said n; "stopped": they dropped a stalled connection). "" when it
+// left nothing.
+func (m *model) childSaid() string {
 	if m.outcomeDir == "" {
-		return false
+		return ""
 	}
 	p := filepath.Join(m.outcomeDir, "session")
 	b, err := os.ReadFile(p)
 	_ = os.Remove(p)
-	return err == nil && isSession(m.running) && strings.TrimSpace(string(b)) != ""
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(b))
 }
+
+// deliberate says what a child said is a stop the person chose.
+func deliberate(said string) bool { return said == "cancelled" || said == "stopped" }
 
 // JumpBrokenText says what deleting a jump host does to the hosts that go
 // through it (config.JumpedBy): `meterm rm` and the picker both say it.

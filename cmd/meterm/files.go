@@ -73,7 +73,7 @@ func newFilesCmd() *cobra.Command {
 					var ok bool
 					if note, ok = filesProductionOK(cfg, *h, yes, shell); !ok {
 						// Not what was asked for: a script must see it didn't happen.
-						return errors.New("cancelled: nothing was opened")
+						return fmt.Errorf("%w: nothing was opened", errCancelled)
 					}
 				}
 			}
@@ -161,6 +161,9 @@ func newFilesCmd() *cobra.Command {
 				OnEvent: fileEventLogger(cfg, host, note),
 			})
 			run.end(err)
+			if errors.Is(err, fileman.ErrDropped) {
+				tellPicker("stopped")
+			}
 			// A full-screen app needs no "press enter" pause when it ends
 			// cleanly; when it doesn't, the reason stays until enter.
 			quietOnSuccess = true

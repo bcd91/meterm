@@ -854,8 +854,14 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// back; this keeps the outcome in view.
 			what := "meterm " + strings.Join(m.running, " ")
 			var exitErr *exec.ExitError
-			ran := m.sessionRan()
+			said := m.childSaid()
+			ran := said != "" && !deliberate(said) && isSession(m.running)
 			switch {
+			case deliberate(said):
+				// Stopped on purpose (n to a question, a stalled connection
+				// dropped): news, not a failure.
+				m.flash = what + ": " + said
+				m.flashNeutral = true
 			case errors.As(msg.err, &exitErr) && ran && exitErr.ExitCode() > 0 && exitErr.ExitCode() != 255:
 				// connect ends with the remote shell's code: the session ran,
 				// and its last command's status is news, not a failure.
@@ -870,7 +876,7 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, cmd
 		}
-		m.sessionRan() // clear what it left
+		m.childSaid() // clear what it left
 		if next != "" {
 			return m, tea.Batch(cmd, m.openPalette(next))
 		}

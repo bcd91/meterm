@@ -3,6 +3,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -15,6 +16,7 @@ import (
 	"meterm/internal/route"
 	"meterm/internal/team"
 	"meterm/internal/termsafe"
+	"meterm/internal/tui"
 )
 
 var cfgPath string
@@ -52,11 +54,34 @@ func loadConfig() (*config.Config, error) {
 
 func main() {
 	if err := newRootCmd().Execute(); err != nil {
+		afterRun(err)
 		// Errors can quote what was typed, or a saved name: not for the terminal to obey.
 		fmt.Fprintln(os.Stderr, "meterm:", termsafe.Lines(err.Error()))
 		finish(1)
 	}
 	finish(0)
+}
+
+// errCancelled is a command the person said n to: not done, but not failed.
+var errCancelled = errors.New("cancelled")
+
+// tellPicker says to the picker that started this command, through the file
+// it named (tui.SessionOutcomeEnv), how it ended when that wasn't a failure
+// though it exits non-zero: "cancelled", "stopped". Nothing when no picker
+// asked.
+func tellPicker(word string) {
+	if p := os.Getenv(tui.SessionOutcomeEnv); p != "" {
+		_ = os.WriteFile(p, []byte(word+"\n"), 0o600)
+	}
+}
+
+// afterRun tells the picker, if one started this, that a command which
+// ends with err was cancelled rather than failed. It still exits 1: a
+// script must see it didn't happen.
+func afterRun(err error) {
+	if errors.Is(err, errCancelled) {
+		tellPicker("cancelled")
+	}
 }
 
 // newRootCmd is meterm with all its commands, as main runs it: tests drive
