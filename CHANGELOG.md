@@ -301,6 +301,6 @@ v0.23.1 an overwrite truncated the target and wrote into it.
 - A name from the host with an escape sequence, control or invisible
   character in it is shown quoted with each such character spelled out
   (`"ev\x1b]0;x\a name\u202etxt.exe"`), as the picker shows such a host
-  name: in its row, the delete and rename questions, the status line, `?`,
-  and the activity log, which keeps the exact name rather than `�`. A clean
+  name: in its row, the delete question, the pane's path, rename, mkdir,
+  copy and delete messages, `?`, and the activity log, which keeps the exact name rather than `�`. A clean
   name is shown as it is. `?` shows what the last operation did, in full.
