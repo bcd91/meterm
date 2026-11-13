@@ -3,7 +3,6 @@ package main
 import (
 	"os"
 	"os/exec"
-	"strconv"
 	"strings"
 
 	"github.com/mattn/go-isatty"
@@ -54,7 +53,7 @@ func exactName(s string) string {
 	if termsafe.Label(s) == s {
 		return s
 	}
-	return strconv.Quote(s)
+	return termsafe.Quote(s) // every invisible spelled: U+3164 too, as strconv.Quote doesn't
 }
 
 // lblLines is lbl for each line of a multi-line text, keeping the lines.

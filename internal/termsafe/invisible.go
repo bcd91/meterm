@@ -1,6 +1,12 @@
 package termsafe
 
-import "unicode"
+import (
+	"fmt"
+	"strconv"
+	"strings"
+	"unicode"
+	"unicode/utf8"
+)
 
 // Invisible is the one answer, for Text and for Label alike, to whether r is a
 // character that draws as nothing, or changes how the text around it reads,
@@ -23,4 +29,36 @@ func Invisible(r rune) bool {
 	}
 	return unicode.In(r, unicode.Cf, unicode.Zl, unicode.Zp, unicode.Other_Default_Ignorable_Code_Point) ||
 		(r >= 0xFDD0 && r <= 0xFDEF) || r&0xFFFE == 0xFFFE
+}
+
+// Quote is s in double quotes, as strconv.Quote writes it, except that every
+// Invisible character is spelled as a \u escape too: strconv.Quote spells
+// U+2028 but prints U+3164 (a Hangul filler) as it is, which shows as
+// nothing, so two names quoted that way could still look alike.
+func Quote(s string) string {
+	var b strings.Builder
+	b.WriteByte('"')
+	for i, r := range s {
+		switch {
+		case r == utf8.RuneError:
+			if _, n := utf8.DecodeRuneInString(s[i:]); n == 1 {
+				fmt.Fprintf(&b, `\x%02x`, s[i])
+				continue
+			}
+			b.WriteString(`�`)
+		case Invisible(r) || !unicode.IsPrint(r) || r == '"' || r == '\\':
+			if r < 0x80 {
+				q := strconv.Quote(string(r)) // \n, \x01, \", \\
+				b.WriteString(q[1 : len(q)-1])
+			} else if r < 0x10000 {
+				fmt.Fprintf(&b, `\u%04x`, r)
+			} else {
+				fmt.Fprintf(&b, `\U%08x`, r)
+			}
+		default:
+			b.WriteRune(r)
+		}
+	}
+	b.WriteByte('"')
+	return b.String()
 }

@@ -63,7 +63,7 @@ func importHosts(imported []config.Host, all bool) error {
 	var ask inventory.Ask
 	if !all {
 		ask = func(h config.Host) (bool, bool) {
-			fmt.Printf("Import %q (%s)? [Y/n] ", h.Name, termsafe.Label(h.Address))
+			fmt.Printf("Import %s (%s)? [Y/n] ", termsafe.Quote(h.Name), termsafe.Label(h.Address))
 			resp, err := reader.ReadString('\n')
 			if err != nil && resp == "" {
 				fmt.Println("\nNo answer (end of input); stopping. Use --yes to import without asking.")
@@ -202,7 +202,7 @@ func newExportCmd() *cobra.Command {
 			}
 			left := sshconfig.LeftOut(cfg)
 			for _, l := range left {
-				fmt.Fprintf(os.Stderr, "meterm export: left out host %q: %s\n", l.Name, l.Why)
+				fmt.Fprintf(os.Stderr, "meterm export: left out host %s: %s\n", termsafe.Quote(l.Name), lbl(l.Why))
 			}
 			switch format {
 			case "ansible":

@@ -176,7 +176,10 @@ func newActivityCmd() *cobra.Command {
 			"On a terminal a long host name is cut to 24 columns (16 under 120) and a\n" +
 			"detail that doesn't fit loses its middle. What it keeps: an outcome written\n" +
 			"first, up to the first ':' or ';' (\"failed:\"), whole when it leaves room for\n" +
-			"more, else its start; then the start and end of the rest. A cut detail writes\n" +
+			"more, else its start; then the start and end of the rest, and a file\n" +
+			"manager's word for the file in between (unchanged, not created, partly\n" +
+			"written). On a narrow terminal ACTOR, USER, HOST and ACTION are cut to fit\n" +
+			"the row, ACTOR to its kind (agent). A cut detail writes\n" +
 			"its production note short: ⚑asked (asked here), ⚑picker (asked in the picker),\n" +
 			"⚑--yes, ⚑no prompt (stdin wasn't a terminal), ⚑ (production, nothing asked).\n" +
 			"A TARGET column (user@address) is added from 140 columns. --full wraps the\n" +
@@ -460,7 +463,7 @@ func filterHost(events []activity.Event, name string) ([]activity.Event, error) 
 		for _, e := range events {
 			if lbl(e.Host) == name && !seen[e.Host] {
 				seen[e.Host] = true
-				same = append(same, strconv.Quote(e.Host))
+				same = append(same, termsafe.Quote(e.Host))
 			}
 		}
 		if len(same) > 1 {
@@ -571,14 +574,16 @@ func printActivity(out io.Writer, rows []activityRow, width int, full bool) {
 		detailW = width - indent
 		if detailW < activityDetailMin {
 			// Too few cells for an outcome and a note: the detail gets a
-			// line of its own under its row.
+			// line of its own under its row, and the row itself must fit.
+			squeezeColumns(head, colW, width+gap, gap)
 			below, indent, detailW = true, activityBelowIndent, max(width-activityBelowIndent, 10)
 		}
 	}
 	for _, r := range table {
 		var b strings.Builder
 		for c, cw := range colW {
-			b.WriteString(r[c] + strings.Repeat(" ", cw-cellwidth.Width(r[c])+gap))
+			cell := squeezedCell(head[c], r[c], cw)
+			b.WriteString(cell + strings.Repeat(" ", cw-cellwidth.Width(cell)+gap))
 		}
 		if below {
 			fmt.Fprintln(out, strings.TrimRight(b.String(), " "))
@@ -599,6 +604,49 @@ func printActivity(out io.Writer, rows []activityRow, width int, full bool) {
 			fmt.Fprintln(out, b.String()+cutMiddle(shortProdNote(d), detailW))
 		}
 	}
+}
+
+// squeezable is how narrow each column may be made, in the order they're
+// narrowed, so a row fits a narrow terminal: who did it first (ACTOR keeps
+// its kind, "agent"), then the user, the host, the action (still telling
+// tunnel-enable from tunnel-disable) and the target. TIME, EXIT and TOOK
+// are never cut.
+var squeezable = []struct {
+	col string
+	min int
+}{{"ACTOR", 5}, {"USER", 6}, {"TARGET", 8}, {"HOST", 8}, {"ACTION", 10}}
+
+// squeezeColumns narrows the columns named in squeezable, in that order,
+// until the row (each column and its gap) is no wider than width.
+func squeezeColumns(head []string, colW []int, width, gap int) {
+	total := 0
+	for _, cw := range colW {
+		total += cw + gap
+	}
+	for _, s := range squeezable {
+		for c, h := range head {
+			if h != s.col || total <= width {
+				continue
+			}
+			cut := min(colW[c]-max(s.min, cellwidth.Width(h)), total-width)
+			if cut > 0 {
+				colW[c] -= cut
+				total -= cut
+			}
+		}
+	}
+}
+
+// squeezedCell is s fitted to its column's w cells: an actor too wide for it
+// shows its kind alone ("agent" for "agent:claude-code").
+func squeezedCell(col, s string, w int) string {
+	if cellwidth.Width(s) <= w {
+		return s
+	}
+	if kind, _, ok := strings.Cut(s, ":"); ok && col == "ACTOR" && cellwidth.Width(kind) <= w {
+		return kind
+	}
+	return cellwidth.Fit(s, w)
 }
 
 // prodNoteRE is the production note a start's detail carries first:
@@ -677,10 +725,72 @@ func cutMiddle(s string, w int) string {
 			tail := strings.TrimPrefix(cellwidth.TruncLeft(rest, room-1), "…")
 			return lead + "…" + rest[wholeMarkers(rest, len(rest)-len(tail), false):]
 		default:
-			return lead + cutEnds(rest, room)
+			return lead + cutKeeping(rest, room)
 		}
 	}
-	return cutEnds(s, w)
+	return cutKeeping(s, w)
+}
+
+// statusWords are what a file manager outcome says, in the middle of its
+// detail, of the file it was writing ("…report.pdf unchanged: connection
+// lost"), or that the connection was dropped. A cut keeps the last of them,
+// and the end after it.
+var statusWords = []string{"unchanged", "not created", "partly written", "left as it was", "connection dropped"}
+
+// cutKeeping is cutEnds, except that a status word in the middle of s (see
+// statusWords) is kept, with the file it's said of, as well as the end of
+// s: the start, then the file and its status, then the final words, each
+// part cut at a word where it can be.
+func cutKeeping(s string, w int) string {
+	at, status := -1, ""
+	for _, word := range statusWords {
+		if i := strings.LastIndex(s, word); i >= 0 && i+len(word) > at {
+			at, status = i+len(word), word
+		}
+	}
+	if at < 0 || at == len(s) || w < 24 {
+		return cutEnds(s, w)
+	}
+	before, after := s[:at], s[at:]
+	if limit := w / 2; cellwidth.Width(after) > limit {
+		after = "…" + lastWords(after, limit-1)
+	}
+	room := w - cellwidth.Width(after)
+	if cellwidth.Width(before) <= room {
+		return before + after
+	}
+	// The file it's said of: the last path segment, or the last word before
+	// the status.
+	subject := before
+	if i := strings.LastIndexAny(before, "/ "); i >= 0 {
+		subject = before[i+1:]
+		if j := strings.LastIndex(before, "/"); j >= 0 {
+			subject = before[j+1:]
+		}
+	}
+	if cellwidth.Width(subject)+1 > room {
+		subject = status // no room for the file's name: its status at least
+	}
+	if sw := cellwidth.Width(subject); sw+1 <= room {
+		kept := ""
+		if room-sw-1 >= 4 { // less than that is noise
+			kept = strings.TrimSuffix(cellwidth.Fit(before[:len(before)-len(subject)], room-sw-1), "…")
+		}
+		return before[:wholeMarkers(before, len(kept), true)] + "…" + subject + after
+	}
+	return cutEnds(before, room) + after
+}
+
+// lastWords is the end of s in at most w cells, starting at a word where
+// one fits, and never inside a [REDACTED].
+func lastWords(s string, w int) string {
+	tail := strings.TrimPrefix(cellwidth.TruncLeft(s, w), "…")
+	if cut := len(s) - len(tail); cut > 0 && s[cut-1] != ' ' {
+		if i := strings.Index(tail, " "); i >= 0 && i < len(tail)-1 {
+			tail = tail[i+1:]
+		}
+	}
+	return s[wholeMarkers(s, len(s)-len(tail), false):]
 }
 
 // cutEnds fits s, wider than w (8 or more), to w by leaving out its middle.

@@ -161,3 +161,24 @@ func TestExportAnsibleLeavesOutTheSameHosts(t *testing.T) {
 		}
 	}
 }
+
+// export names a host it left out with every invisible character spelled
+// out, the same way for each: a Hangul filler (U+3164), which Go's %q
+// prints as it is, as much as a line separator (U+2028), which it escapes.
+func TestExportSpellsEveryInvisibleInWhatItLeftOut(t *testing.T) {
+	cliSandbox(t)
+	saveHosts(t,
+		config.Host{Name: "web\u31641", Address: "192.0.2.1"},
+		config.Host{Name: "web\u20282", Address: "192.0.2.2"},
+	)
+	var errOut string
+	_ = stdout(t, func() { errOut = stderrOf(t, func() { _ = runRoot(t, "export") }) })
+	for _, want := range []string{`web\u31641`, `web\u20282`} {
+		if !strings.Contains(errOut, want) {
+			t.Errorf("stderr doesn't spell %s:\n%s", want, errOut)
+		}
+	}
+	if strings.ContainsAny(errOut, "\u3164\u2028") {
+		t.Errorf("stderr has an invisible character as it is: %q", errOut)
+	}
+}

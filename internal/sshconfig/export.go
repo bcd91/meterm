@@ -81,7 +81,7 @@ func LeftOut(cfg *config.Config) []Skipped {
 		}
 		for _, f := range fields {
 			if strings.Contains(f.value, "{{") || strings.Contains(f.value, "{%") || strings.Contains(f.value, "{#") {
-				why[h.Name] = fmt.Sprintf("its %s %q looks like an Ansible template", f.field, f.value)
+				why[h.Name] = fmt.Sprintf("its %s %s looks like an Ansible template", f.field, termsafe.Quote(f.value))
 				break
 			}
 			if f.name && strings.HasPrefix(f.value, "#") {
@@ -89,16 +89,16 @@ func LeftOut(cfg *config.Config) []Skipped {
 				break
 			}
 			if c, bad := unsafeRune(f.value, f.name); bad {
-				why[h.Name] = fmt.Sprintf("its %s %q contains %q", f.field, f.value, c)
+				why[h.Name] = fmt.Sprintf("its %s %s contains %s", f.field, termsafe.Quote(f.value), termsafe.Quote(string(c)))
 				if f.name {
-					why[h.Name] = fmt.Sprintf("its name contains %q", c)
+					why[h.Name] = fmt.Sprintf("its name contains %s", termsafe.Quote(string(c)))
 				}
 				break
 			}
 		}
 		if _, ok := why[h.Name]; !ok {
 			if p := pathProblem(r.IdentityFile); p != "" {
-				why[h.Name] = fmt.Sprintf("its identity file %q %s", r.IdentityFile, p)
+				why[h.Name] = fmt.Sprintf("its identity file %s %s", termsafe.Quote(r.IdentityFile), p)
 			}
 		}
 		if _, ok := why[h.Name]; !ok {
@@ -110,7 +110,7 @@ func LeftOut(cfg *config.Config) []Skipped {
 				err = config.CheckJump(cfg.Groups[h.Group].ProxyJump)
 			}
 			if err != nil {
-				why[h.Name] = fmt.Sprintf("meterm refuses it (%q)", err.Error())
+				why[h.Name] = fmt.Sprintf("meterm refuses it (%s)", termsafe.Quote(err.Error()))
 			}
 		}
 		if _, ok := why[h.Name]; !ok && (r.Port < 0 || r.Port > 65535) {
@@ -126,7 +126,7 @@ func LeftOut(cfg *config.Config) []Skipped {
 		}
 		for _, jh := range cfg.Resolve(h).ProxyJump {
 			if i := strings.IndexAny(jh.Name, "#@:"); i >= 0 {
-				why[h.Name] = fmt.Sprintf("it jumps through %q, and ssh would misread the %q in that name", jh.Name, jh.Name[i])
+				why[h.Name] = fmt.Sprintf("it jumps through %s, and ssh would misread the %s in that name", termsafe.Quote(jh.Name), termsafe.Quote(jh.Name[i:i+1]))
 				break
 			}
 		}
@@ -144,7 +144,7 @@ func LeftOut(cfg *config.Config) []Skipped {
 			}
 			for _, hop := range hops {
 				if _, bad := why[hop]; bad {
-					why[h.Name] = fmt.Sprintf("it jumps through %q, which is left out", hop)
+					why[h.Name] = fmt.Sprintf("it jumps through %s, which is left out", termsafe.Quote(hop))
 					changed = true
 					break
 				}
@@ -154,7 +154,7 @@ func LeftOut(cfg *config.Config) []Skipped {
 	for _, h := range hosts {
 		if _, ok := why[h.Name]; !ok {
 			if err := cfg.Resolve(h).Err; err != nil { // anything else Resolve refuses
-				why[h.Name] = fmt.Sprintf("meterm refuses it (%q)", err.Error())
+				why[h.Name] = fmt.Sprintf("meterm refuses it (%s)", termsafe.Quote(err.Error()))
 			}
 		}
 	}
@@ -210,7 +210,7 @@ func pathProblem(s string) string {
 			}
 		default:
 			if r, bad := unsafeRune(string(c), false); bad {
-				return fmt.Sprintf("contains %q", r)
+				return fmt.Sprintf("contains %s", termsafe.Quote(string(r)))
 			}
 		}
 	}

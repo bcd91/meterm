@@ -244,3 +244,70 @@ func TestActivityKeepsTheProductionNoteWhenCut(t *testing.T) {
 func printEvents(out io.Writer, events []activity.Event, width int, full bool) {
 	printActivity(out, activityRows(events, ""), width, full)
 }
+
+// At 60 columns an agent's rows (ACTOR agent:claude-code, tunnel-disable,
+// EXIT and TOOK) were 67 to 71 cells and wrapped: the row fits, ACTOR
+// keeping its kind and ACTION still telling enable from disable.
+func TestActivityFitsSixtyColumnsWithAnActor(t *testing.T) {
+	at := time.Date(2026, 11, 11, 9, 0, 0, 0, time.Local)
+	ev := []activity.Event{
+		{Time: at, User: "someone@workstation", ActorType: "agent", AgentKind: "claude-code", Action: "tunnel-enable", Host: "pay1", Detail: "(production, --yes) ui"},
+		{Time: at, User: "someone@workstation", ActorType: "agent", AgentKind: "claude-code", Action: "tunnel-disable", Host: "pay1", Detail: "(production) ui"},
+	}
+	for _, w := range []int{60, 50} {
+		var b bytes.Buffer
+		printEvents(&b, ev, w, false)
+		out := b.String()
+		for _, l := range strings.Split(strings.TrimRight(out, "\n"), "\n") {
+			if cellwidth.Width(l) > w {
+				t.Errorf("width %d: line is %d wide: %q", w, cellwidth.Width(l), l)
+			}
+		}
+		if !strings.Contains(out, "agent ") || !strings.Contains(out, "tunnel-en") || !strings.Contains(out, "tunnel-di") {
+			t.Errorf("width %d lost who or what:\n%s", w, out)
+		}
+	}
+}
+
+// At 80 columns a file manager failure lost the word that says what became
+// of the file ("…unchanged"): the cut keeps the outcome, the file and its
+// status, and how it ended.
+func TestCutMiddleKeepsTheStatusWord(t *testing.T) {
+	for _, c := range []struct {
+		in   string
+		keep []string
+	}{
+		{"failed: upload report.pdf -> /srv/app/shared/uploads/2026 (1 file(s), 2.1 MB): web1:/srv/app/shared/uploads/2026/report.pdf unchanged: connection lost",
+			[]string{"failed:", "report.pdf unchanged", "connection lost"}},
+		{"cancelled: upload big.bin -> /srv/app/shared/uploads/2026 (1 file(s), 381.5 MB); web1:/srv/app/shared/uploads/2026/big.bin not created, the unfinished copy discarded",
+			[]string{"cancelled:", "discarded"}},
+		{"failed: download dump.sql -> /home/me/Downloads/archive/2026 (1 file(s), 9 GB): local:/home/me/Downloads/archive/2026/dump.sql not created: no space left on device",
+			[]string{"failed:", "dump.sql not created", "no space left on device"}},
+	} {
+		for _, w := range []int{40, 48, 60} {
+			got := cutMiddle(c.in, w)
+			if cellwidth.Width(got) > w {
+				t.Errorf("%d wide at %d: %q", cellwidth.Width(got), w, got)
+			}
+			keep := c.keep
+			if w < 60 { // the outcome, the status word and the very end
+				last := c.keep[len(c.keep)-1]
+				keep = []string{c.keep[0], statusOf(c.in), last[strings.LastIndex(last, " ")+1:]}
+			}
+			for _, k := range keep {
+				if !strings.Contains(got, k) {
+					t.Errorf("cutMiddle(…, %d) = %q: lost %q", w, got, k)
+				}
+			}
+		}
+	}
+}
+
+func statusOf(s string) string {
+	for _, w := range statusWords {
+		if strings.Contains(s, w) {
+			return w
+		}
+	}
+	return ""
+}

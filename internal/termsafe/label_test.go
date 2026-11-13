@@ -82,3 +82,25 @@ func TestLabelDropsInvisibles(t *testing.T) {
 		}
 	}
 }
+
+// Quote spells every invisible character, not only those strconv.Quote
+// doesn't print: U+3164 and U+2028 alike. Thai stays as it is.
+func TestQuoteSpellsEveryInvisible(t *testing.T) {
+	for in, want := range map[string]string{
+		"web1":                   `"web1"`,
+		"web\u31641":             `"web\u31641"`,
+		"web\u20281":             `"web\u20281"`,
+		"a\u200bb":               `"a\u200bb"`,
+		"a\x1b[31mb":             `"a\x1b[31mb"`,
+		"tab\there":              `"tab\there"`,
+		`q"b\s`:                  `"q\"b\\s"`,
+		"\u0e19\u0e49\u0e33-web": "\"\u0e19\u0e49\u0e33-web\"",
+		"bad\xffutf8":            `"bad\xffutf8"`,
+		"tag\U000e0041x":         `"tag\U000e0041x"`,
+		"it's":                   `"it's"`,
+	} {
+		if got := Quote(in); got != want {
+			t.Errorf("Quote(%q) = %s, want %s", in, got, want)
+		}
+	}
+}

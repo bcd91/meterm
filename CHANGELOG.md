@@ -104,8 +104,10 @@ v0.23.1 asked about nothing but deleting a host in the picker.
 - Redaction also masks openssl's `-k` password and `-K` key, `vault login`
   tokens, and HashiCorp Vault tokens by their shape (`hvs.…`).
 - `meterm activity` on a terminal gives the detail the rest of the line:
-  HOST is capped, a long detail loses its middle (keeping how it ended, and
-  never half a `[REDACTED]`), production notes are shortened (`⚑picker`,
+  HOST is capped, a long detail loses its middle (keeping how it ended, a
+  file manager's word for the file, such as `unchanged`, and never half a
+  `[REDACTED]`), a row too wide for a narrow terminal has ACTOR, USER, HOST
+  and ACTION cut to fit, production notes are shortened (`⚑picker`,
   `⚑named`, `⚑via picker`), and TARGET shows from 140 columns. `--full`
   wraps each detail whole; piped output is never cut. `--host` takes the
   name as shown.

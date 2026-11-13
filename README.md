@@ -1098,9 +1098,11 @@ meterm activity --verify            # check the chain, and any copy
 
 On a terminal a detail too long for its line loses its middle but keeps how it
 starts (an outcome written first, such as `failed:`, up to the first `:` or `;`)
-and its end, and a production note is shortened to `⚑asked`, `⚑picker`, `⚑--yes`
-or `⚑no prompt`. When the columns before it leave the detail under 24 cells (a
-60-column terminal), it goes on its own line under its row. Under 120 columns,
+and its end, with a file manager's word for the file in between (`unchanged`, `not
+created`, `partly written`), and a production note is shortened to `⚑asked`, `⚑picker`,
+`⚑--yes` or `⚑no prompt`. When the columns before it leave the detail under 24 cells (a
+60-column terminal), it goes on its own line under its row, and the row is cut to fit:
+ACTOR to its kind (`agent`), then USER, HOST and ACTION. Under 120 columns,
 ACTOR and EXIT/TOOK are left out when no row shown has anything in them.
 
 **How it ended.** `connect`, `exec`, `cp`, `sync`, `sftp`, `logs`, `dev`, a `files` session,
