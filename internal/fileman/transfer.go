@@ -379,6 +379,9 @@ func RunWith(ctx context.Context, p Plan, o RunOptions, report func(Progress)) (
 		if out.leftover != "" {
 			res.Leftovers = append(res.Leftovers, fmt.Sprintf("%s (%v)", out.leftover, out.leftErr))
 		}
+		if out.leftDir != "" {
+			res.Leftovers = append(res.Leftovers, out.leftDir)
+		}
 		if err != nil {
 			var need *InPlaceNeeded
 			if errors.As(err, &need) {
@@ -441,7 +444,10 @@ type copied struct {
 	// side, and leftErr why.
 	leftover string
 	leftPath string
-	leftErr  error
+	// leftDir is the private directory a temporary file was made in, when
+	// it couldn't be removed after: empty, said with why.
+	leftDir string
+	leftErr error
 }
 
 // Unchanged is a copy that stopped, for err, before its temporary file was
@@ -486,7 +492,7 @@ const specialBits = fs.ModeSetuid | fs.ModeSetgid | fs.ModeSticky
 // or here, a read-only filesystem with the file mounted into it. Anything
 // else (no space, no inodes, a quota) would fail or truncate in place too.
 func inPlaceWorthAsking(dst FS, err error) bool {
-	if errors.Is(err, fs.ErrPermission) {
+	if errors.Is(err, fs.ErrPermission) || errors.Is(err, ErrNotPrivate) {
 		return true
 	}
 	return isLocal(dst) && readOnlyFS(err)
@@ -572,7 +578,11 @@ func copyFile(now, after context.Context, src, dst FS, f FileOp, replace bool, o
 		}
 	}
 	// A replacement is made with the permissions it'll keep, so a 0600
-	// file's replacement is never more open than that, even for a moment.
+	// file's replacement is never readable by anyone else, even for a
+	// moment: here the file is created with them (less the umask); on a
+	// host, where SFTP can't say a mode at creation and the file starts
+	// 0666 less the server's umask, it's made inside a directory only we
+	// may enter (Remote.CreateTemp) and chmod'ed before anything is written.
 	// Never setuid or setgid: those go on the finished copy alone.
 	mode := f.Mode.Perm()
 	if haveOld {
@@ -613,6 +623,13 @@ func copyFile(now, after context.Context, src, dst FS, f FileOp, replace bool, o
 		onTemp(tmp, false)
 	}
 	closed, committed, dropped := false, false, false
+	// tidyDir removes the private directory tmp was made in, once tmp is
+	// out of it, saying where it is when it can't be.
+	tidyDir := func() {
+		if d, derr := removeTempDir(dst, tmp); derr != nil {
+			res.leftDir = fmt.Sprintf("%s/ (an empty temporary directory: %v)", where(dst, d), cause(derr))
+		}
+	}
 	// discard removes the temporary file, saying where it is when it
 	// can't be.
 	discard := func() {
@@ -625,7 +642,9 @@ func copyFile(now, after context.Context, src, dst FS, f FileOp, replace bool, o
 			if err != nil {
 				err = &Unchanged{Path: target, Where: where(dst, target), New: !haveOld, Leftover: where(dst, tmp), LeftoverPath: tmp, LeftoverErr: cause(rerr), Err: err}
 			}
+			return // its directory isn't empty: the file's path names it
 		}
+		tidyDir()
 	}
 	defer func() {
 		var stuck *ReplaceStuck
@@ -768,6 +787,7 @@ func copyFile(now, after context.Context, src, dst FS, f FileOp, replace bool, o
 	switch {
 	case err == nil:
 		committed = true
+		tidyDir()
 		return res, nil
 	case errors.Is(err, fs.ErrExist), errors.As(err, &stuck):
 		return res, err

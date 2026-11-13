@@ -148,7 +148,15 @@ v0.23.1 an overwrite truncated the target and wrote into it.
 - **Overwrites are atomic.** A copy is written to a hidden temporary file
   next to the target (`.name.meterm-….part`) and renamed over it only when
   complete; a cancelled or failed copy removes the temporary file and leaves
-  the target as it was. A new file never replaces one that appeared since
+  the target as it was. On a host the temporary file is made inside a
+  private directory of its own next to the target (`.meterm-…/`, made
+  `0700` and checked first, removed after): SFTP can't give a file its mode
+  as it creates it, so it starts `0666` less the server's umask, and loose
+  in the target's directory anyone who could read that directory could have
+  opened it before its mode was set and read the new contents. A directory
+  that can't be made private, where a new file would start more open than
+  the copy, counts as a temporary file that can't be made (asked about or
+  stopped, below). A new file never replaces one that appeared since
   the copy was worked out. On a server without `posix-rename` the old file
   is moved aside, the new one moved in, and only then the old one removed;
   if that fails part way, one of the two is always left and the message

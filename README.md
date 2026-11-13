@@ -326,7 +326,16 @@ renames, `m` makes a directory, `r` reloads, `?` shows the rest.
 - **Overwriting is atomic:** the copy goes to a temporary file next to the
   target (`.<name>.meterm-<random>.part`, the name cut to 64 bytes so it fits
   any filesystem) and is renamed over it only when complete, so a cancelled or
-  failed copy leaves the target as it was. If there's no room for the
+  failed copy leaves the target as it was. On a host the temporary file is
+  made inside a directory of its own next to the target (`.meterm-<random>/`,
+  made `0700` and checked before the file is created, removed after): SFTP
+  can't give a new file its mode when it creates it, so the server makes it
+  `0666` less its umask and meterm sets the mode a moment later, and without
+  that directory anyone who can read the target's directory could open the
+  file in that moment and read what's written. If the directory can't be made
+  private (a server that refuses to chmod it) and a new file there would start
+  more open than the copy's mode, it's treated as a temporary file that can't
+  be made (below). If there's no room for the
   temporary file (a full disk, no inodes left, a quota), the copy stops and
   the target is left as it was: it's never emptied to be written in place. If
   the target can't be renamed over (a file bind-mounted into a container, as
@@ -350,7 +359,8 @@ renames, `m` makes a directory, `r` reloads, `?` shows the rest.
   open than the old one (a `0600` file replaced by a `0644` one), the old
   file is left as it was and the copy says so.
 - **Read-only directories:** where no temporary file can be made next to
-  the target because the directory can't be written, or on this machine
+  the target because the directory can't be written (or, on a host, can't
+  be kept private, above), or on this machine
   because it's a read-only filesystem the file is mounted into
   (`docker --read-only -v file:file`, a Kubernetes `subPath` under
   `readOnlyRootFilesystem`), you're asked before it's written in place. Over

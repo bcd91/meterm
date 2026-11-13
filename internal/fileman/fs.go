@@ -375,18 +375,132 @@ func (r Remote) Open(p string) (io.ReadCloser, error) { return r.Client.Open(p) 
 func (r Remote) OpenWrite(p string) (io.WriteCloser, error) {
 	return r.Client.OpenFile(p, os.O_WRONLY|os.O_TRUNC)
 }
+
+// CreateTemp makes the temporary file inside a directory of its own next
+// to target (.meterm-<random>), never loose in target's directory: SFTP's
+// open can't say what mode to create a file with, so the server makes it
+// 0666 less its umask and only then is it chmod'ed, and in that moment
+// anyone who may read target's directory could open it and read what's
+// written. The directory is made 0700 and looked at again (not followed)
+// before the file is made in it, so no one else can reach the file at
+// all. Where it can't be made private (a server that refuses setstat), it
+// is still used if a new file there starts no more open to others than
+// mode, which the directory's own mode shows (both come from the server's
+// umask), or if the file's own mode can't be set either: then the file
+// keeps the server's mode for good, as before, and says so (*PermError).
+// Otherwise it's ErrNotPrivate, handled as a temporary file that couldn't
+// be made. The file is moved out of it into place (a rename within one
+// filesystem), and the directory removed after (removeTempDir).
 func (r Remote) CreateTemp(target string, mode fs.FileMode) (io.WriteCloser, string, error) {
-	tmp := path.Join(path.Dir(target), tempName(path.Base(target)))
+	dir := path.Join(path.Dir(target), tempDirName())
+	if err := r.Client.Mkdir(dir); err != nil {
+		return nil, "", err
+	}
+	fail := func(err error) (io.WriteCloser, string, error) {
+		_ = r.Client.RemoveDirectory(dir)
+		return nil, "", err
+	}
+	chErr := chmodTempDir(r.Client, dir)
+	// Seen by its name, not followed: a link or anything else in its place
+	// isn't the directory made here.
+	fi, err := r.Client.Lstat(dir)
+	switch {
+	case err != nil:
+		return fail(err)
+	case fi.Mode()&fs.ModeSymlink != 0 || !fi.IsDir():
+		return fail(fmt.Errorf("the temporary directory %s was replaced (%v); not writing there", dir, fi.Mode().Type()))
+	}
+	perm := fi.Mode().Perm()
+	private := perm&0o077 == 0 && perm&0o700 == 0o700
+	// What a new file there starts with, to others, beyond what mode gives them.
+	exposed := !private && 0o666&perm&^mode.Perm()&0o077 != 0
+	tmp := path.Join(dir, tempName(path.Base(target)))
 	f, err := r.Client.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL)
 	if err != nil {
-		return nil, "", err
+		return fail(err)
+	}
+	// The file is ours, so its owner is who we are there: a directory
+	// owned by anyone else isn't the one made here.
+	if st, ok := fi.Sys().(*sftp.FileStat); ok {
+		if ft, err := f.Stat(); err == nil {
+			if fst, ok := ft.Sys().(*sftp.FileStat); ok && fst.UID != st.UID {
+				f.Close()
+				_ = r.Client.Remove(tmp)
+				return fail(fmt.Errorf("the temporary directory %s is owned by %d, not by us (%d); not writing there", dir, st.UID, fst.UID))
+			}
+		}
 	}
 	// Best effort: some servers (Windows OpenSSH among them) refuse or
 	// half-support setstat, and the copy is worth more than its mode.
 	if err := f.Chmod(mode.Perm()); err != nil {
 		return f, tmp, &PermError{Err: err}
 	}
+	if exposed {
+		// Its mode was set, but only after others could have opened it.
+		f.Close()
+		_ = r.Client.Remove(tmp)
+		why := "stayed"
+		if chErr != nil {
+			why = "couldn't be chmod'ed (" + chErr.Error() + ") and is"
+		}
+		return fail(&NotPrivateError{Dir: dir, Mode: perm, Want: mode.Perm(), Why: why})
+	}
 	return f, tmp, nil
+}
+
+// ErrNotPrivate is a temporary file not made because no one else could have
+// been kept from reading it while it was written: its directory couldn't
+// be made private, and a new file there starts more open than the one it's
+// for.
+var ErrNotPrivate = errors.New("not private")
+
+// NotPrivateError says which directory, and what mode it had.
+type NotPrivateError struct {
+	Dir        string
+	Mode, Want fs.FileMode
+	Why        string
+}
+
+func (e *NotPrivateError) Error() string {
+	return fmt.Sprintf("can't keep the copy private while it's written: the temporary directory %s %s mode %04o, so a new file there starts more open than %04o",
+		e.Dir, e.Why, e.Mode, e.Want)
+}
+
+func (e *NotPrivateError) Unwrap() error { return ErrNotPrivate }
+
+// chmodTempDir makes dir 0700; tests replace it to see what a server that
+// doesn't would mean.
+var chmodTempDir = func(c *sftp.Client, dir string) error { return c.Chmod(dir, 0o700) }
+
+// removeTempDir removes the private directory CreateTemp made for tmp, once
+// tmp has been moved out of it or removed. Nothing when tmp isn't in one
+// (this machine's temporary files aren't): only an empty directory with
+// that name is ever removed.
+func removeTempDir(dst FS, tmp string) (string, error) {
+	dir := dst.Dir(tmp)
+	if !isTempDirName(dst.Base(dir)) {
+		return "", nil
+	}
+	if err := dst.Remove(dir); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return dir, err
+	}
+	return "", nil
+}
+
+// tempDirName is a new private directory's name: .meterm-<12 hex>.
+func tempDirName() string {
+	var b [6]byte
+	_, _ = rand.Read(b[:])
+	return ".meterm-" + hex.EncodeToString(b[:])
+}
+
+func isTempDirName(name string) bool {
+	h, ok := strings.CutPrefix(name, ".meterm-")
+	if !ok || len(h) != 12 {
+		return false
+	}
+	_, err := hex.DecodeString(h)
+	return err == nil
 }
 
 // Resolve follows the link chain by hand: a relative target is relative to
