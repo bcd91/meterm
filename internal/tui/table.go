@@ -440,7 +440,11 @@ func (i item) detail(l layout) string {
 	if n := i.envNote(); n != "" {
 		parts = append(parts, n)
 	}
-	if l.cols[colGroup] == 0 && i.host.Group != "" {
+	switch {
+	case i.groupMissing:
+		// Shown even when the column is: the column can't say it's gone.
+		parts = append(parts, "group "+termsafe.Label(i.host.Group)+" doesn't exist: nothing inherited")
+	case l.cols[colGroup] == 0 && i.host.Group != "":
 		parts = append(parts, "["+termsafe.Label(i.host.Group)+"]")
 	}
 	if jump := jumpText(i.res); jump != "" {

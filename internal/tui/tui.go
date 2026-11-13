@@ -96,6 +96,7 @@ type item struct {
 	team         string // name of the team the host is shared with; "" = personal
 	envRaw       string // the env as written, when meterm doesn't know it (see Config.EnvUnrecognised)
 	attention    string // what team sync is waiting on for this host, if anything
+	groupMissing bool   // the host names a group the host file doesn't have: it inherits nothing
 }
 
 // target is user@address as the row shows it.
@@ -458,6 +459,9 @@ func (m *model) buildItems() []list.Item {
 		}
 		rows[i] = item{host: h, res: m.cfg.Resolve(h), status: m.checks[h.Name].State, check: m.checks[h.Name], last: last, keyInstalled: keyInstalled,
 			marked: m.marked[h.Name], attention: m.attention[h.Name], team: m.teams[h.Team], envRaw: m.cfg.EnvUnrecognised(h)}
+		if _, ok := m.cfg.Groups[h.Group]; h.Group != "" && !ok {
+			rows[i].groupMissing = true
+		}
 	}
 	sortItems(rows, m.sort)
 	items := make([]list.Item, len(rows))

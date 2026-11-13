@@ -31,7 +31,8 @@ type listRow struct {
 	Target        string   `json:"target"`
 	Route         string   `json:"route,omitempty"` // the route used (list --check), when not the host's own address
 	Group         string   `json:"group,omitempty"`
-	Team          string   `json:"team,omitempty"` // the team's name; empty for a personal host
+	GroupMissing  bool     `json:"group_missing,omitempty"` // the host names a group the host file doesn't have (removed): it inherits nothing
+	Team          string   `json:"team,omitempty"`          // the team's name; empty for a personal host
 	Tags          []string `json:"tags,omitempty"`
 	Env           string   `json:"env,omitempty"`              // the host's, or else its group's; absent when neither says
 	EnvRaw        string   `json:"env_unrecognised,omitempty"` // the env as written when meterm doesn't know it (env is then production)
@@ -122,6 +123,7 @@ func newListCmd() *cobra.Command {
 					Route:         r.Route,
 					routeNote:     routeNote,
 					Group:         h.Group,
+					GroupMissing:  h.Group != "" && !groupKnown(cfg, h.Group),
 					Team:          names[h.Team],
 					Tags:          h.Tags,
 					Env:           cfg.Env(h),
@@ -180,7 +182,11 @@ func writeListText(out io.Writer, rows []listRow, check bool) error {
 		l := termsafe.Label
 		// A name with a hidden character is spelled out, so it can't pass
 		// for the host whose name it shows.
-		line := fmt.Sprintf("%s\t%s\t%s\t%s\t%s\t%s", exactName(row.Name), l(tgt), l(row.Team), l(row.Group), l(strings.Join(row.Tags, ",")), exactName(row.Jump))
+		group := l(row.Group)
+		if row.GroupMissing {
+			group += " (no such group)" // removed: it inherits nothing from it
+		}
+		line := fmt.Sprintf("%s\t%s\t%s\t%s\t%s\t%s", exactName(row.Name), l(tgt), l(row.Team), group, l(strings.Join(row.Tags, ",")), exactName(row.Jump))
 		if showEnv {
 			env := l(row.Env)
 			if row.EnvRaw != "" {
@@ -325,4 +331,10 @@ func teamNames() map[string]string {
 		}
 	}
 	return out
+}
+
+// groupKnown says the host file has the group a host names.
+func groupKnown(cfg *config.Config, name string) bool {
+	_, ok := cfg.Groups[name]
+	return ok
 }
