@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -86,6 +87,32 @@ func afterRun(err error) {
 	if errors.Is(err, errCancelled) {
 		tellPicker("cancelled")
 	}
+}
+
+// takeGlobalFlags takes meterm's own flags (--config, --debug) off the
+// front of args, for a command that parses its own arguments (connect,
+// sync): cobra hands such a command every argument, the flags given before
+// its name included, so "meterm --config x connect web1" would otherwise
+// look for a host called "--config".
+func takeGlobalFlags(args []string) ([]string, error) {
+	for len(args) > 0 {
+		switch a := args[0]; {
+		case a == "--config":
+			if len(args) < 2 {
+				return nil, errors.New("--config needs the path to a host file")
+			}
+			cfgPath, args = args[1], args[2:]
+		case strings.HasPrefix(a, "--config="):
+			cfgPath, args = strings.TrimPrefix(a, "--config="), args[1:]
+		case a == "--debug":
+			team.SetDebug(os.Stderr)
+			os.Setenv("METERM_DEBUG", "1")
+			args = args[1:]
+		default:
+			return args, nil
+		}
+	}
+	return args, nil
 }
 
 // newRootCmd is meterm with all its commands, as main runs it: tests drive

@@ -34,6 +34,10 @@ func newConnectCmd() *cobra.Command {
 		Args:               cobra.MinimumNArgs(1),
 		DisableFlagParsing: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			args, err := takeGlobalFlags(args)
+			if err != nil {
+				return err
+			}
 			if len(args) > 0 && (args[0] == "-h" || args[0] == "--help") {
 				return cmd.Help()
 			}

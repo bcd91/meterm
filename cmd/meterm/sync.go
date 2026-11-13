@@ -11,6 +11,13 @@ func newSyncCmd() *cobra.Command {
 		Hidden:             true,
 		Deprecated:         "use `meterm cp --sync <src> <dst> [-- rsync-flags]`",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			args, err := takeGlobalFlags(args)
+			if err != nil {
+				return err
+			}
+			if len(args) < 2 {
+				return cmd.Help()
+			}
 			if len(args) > 0 && (args[0] == "-h" || args[0] == "--help") {
 				return cmd.Help()
 			}
