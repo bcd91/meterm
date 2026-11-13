@@ -8,23 +8,23 @@ import (
 func TestText(t *testing.T) {
 	const x = "�"
 	for in, want := range map[string]string{
-		"plain/path ü 日本語 🙂":   "plain/path ü 日本語 🙂",
-		"":                     "",
-		"a\x1b]52;c;aGk=\x07b": "a" + x + "]52;c;aGk=" + x + "b",
-		"a\x1b[2Jb":            "a" + x + "[2Jb",
-		"a\nb\rc\td":           "a" + x + "b" + x + "c" + x + "d",
-		"a\u009b31mb":          "a" + x + "31mb", // C1 CSI, as UTF-8
-		"a\x9b31mb":            "a" + x + "31mb", // C1 CSI, as a raw byte
-		"a\xffb":               "a" + x + "b",
-		"evil‮gnp.exe":         "evil" + x + "gnp.exe",
-		"a⁦b⁩":                 "a" + x + "b" + x,
-		"a​b‍b\xef\xbb\xbfc":   "a" + x + "b" + x + "b" + x + "c",
-		"a­b":                  "a" + x + "b",
-		"a b c":                "a" + x + "b" + x + "c",
-		"a\U000E0041b":         "a" + x + "b", // tag character
-		"a￾b￿c":                "a" + x + "b" + x + "c",
-		"a\x7fb":               "a" + x + "b",
-		"a\x00b":               "a" + x + "b",
+		"plain/path ü 日本語 🙂":           "plain/path ü 日本語 🙂",
+		"":                             "",
+		"a\x1b]52;c;aGk=\x07b":         "a" + x + "]52;c;aGk=" + x + "b",
+		"a\x1b[2Jb":                    "a" + x + "[2Jb",
+		"a\nb\rc\td":                   "a" + x + "b" + x + "c" + x + "d",
+		"a\u009b31mb":                  "a" + x + "31mb", // C1 CSI, as UTF-8
+		"a\x9b31mb":                    "a" + x + "31mb", // C1 CSI, as a raw byte
+		"a\xffb":                       "a" + x + "b",
+		"evil\u202egnp.exe":            "evil" + x + "gnp.exe",
+		"a\u2066b\u2069":               "a" + x + "b" + x,
+		"a\u200bb\u200db\xef\xbb\xbfc": "a" + x + "b" + x + "b" + x + "c",
+		"a\u00adb":                     "a" + x + "b",
+		"a\u2028b\u2029c":              "a" + x + "b" + x + "c",
+		"a\U000E0041b":                 "a" + x + "b", // tag character
+		"a￾b￿c":                        "a" + x + "b" + x + "c",
+		"a\x7fb":                       "a" + x + "b",
+		"a\x00b":                       "a" + x + "b",
 	} {
 		if got := Text(in); got != want {
 			t.Errorf("Text(%q) = %q, want %q", in, got, want)
@@ -61,7 +61,7 @@ func TestTextDefaultIgnorableAndFillers(t *testing.T) {
 }
 
 func TestTextUnsafe(t *testing.T) {
-	if Unsafe("web1/db ü") || !Unsafe("a\x1b") || !Unsafe("a‮") {
+	if Unsafe("web1/db ü") || !Unsafe("a\x1b") || !Unsafe("a\u202e") {
 		t.Error("Unsafe disagrees with Text")
 	}
 }

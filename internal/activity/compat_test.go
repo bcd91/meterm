@@ -235,13 +235,13 @@ func TestVerifyCatchesEditsToNewFields(t *testing.T) {
 
 func TestAppendCleansAndBoundsWhatItKeeps(t *testing.T) {
 	l := newLog(t)
-	hostile := "a\x1b]52;c;aGk=\x07b‮c\u009b2Jd\nnext\xff"
+	hostile := "a\x1b]52;c;aGk=\x07b\u202ec\u009b2Jd\nnext\xff"
 	e, err := l.Append(Event{Action: hostile, Host: hostile, Target: hostile, User: hostile, Detail: hostile + strings.Repeat("x", 3*maxDetail)})
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, s := range []string{e.Action, e.Host, e.Target, e.User, e.Detail} {
-		if strings.ContainsAny(s, "\x1b\x07‮\u009b\n") || !strings.Contains(s, "�") {
+		if strings.ContainsAny(s, "\x1b\x07\u202e\u009b\n") || !strings.Contains(s, "�") {
 			t.Errorf("not cleaned: %q", s)
 		}
 	}

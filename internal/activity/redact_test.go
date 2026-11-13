@@ -165,3 +165,59 @@ func TestAppendRedactsBeforeHashing(t *testing.T) {
 		t.Errorf("chain broken after redacting: %+v", broken)
 	}
 }
+
+// A credential word at the end of a path is still a key: db/password: x
+// must not let x through (a reverted change once did).
+func TestRedactPathEndingInACredentialWord(t *testing.T) {
+	for _, c := range []struct{ in, secret string }{
+		{"echo db/password: hunter2", "hunter2"},
+		{"vault kv put kv/app/token: abc123", "abc123"},
+		{"curl -d 'api/secret: abc'", "abc"},
+	} {
+		if got := Redact(c.in); strings.Contains(got, c.secret) || !strings.Contains(got, redacted) {
+			t.Errorf("Redact(%q) = %q", c.in, got)
+		}
+	}
+}
+
+// openssl takes a password or a raw key in its own flags.
+func TestRedactOpenssl(t *testing.T) {
+	for _, c := range []struct{ in, secret string }{
+		{"openssl enc -aes-256-cbc -k hunter2 -in a -out b", "hunter2"},
+		{"openssl enc -aes-256-cbc -K 00112233445566778899aabbccddeeff -iv 00 -in a", "00112233445566778899aabbccddeeff"},
+		{"openssl enc -pass pass:hunter2 -in a", "hunter2"},
+		{"openssl rsa -passin pass:hunter2 -in k.pem", "hunter2"},
+		{"openssl pkcs12 -export -passout pass:hunter2 -in c.pem", "hunter2"},
+		{"openssl req -passin=pass:hunter2", "hunter2"},
+		{"sudo /usr/bin/openssl enc -d -k 'two words' -in a", "two words"},
+	} {
+		if got := Redact(c.in); strings.Contains(got, c.secret) || !strings.Contains(got, redacted) {
+			t.Errorf("Redact(%q) = %q", c.in, got)
+		}
+	}
+	// -kfile names a file; -k means something else to other programs.
+	for _, in := range []string{"openssl enc -d -kfile /run/pw -in a", "tar -k -xf a.tar", "make -k all", "curl -k https://example.com"} {
+		if got := Redact(in); got != in {
+			t.Errorf("Redact(%q) = %q, want it unchanged", in, got)
+		}
+	}
+}
+
+// vault login takes its token as a bare word, after any flags.
+func TestRedactVaultLogin(t *testing.T) {
+	for in, want := range map[string]string{
+		"vault login s.AbCdEf1234567890":                             "vault login [REDACTED]",
+		"vault login -no-print hvs.EXAMPLE_not_a_real_token":         "vault login -no-print [REDACTED]",
+		"sudo vault login -address=https://vault.example.com tok123": "sudo vault login -address=https://vault.example.com [REDACTED]",
+		"vault login -method=token token=s.abc123def":                "vault login -method=token token=[REDACTED]",
+		"vault login -method=userpass username=bob password=hunter2": "vault login -method=userpass username=bob password=[REDACTED]",
+		"vault login -method=oidc":                                   "vault login -method=oidc",
+		"vault login -":                                              "vault login -",
+		"echo hvs.EXAMPLE_not_a_real_token":                          "echo [REDACTED]",
+		"vault status":                                               "vault status",
+	} {
+		if got := Redact(in); got != want {
+			t.Errorf("Redact(%q) = %q, want %q", in, got, want)
+		}
+	}
+}

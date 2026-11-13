@@ -62,12 +62,15 @@ func newTunnelAddCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			h, idx := cfg.Find(args[0])
+			h, idx, lerr := cfg.Lookup(args[0])
+			if lerr != nil {
+				return lerr
+			}
 			if idx < 0 {
 				return fmt.Errorf("no such host: %s (use `meterm list` to see saved hosts)", args[0])
 			}
 			fw.Note = strings.TrimSpace(note)
-			if err := config.CheckText("--note", fw.Note); err != nil || len(fw.Note) > 200 {
+			if err := config.CheckNote("--note", fw.Note); err != nil || len(fw.Note) > 200 {
 				return fmt.Errorf("--note: plain text, at most 200 characters")
 			}
 			for _, f := range h.Forwards {
@@ -165,7 +168,11 @@ func saveTunnel(cfg *config.Config, name string, fw config.Forward) error {
 	verb := "added"
 	err := cfg.Update(func(c *config.Config) error {
 		var idx int
-		h, idx = c.Find(name)
+		var lerr error
+		h, idx, lerr = c.Lookup(name)
+		if lerr != nil {
+			return lerr
+		}
 		if idx < 0 {
 			return fmt.Errorf("no such host: %s", name)
 		}
@@ -183,9 +190,9 @@ func saveTunnel(cfg *config.Config, name string, fw config.Forward) error {
 		return err
 	}
 	flag, spec := sshrun.ForwardSpec(fw)
-	fmt.Printf("Tunnel %s/%s %s (%s %s).\n", h.Name, fw.Name, verb, flag, spec)
+	fmt.Printf("Tunnel %s/%s %s (%s %s).\n", lbl(h.Name), lbl(fw.Name), verb, flag, spec)
 	if fw.Note != "" {
-		fmt.Printf("  %s\n", fw.Note)
+		fmt.Printf("  %s\n", lbl(fw.Note))
 	}
 	if h.Team != "" {
 		fmt.Println("This is a team host: `meterm team push` shares the tunnel with the team.")
@@ -197,6 +204,9 @@ func saveTunnel(cfg *config.Config, name string, fw config.Forward) error {
 func tunnelFromFlags(name, local, remote string, dynamic int) (config.Forward, error) {
 	if name == "" || strings.ContainsAny(name, "/ \t") {
 		return config.Forward{}, fmt.Errorf("tunnel name %q: use letters, digits, - or _", name)
+	}
+	if err := config.CheckName("tunnel name", name); err != nil {
+		return config.Forward{}, err
 	}
 	set := 0
 	for _, on := range []bool{local != "", remote != "", dynamic != 0} {
@@ -260,7 +270,7 @@ func newTunnelListCmd() *cobra.Command {
 					if cfg.IsProduction(h) || f.MentionsProduction() {
 						note = "⚠ " + note
 					}
-					fmt.Fprintf(tw, "%s/%s\t%s\t%s\n", h.Name, f.Name, describeTunnel(f), note)
+					fmt.Fprintf(tw, "%s/%s\t%s\t%s\n", lbl(h.Name), lbl(f.Name), lbl(describeTunnel(f)), lbl(note))
 					n++
 				}
 			}
@@ -296,7 +306,10 @@ func newTunnelRmCmd() *cobra.Command {
 				return err
 			}
 			err = cfg.Update(func(c *config.Config) error {
-				h, idx := c.Find(args[0])
+				h, idx, lerr := c.Lookup(args[0])
+				if lerr != nil {
+					return lerr
+				}
 				if idx < 0 {
 					return fmt.Errorf("no such host: %s", args[0])
 				}
@@ -501,17 +514,19 @@ func runTunnelUp(args []string, keep, service bool) error {
 	}
 	for _, s := range sets {
 		var names []string
+		leads := false
 		for _, f := range s.forward {
 			names = append(names, f.Name)
-			fmt.Printf("%s/%s: %s\n", termsafe.Text(s.host.Name), termsafe.Text(f.Name), termsafe.Text(describeTunnel(f)))
+			fmt.Printf("%s/%s: %s\n", lbl(s.host.Name), lbl(f.Name), lbl(describeTunnel(f)))
+			leads = leads || f.MentionsProduction()
 		}
-		recordActivity(cfg, s.host, "tunnel", strings.Join(names, ","))
+		recordActivity(cfg, s.host, "tunnel", noteDetail(namedNote(cfg, s.host, leads), strings.Join(names, ",")))
 	}
 	kickAutosync(false, true)
 	for _, set := range sets {
 		for _, f := range set.forward {
 			if cfg.IsProduction(set.host) || f.MentionsProduction() {
-				fmt.Fprintf(os.Stderr, "⚠ %s/%s reaches PRODUCTION: %s\n", termsafe.Text(set.host.Name), termsafe.Text(f.Name), termsafe.Text(f.Note))
+				fmt.Fprintf(os.Stderr, "⚠ %s/%s reaches PRODUCTION: %s\n", lbl(set.host.Name), lbl(f.Name), lbl(f.Note))
 			}
 		}
 	}

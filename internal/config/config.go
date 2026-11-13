@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -15,6 +16,7 @@ import (
 
 	"meterm/internal/lockfile"
 	"meterm/internal/safefile"
+	"meterm/internal/termsafe"
 )
 
 // Forward describes a saved port-forwarding rule for a host. An unnamed
@@ -289,16 +291,16 @@ func (c *Config) Find(name string) (*Host, int) {
 // only applies when no saved host is literally called that. The index is
 // -1 when nothing matches, and err says why a user@ form was refused.
 func (c *Config) Target(arg string) (*Host, int, error) {
-	if h, i := c.Find(arg); i >= 0 {
-		return h, i, nil
+	if h, i, err := c.Lookup(arg); i >= 0 || err != nil {
+		return h, i, err
 	}
 	at := strings.LastIndex(arg, "@")
 	if at <= 0 {
 		return nil, -1, nil
 	}
-	h, i := c.Find(arg[at+1:])
+	h, i, err := c.Lookup(arg[at+1:])
 	if i < 0 {
-		return nil, -1, nil
+		return nil, -1, err
 	}
 	user := arg[:at]
 	if err := CheckUser(user); err != nil {
@@ -358,4 +360,69 @@ func (c *Config) SortedGroupNames() []string {
 	}
 	sort.Strings(names)
 	return names
+}
+
+// Lookup finds the host a command-line argument names: by its exact name,
+// or else by its name as meterm shows it (termsafe.Label), which is all a
+// person can type for a host whose name holds control characters. A name
+// that two hosts show as is an error naming both, rather than a guess —
+// even when one of them is called exactly that: "zwsp" and "zw\u200bsp"
+// both show as zwsp, and whoever typed it may mean either. A name with
+// hidden characters in it can only be typed on purpose, so it matches
+// exactly. The index is -1 when nothing matches.
+func (c *Config) Lookup(name string) (*Host, int, error) {
+	if h, i := c.Find(name); i >= 0 && termsafe.Label(name) != name {
+		return h, i, nil
+	}
+	found := -1
+	var same []string
+	for i := range c.Hosts {
+		if termsafe.Label(c.Hosts[i].Name) == name {
+			found = i
+			same = append(same, strconv.Quote(c.Hosts[i].Name))
+		}
+	}
+	switch len(same) {
+	case 0:
+		return nil, -1, nil
+	case 1:
+		return &c.Hosts[found], found, nil
+	}
+	return nil, -1, fmt.Errorf("%q is %d hosts as meterm shows them (%s): use the exact name, as `meterm list --format json` spells it, or rename one",
+		name, len(same), strings.Join(same, ", "))
+}
+
+// JumpedBy is the hosts whose way in goes through the host called name: in
+// their own jump path, a route's, or (when they have none of their own)
+// their group's. Delete name and their jump is left naming a host meterm no
+// longer has, which ssh then looks up by itself (DNS, ~/.ssh/config): maybe
+// a different machine.
+func (c *Config) JumpedBy(name string) []string {
+	names := func(spec string) bool {
+		for _, hop := range strings.Split(spec, ",") {
+			if strings.TrimSpace(hop) == name {
+				return true
+			}
+		}
+		return false
+	}
+	var out []string
+	for _, h := range c.Hosts {
+		if h.Name == name {
+			continue
+		}
+		jump := h.ProxyJump
+		if jump == "" {
+			jump = c.Groups[h.Group].ProxyJump
+		}
+		uses := names(jump)
+		for _, rt := range h.Routes {
+			uses = uses || names(rt.ProxyJump)
+		}
+		if uses {
+			out = append(out, h.Name)
+		}
+	}
+	sort.Strings(out)
+	return out
 }

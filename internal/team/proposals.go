@@ -72,8 +72,11 @@ func (g *GitStore) Propose(ctx context.Context, teamID string, p Proposal) error
 // Proposals lists what's waiting for approval, oldest first. Each is as its
 // proposer wrote it: untrusted until approved, and checked again then.
 func (g *GitStore) Proposals(ctx context.Context, teamID string) ([]Proposal, error) {
-	g.mu.Lock()
-	defer g.mu.Unlock()
+	unlock, err := g.lockRepo()
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
 	if _, err := g.git(ctx, "fetch", "-q", "origin"); err != nil {
 		return nil, err
 	}
@@ -184,9 +187,13 @@ func ReviewProposal(p Proposal, team []SharedHost) Review {
 		}
 		return rv
 	}
-	if err := p.Host.ApplyTo(config.Host{}, "proposal").CheckShared(); err != nil {
+	warn, err := p.Host.ApplyTo(config.Host{}, "proposal").CheckFromTeam()
+	if err != nil {
 		rv.Invalid = err
 		return rv
+	}
+	if warn != nil {
+		rv.Warnings = append(rv.Warnings, warn.Error()+": older versions took it, so it isn't refused here")
 	}
 	addrs := []string{p.Host.Address}
 	for _, rt := range p.Host.Routes {

@@ -46,12 +46,13 @@ func Diff(a, b SharedHost) []string {
 	return out
 }
 
-// Problems counts the changes a person must sort out. A change that's only
-// pending because this run didn't push isn't one.
+// Problems counts the changes a person must sort out, a host the team holds
+// that wasn't safe to apply among them. A change that's only pending because
+// this run didn't push isn't one.
 func Problems(cs []Change) int {
 	n := 0
 	for _, c := range cs {
-		if c.Outcome == Conflict || c.Outcome == NameTaken || c.Outcome == Forbidden {
+		if c.Outcome == Conflict || c.Outcome == NameTaken || c.Outcome == Forbidden || c.Outcome == Rejected {
 			n++
 		}
 	}

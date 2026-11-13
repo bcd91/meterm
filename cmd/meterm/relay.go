@@ -58,25 +58,27 @@ func newRelayInitCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			h, idx := cfg.Find(args[0])
+			h, idx, lerr := cfg.Lookup(args[0])
+			if lerr != nil {
+				return lerr
+			}
 			if idx < 0 {
 				return fmt.Errorf("no such host: %s", args[0])
 			}
-			fmt.Printf("On %s this will, as root:\n", h.Name)
+			fmt.Printf("On %s this will, as root:\n", lbl(h.Name))
 			fmt.Printf("  - create the account %q (no password, no shell)\n", relay.User)
 			fmt.Printf("  - add a \"Match User %s\" block to the end of /etc/ssh/sshd_config allowing\n    reverse port forwards on localhost only, and add it to any AllowUsers line\n", relay.User)
 			fmt.Println("  - check the config with `sshd -t` (putting the old one back if it fails), then restart sshd")
 			fmt.Println("Open SSH sessions stay up across the restart.")
 			if !yes && !confirm("Go ahead?") {
-				fmt.Println("Nothing changed.")
-				return nil
+				return cancelled("nothing changed")
 			}
 			out, err := runAsRoot(cfg, *h, relay.InitScript())
 			if err := scriptResult(h.Name, out, err); err != nil {
 				return err
 			}
 			recordActivity(cfg, *h, "relay-init", relay.User)
-			fmt.Printf("%s is ready to be a relay. Next: meterm relay enroll <machine> --via %s\n", h.Name, h.Name)
+			fmt.Printf("%s is ready to be a relay. Next: meterm relay enroll <machine> --via %s\n", lbl(h.Name), lbl(h.Name))
 			return nil
 		},
 	}
@@ -105,7 +107,10 @@ func newRelayEnrollCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			node, ni := cfg.Find(args[0])
+			node, ni, lerr := cfg.Lookup(args[0])
+			if lerr != nil {
+				return lerr
+			}
 			if ni < 0 {
 				return fmt.Errorf("no such host: %s", args[0])
 			}
@@ -147,24 +152,23 @@ func newRelayEnrollCmd() *cobra.Command {
 				return err
 			}
 
-			fmt.Printf("On %s (as root): a key in /etc/meterm-relay and the unit %s,\n", node.Name, relay.UnitName(rh.Name))
+			fmt.Printf("On %s (as root): a key in /etc/meterm-relay and the unit %s,\n", lbl(node.Name), lbl(relay.UnitName(rh.Name)))
 			fmt.Printf("  keeping a tunnel to the first of %s it can reach.\n", strings.Join(cands, ", "))
-			fmt.Printf("On %s (as root): allow that key to listen on localhost:%d, nothing else.\n", rh.Name, port)
-			fmt.Printf("Here: route %q on %s (127.0.0.1:%d via %s).\n", routeName, node.Name, port, rh.Name)
+			fmt.Printf("On %s (as root): allow that key to listen on localhost:%d, nothing else.\n", lbl(rh.Name), port)
+			fmt.Printf("Here: route %q on %s (127.0.0.1:%d via %s).\n", routeName, lbl(node.Name), port, lbl(rh.Name))
 			if !yes && !confirm("Go ahead?") {
-				fmt.Println("Nothing changed.")
-				return nil
+				return cancelled("nothing changed")
 			}
 
-			fmt.Printf("\n[1/3] %s\n", node.Name)
+			fmt.Printf("\n[1/3] %s\n", lbl(node.Name))
 			out, err := runAsRoot(cfg, *node, script)
 			if err := scriptResult(node.Name, out, err); err != nil {
 				return err
 			}
 			pub, addr := relay.Marker(out, "PUBKEY"), relay.Marker(out, "RELAY-ADDR")
-			fmt.Printf("%s reaches %s at %s.\n", node.Name, rh.Name, addr)
+			fmt.Printf("%s reaches %s at %s.\n", lbl(node.Name), lbl(rh.Name), addr)
 
-			fmt.Printf("[2/3] %s\n", rh.Name)
+			fmt.Printf("[2/3] %s\n", lbl(rh.Name))
 			add, err := relay.AddKeyScript(pub, node.Name, port)
 			if err != nil {
 				return err
@@ -192,11 +196,11 @@ func newRelayEnrollCmd() *cobra.Command {
 			}
 			recordActivity(cfg, *node, "relay-enroll", fmt.Sprintf("via %s, port %d", rh.Name, port))
 			if !up {
-				fmt.Printf("The route is saved, but the tunnel isn't listening on %s yet. On %s, see:\n  systemctl status %s\n", rh.Name, node.Name, relay.UnitName(rh.Name))
+				fmt.Printf("The route is saved, but the tunnel isn't listening on %s yet. On %s, see:\n  systemctl status %s\n", lbl(rh.Name), lbl(node.Name), lbl(relay.UnitName(rh.Name)))
 				return nil
 			}
-			fmt.Printf("Tunnel up: %s is reachable through %s (route %q), used whenever its own address doesn't answer.\n", node.Name, rh.Name, routeName)
-			fmt.Printf("Check it with: meterm route check %s\n", node.Name)
+			fmt.Printf("Tunnel up: %s is reachable through %s (route %q), used whenever its own address doesn't answer.\n", lbl(node.Name), lbl(rh.Name), routeName)
+			fmt.Printf("Check it with: meterm route check %s\n", lbl(node.Name))
 			teamEditHint(*node)
 			return nil
 		},
@@ -272,7 +276,10 @@ func newRelayRemoveCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			node, ni := cfg.Find(args[0])
+			node, ni, lerr := cfg.Lookup(args[0])
+			if lerr != nil {
+				return lerr
+			}
 			if ni < 0 {
 				return fmt.Errorf("no such host: %s", args[0])
 			}
@@ -291,10 +298,9 @@ func newRelayRemoveCmd() *cobra.Command {
 			} else {
 				return fmt.Errorf("%s isn't enrolled with a relay", node.Name)
 			}
-			fmt.Printf("Stop and remove %s's tunnel through %s (%s).\n", node.Name, relayName, routeName)
+			fmt.Printf("Stop and remove %s's tunnel through %s (%s).\n", lbl(node.Name), relayName, routeName)
 			if !yes && !confirm("Go ahead?") {
-				fmt.Println("Nothing changed.")
-				return nil
+				return cancelled("nothing changed")
 			}
 			var problems []string
 			out, err := runAsRoot(cfg, *node, relay.NodeRemoveScript(relayName))
@@ -308,7 +314,7 @@ func newRelayRemoveCmd() *cobra.Command {
 				}
 			}
 			if routeName == "default" {
-				fmt.Printf("The tunnel was %s's only way in; `meterm rm %s` once you no longer need the entry.\n", node.Name, node.Name)
+				fmt.Printf("The tunnel was %s's only way in; `meterm rm %s` once you no longer need the entry.\n", lbl(node.Name), lbl(node.Name))
 			} else {
 				nodeName := node.Name
 				err = cfg.Update(func(c *config.Config) error {
@@ -321,7 +327,7 @@ func newRelayRemoveCmd() *cobra.Command {
 				if err != nil {
 					return err
 				}
-				fmt.Printf("Route %q removed from %s.\n", routeName, node.Name)
+				fmt.Printf("Route %q removed from %s.\n", routeName, lbl(node.Name))
 			}
 			teamEditHint(*node)
 			if len(problems) > 0 {

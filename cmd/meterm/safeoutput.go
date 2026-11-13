@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"os/exec"
+	"strings"
 
 	"github.com/mattn/go-isatty"
 
@@ -37,4 +38,25 @@ func safeText(s string, f *os.File, raw bool) string {
 		return s
 	}
 	return termsafe.String(s)
+}
+
+// lbl is outside text (a host name, a group, a note, a teammate's email)
+// made one safe line for the terminal: no escape sequence, control
+// character or bidi override. Output from a host goes through termsafe's
+// Writer instead, which keeps its colours.
+func lbl(s string) string { return termsafe.Label(s) }
+
+// exactName is a host name for a message that must say which host it was:
+// as it is when it shows as itself, Go-quoted ("zw\u200bsp") when it holds
+// a character that wouldn't show, a quote or a backslash, so it can't pass
+// for another host (termsafe.Exact).
+func exactName(s string) string { return termsafe.Exact(s) }
+
+// lblLines is lbl for each line of a multi-line text, keeping the lines.
+func lblLines(s string) string {
+	lines := strings.Split(s, "\n")
+	for i, l := range lines {
+		lines[i] = termsafe.Label(l)
+	}
+	return strings.Join(lines, "\n")
 }

@@ -76,7 +76,7 @@ func TestParseRefuses(t *testing.T) {
 }
 
 func TestParseCleansEveryString(t *testing.T) {
-	const bad = "x\x1b[2J\x1b]52;c;aGk=\x07\u009b1m‮⁦​\ny"
+	const bad = "x\x1b[2J\x1b]52;c;aGk=\x07\u009b1m\u202e\u2066\u200b\ny"
 	enc, _ := json.Marshal(bad)
 	var fields []string
 	for _, f := range []string{"cwd", "kind", "id", "state", "status", "waitingFor", "sessionId", "name"} {
@@ -88,7 +88,7 @@ func TestParseCleansEveryString(t *testing.T) {
 	}
 	a := got[0]
 	for _, s := range []string{a.Cwd, a.Kind, a.ID, a.State, a.Status, a.WaitingFor, a.SessionID, a.Name} {
-		if strings.ContainsAny(s, "\x1b\x07\u009b‮⁦​\n") {
+		if strings.ContainsAny(s, "\x1b\x07\u009b\u202e\u2066\u200b\n") {
 			t.Errorf("got through: %q", s)
 		}
 		if !strings.HasPrefix(s, "x") || !strings.HasSuffix(s, "y") {

@@ -84,13 +84,13 @@ func chooseTmux(host string, sessions []tmuxSession, in io.Reader, out io.Writer
 	if !interactive {
 		return sessions[best].Name
 	}
-	fmt.Fprintf(out, "tmux sessions on %s:\n", host)
+	fmt.Fprintf(out, "tmux sessions on %s:\n", lbl(host))
 	for i, s := range sessions {
 		state := "last active " + history.FormatAgo(s.Activity)
 		if s.Attached > 0 {
 			state = fmt.Sprintf("attached (%d), %s", s.Attached, state)
 		}
-		fmt.Fprintf(out, "  %d) %-16s %d window(s)  %s\n", i+1, s.Name, s.Windows, state)
+		fmt.Fprintf(out, "  %d) %-16s %d window(s)  %s\n", i+1, lbl(s.Name), s.Windows, lbl(state))
 	}
 	fmt.Fprintf(out, "  n) new session\nChoose [%d]: ", best+1)
 	line, _ := bufio.NewReader(in).ReadString('\n')

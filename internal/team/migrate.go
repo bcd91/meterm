@@ -12,9 +12,11 @@ import (
 
 // MigratedFrom is the cloud team this Git team was moved from, if any.
 func (g *GitStore) MigratedFrom(ctx context.Context) (string, error) {
-	if err := g.read(ctx); err != nil {
+	done, err := g.read(ctx)
+	if err != nil {
 		return "", err
 	}
+	defer done()
 	tf, err := g.teamFile()
 	return tf.MigratedFrom, err
 }

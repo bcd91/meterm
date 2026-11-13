@@ -8,14 +8,17 @@ import (
 	"os"
 	"os/exec"
 	"regexp"
+	"strconv"
 	"strings"
-	"text/tabwriter"
 	"time"
 
 	"github.com/spf13/cobra"
+	"golang.org/x/term"
 
 	"meterm/internal/activity"
+	"meterm/internal/cellwidth"
 	"meterm/internal/config"
+	"meterm/internal/fileman"
 	"meterm/internal/termsafe"
 )
 
@@ -84,6 +87,10 @@ func outcomeOf(err error, took time.Duration) activity.Outcome {
 		o.ExitCode = &code
 	case errors.As(err, &exit):
 		o.Note = "killed"
+	case errors.Is(err, fileman.ErrDropped):
+		o.Note = "stopped" // on purpose: the person dropped a stalled connection
+	case errors.Is(err, errCancelled):
+		o.Note = "cancelled"
 	default:
 		o.Note = "failed"
 	}
@@ -117,8 +124,11 @@ func commandDetail(command []string, logArgs bool) string {
 	if logArgs {
 		return strings.Join(command, " ")
 	}
+	// One argument is a line for the host's shell: its program is the first
+	// word, and the rest is one argument however many words it has.
+	line := len(command) == 1
 	words := command
-	if len(words) == 1 {
+	if line {
 		words = strings.Fields(words[0])
 	}
 	for len(words) > 0 && envWordRE.MatchString(words[0]) {
@@ -131,7 +141,10 @@ func commandDetail(command []string, logArgs bool) string {
 	if r := []rune(prog); len(r) > 64 {
 		prog = string(r[:64]) + "…"
 	}
-	if n := len(words) - 1; n > 0 {
+	switch n := len(words) - 1; {
+	case line && n > 0:
+		return prog + " (shell line)"
+	case !line && n > 0:
 		return fmt.Sprintf("%s (+%d args)", prog, n)
 	}
 	return prog
@@ -144,6 +157,7 @@ func newActivityCmd() *cobra.Command {
 		format string
 		verify bool
 		repair bool
+		full   bool
 	)
 	cmd := &cobra.Command{
 		Use:   "activity",
@@ -158,7 +172,21 @@ func newActivityCmd() *cobra.Command {
 			"or differs. A last line cut short by a crash is a note, not a failure.\n\n" +
 			"--repair moves lines that aren't events to a damaged-* file beside the log, and records\n" +
 			"that as an event. It can't make a log hold that doesn't: an edited event stays broken,\n" +
-			"and a real event replaced by rubbish leaves a hole the chain shows.",
+			"and a real event replaced by rubbish leaves a hole the chain shows.\n\n" +
+			"On a terminal a long host name is cut to 24 columns (16 under 120) and a\n" +
+			"detail that doesn't fit loses its middle. What it keeps: an outcome written\n" +
+			"first, up to the first ':' or ';' (\"failed:\"), whole when it leaves room for\n" +
+			"more, else its start; then the start and end of the rest, and a file\n" +
+			"manager's word for the file in between (unchanged, not created, partly\n" +
+			"written). On a narrow terminal ACTOR, USER, HOST and ACTION are cut to fit\n" +
+			"the row, ACTOR to its kind (agent). A cut detail writes\n" +
+			"its production note short: ⚑asked (asked here), ⚑picker (asked in the picker),\n" +
+			"⚑--yes, ⚑no prompt (stdin wasn't a terminal), ⚑named (named on the command\n" +
+			"line), ⚑not asked (the picker started it without asking); ⚑via … behind a\n" +
+			"production jump host, ⚑tunnel … for a tunnel that leads there.\n" +
+			"A TARGET column (user@address) is added from 140 columns. --full wraps the\n" +
+			"detail instead, note as written, and always has TARGET. Piped or redirected,\n" +
+			"nothing is cut. --host takes a name as meterm shows it.",
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if format != "text" && format != "" && format != "json" {
@@ -183,47 +211,45 @@ func newActivityCmd() *cobra.Command {
 				return err
 			}
 
+			if host != "" {
+				if events, err = filterHost(events, host); err != nil {
+					return err
+				}
+			}
+
 			if format == "json" {
-				var shown []activity.Event
+				shown := make([]activity.Event, 0, len(events))
 				for _, e := range events {
-					if host == "" || e.Host == host {
-						shown = append(shown, e.Clean())
-					}
+					shown = append(shown, e.Clean())
 				}
 				if limit > 0 && len(shown) > limit {
 					shown = shown[len(shown)-limit:]
 				}
-				if shown == nil {
-					shown = []activity.Event{}
-				}
-				enc := json.NewEncoder(os.Stdout)
-				enc.SetIndent("", "  ")
-				return enc.Encode(shown)
+				return encodeJSON(os.Stdout, shown)
 			}
 
-			rows := activityRows(events, host)
+			rows := activityRows(events, "")
 			if limit > 0 && len(rows) > limit {
 				rows = rows[len(rows)-limit:]
+			}
+			if len(rows) == 0 && host != "" {
+				fmt.Printf("No activity recorded for %s.\n", exactName(host))
+				return nil
 			}
 			if len(rows) == 0 {
 				fmt.Println("No activity recorded yet.")
 				return nil
 			}
-			w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-			fmt.Fprintln(w, "TIME\tUSER\tACTOR\tACTION\tHOST\tEXIT\tTOOK\tDETAIL")
-			for _, r := range rows {
-				e := r.Clean()
-				fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", e.Time.Local().Format("2006-01-02 15:04:05"), e.User,
-					actorLabel(e), e.Action, e.Host, r.exit, r.took, oneLine(e.Detail, 60))
-			}
-			return w.Flush()
+			printActivity(os.Stdout, rows, terminalWidth(os.Stdout), full)
+			return nil
 		},
 	}
-	cmd.Flags().StringVar(&host, "host", "", "only show actions on this saved host")
+	cmd.Flags().StringVar(&host, "host", "", "only show actions on this host (the name as shown, or exactly)")
 	cmd.Flags().IntVarP(&limit, "limit", "n", 50, "show at most this many recent events (0 = all)")
 	cmd.Flags().StringVar(&format, "format", "text", "output format: text or json")
 	cmd.Flags().BoolVar(&verify, "verify", false, "check the hash chain instead of listing events")
 	cmd.Flags().BoolVar(&repair, "repair", false, "move lines that aren't events aside, keep them, and record that")
+	cmd.Flags().BoolVar(&full, "full", false, "show each detail in full, wrapped, instead of cut at the terminal's edge")
 	return cmd
 }
 
@@ -420,9 +446,411 @@ func actorLabel(e activity.Event) string {
 }
 
 func oneLine(s string, max int) string {
-	s = strings.Join(strings.Fields(s), " ")
+	s = strings.Join(strings.Fields(lbl(s)), " ")
 	if len([]rune(s)) > max {
 		return string([]rune(s)[:max-1]) + "…"
 	}
 	return s
+}
+
+// filterHost is the events on the host called name: by its exact name, or
+// by the name as meterm shows it, with config.Lookup's rule — a shown name
+// two hosts share is an error naming both. Hosts that were removed or
+// renamed are still in the log, so it goes by the log's names.
+func filterHost(events []activity.Event, name string) ([]activity.Event, error) {
+	match := func(e activity.Event) bool { return e.Host == name }
+	if lbl(name) == name {
+		var same []string
+		seen := map[string]bool{}
+		for _, e := range events {
+			if lbl(e.Host) == name && !seen[e.Host] {
+				seen[e.Host] = true
+				same = append(same, termsafe.Quote(e.Host))
+			}
+		}
+		if len(same) > 1 {
+			return nil, fmt.Errorf("%q is %d hosts in the log as meterm shows them (%s): use the exact name, as `meterm activity --format json` spells it",
+				name, len(same), strings.Join(same, ", "))
+		}
+		match = func(e activity.Event) bool { return lbl(e.Host) == name }
+	}
+	var out []activity.Event
+	for _, e := range events {
+		if match(e) {
+			out = append(out, e)
+		}
+	}
+	return out, nil
+}
+
+// The HOST column is at most this wide on a terminal, so one long name
+// doesn't push every detail off the line; narrower under 120 columns, where
+// the year and the seconds' room goes to the detail too.
+const (
+	activityHostWidth       = 24
+	activityHostWidthNarrow = 16
+	activityNarrow          = 120
+)
+
+// A detail with fewer cells than activityDetailMin left on its row goes on
+// the line below instead, indented activityBelowIndent.
+const (
+	activityDetailMin   = 24
+	activityBelowIndent = 2
+)
+
+// activityTargetAt is the terminal width from which TARGET (user@address)
+// gets a column: it tells apart two hosts that show the same name.
+const activityTargetAt = 140
+
+// printActivity writes rows as a table aligned by terminal cells. width is
+// the terminal's; 0 means not a terminal, where nothing is cut. On a
+// terminal HOST is capped and the detail gets the rest of the line, cut in
+// the middle to it, unless full asks for it wrapped onto lines of its own.
+// EXIT and TOOK are the outcome folded onto its start (activityRows).
+//
+// Under activityNarrow columns, ACTOR and EXIT/TOOK are left out when no row
+// shown has anything in them, so the detail keeps its room; piped, or with
+// a row that has them, they're there.
+func printActivity(out io.Writer, rows []activityRow, width int, full bool) {
+	withTarget := full || width >= activityTargetAt
+	narrow := width > 0 && width < activityNarrow
+	withActor, withEnd := !narrow, !narrow
+	for _, row := range rows {
+		if a := actorLabel(row.Event); a != "-" && a != "unknown" {
+			withActor = true
+		}
+		if row.exit != "-" || row.took != "-" {
+			withEnd = true
+		}
+	}
+	head := []string{"TIME", "USER"}
+	if withActor {
+		head = append(head, "ACTOR")
+	}
+	head = append(head, "ACTION", "HOST")
+	if withTarget {
+		head = append(head, "TARGET")
+	}
+	if withEnd {
+		head = append(head, "EXIT", "TOOK")
+	}
+	table := [][]string{append(head, "DETAIL")}
+	hostW, timeFmt := activityHostWidth, "2006-01-02 15:04:05"
+	if width > 0 && width < activityNarrow {
+		hostW, timeFmt = activityHostWidthNarrow, "01-02 15:04:05"
+	}
+	for _, row := range rows {
+		e := row.Clean()
+		host := exactName(e.Host) // cleaned: what was hidden shows as �
+		if width > 0 {
+			host = cellwidth.Fit(host, hostW)
+		}
+		r := []string{e.Time.Local().Format(timeFmt), lbl(e.User)}
+		if withActor {
+			r = append(r, lbl(actorLabel(e)))
+		}
+		r = append(r, lbl(e.Action), host)
+		if withTarget {
+			r = append(r, lbl(e.Target))
+		}
+		if withEnd {
+			r = append(r, row.exit, row.took)
+		}
+		table = append(table, append(r, strings.Join(strings.Fields(lbl(e.Detail)), " ")))
+	}
+	const gap = 2
+	colW := make([]int, len(head))
+	for _, r := range table {
+		for c := range colW {
+			colW[c] = max(colW[c], cellwidth.Width(r[c]))
+		}
+	}
+	indent := 0
+	for _, cw := range colW {
+		indent += cw + gap
+	}
+	detailW := 0 // no limit
+	below := false
+	if width > 0 {
+		detailW = width - indent
+		if detailW < activityDetailMin {
+			// Too few cells for an outcome and a note: the detail gets a
+			// line of its own under its row, and the row itself must fit.
+			squeezeColumns(head, colW, width+gap, gap)
+			below, indent, detailW = true, activityBelowIndent, max(width-activityBelowIndent, 10)
+		}
+	}
+	for _, r := range table {
+		var b strings.Builder
+		for c, cw := range colW {
+			cell := squeezedCell(head[c], r[c], cw)
+			b.WriteString(cell + strings.Repeat(" ", cw-cellwidth.Width(cell)+gap))
+		}
+		if below {
+			fmt.Fprintln(out, strings.TrimRight(b.String(), " "))
+			b.Reset()
+			b.WriteString(strings.Repeat(" ", indent))
+		}
+		d := r[len(r)-1]
+		switch {
+		case detailW == 0 || cellwidth.Width(d) <= detailW:
+			fmt.Fprintln(out, strings.TrimRight(b.String()+d, " "))
+		case full:
+			lines := cellwidth.Wrap(d, detailW, 1<<20)
+			fmt.Fprintln(out, b.String()+lines[0])
+			for _, l := range lines[1:] {
+				fmt.Fprintln(out, strings.Repeat(" ", indent)+l)
+			}
+		default:
+			fmt.Fprintln(out, b.String()+cutMiddle(shortProdNote(d), detailW))
+		}
+	}
+}
+
+// squeezable is how narrow each column may be made, in the order they're
+// narrowed, so a row fits a narrow terminal: who did it first (ACTOR keeps
+// its kind, "agent"), then the user, the host, the action (still telling
+// tunnel-enable from tunnel-disable) and the target. TIME, EXIT and TOOK
+// are never cut.
+var squeezable = []struct {
+	col string
+	min int
+}{{"ACTOR", 5}, {"USER", 6}, {"TARGET", 8}, {"HOST", 8}, {"ACTION", 10}}
+
+// squeezeColumns narrows the columns named in squeezable, in that order,
+// until the row (each column and its gap) is no wider than width.
+func squeezeColumns(head []string, colW []int, width, gap int) {
+	total := 0
+	for _, cw := range colW {
+		total += cw + gap
+	}
+	for _, s := range squeezable {
+		for c, h := range head {
+			if h != s.col || total <= width {
+				continue
+			}
+			cut := min(colW[c]-max(s.min, cellwidth.Width(h)), total-width)
+			if cut > 0 {
+				colW[c] -= cut
+				total -= cut
+			}
+		}
+	}
+}
+
+// squeezedCell is s fitted to its column's w cells: an actor too wide for it
+// shows its kind alone ("agent" for "agent:claude-code").
+func squeezedCell(col, s string, w int) string {
+	if cellwidth.Width(s) <= w {
+		return s
+	}
+	if kind, _, ok := strings.Cut(s, ":"); ok && col == "ACTOR" && cellwidth.Width(kind) <= w {
+		return kind
+	}
+	return cellwidth.Fit(s, w)
+}
+
+// prodNoteRE is the production note a start's detail carries first:
+// "(production, picker asked) ls (+2 args)" (noteDetail).
+// A host reached through production says "(via production, …)", a tunnel
+// whose note says it leads there "(tunnel to production, …)".
+var prodNoteRE = regexp.MustCompile(`\s?\((via |tunnel to )?production(?:, ([^)]*))?\)`)
+
+// shortProdNote writes a detail's production note as ⚑ and a word or two,
+// for a detail about to be cut: "(production, no prompt: not a terminal)"
+// is too long to survive 20 cells, and losing it makes a row on production
+// read like any other.
+func shortProdNote(d string) string {
+	d = prodNoteRE.ReplaceAllStringFunc(d, func(m string) string {
+		sub := prodNoteRE.FindStringSubmatch(m)
+		how := sub[2]
+		switch how {
+		case "picker asked":
+			how = "picker"
+		case "no prompt: not a terminal":
+			how = "no prompt"
+		case "named on the command line":
+			how = "named"
+		case "picker didn't ask":
+			how = "not asked"
+		}
+		switch sub[1] {
+		case "via ":
+			how = "via " + how
+		case "tunnel to ":
+			how = "tunnel " + how
+		}
+		return " ⚑" + strings.TrimSpace(how)
+	})
+	return strings.TrimPrefix(d, " ")
+}
+
+// outcomeEnd is the index of the first ':' or ';' in s outside brackets,
+// which ends a detail's outcome ("failed:", "exit 1 after 0.2s;"), or -1.
+func outcomeEnd(s string) int {
+	depth := 0
+	for i, r := range s {
+		switch r {
+		case '(':
+			depth++
+		case ')':
+			depth = max(depth-1, 0)
+		case ':', ';':
+			if depth == 0 {
+				return i
+			}
+		}
+	}
+	return -1
+}
+
+// cutMiddle fits s to w cells by leaving out its middle. The outcome, up to
+// the first ':' or ';', is kept whole when it leaves room for a little more;
+// then as much of the start of the rest as fits, and its end: the last path
+// segment (up to two thirds of the room) or else the last half. An outcome
+// too long for that keeps its start.
+func cutMiddle(s string, w int) string {
+	if cellwidth.Width(s) <= w {
+		return s
+	}
+	if w < 8 {
+		return cellwidth.Fit(s, w)
+	}
+	if i := outcomeEnd(s); i > 0 {
+		lead, rest := s[:i+1], s[i+1:]
+		lw := cellwidth.Width(lead)
+		switch room := w - lw; {
+		case room < 4:
+			return cellwidth.Fit(s, w)
+		case room < 8:
+			tail := strings.TrimPrefix(cellwidth.TruncLeft(rest, room-1), "…")
+			return lead + "…" + rest[wholeMarkers(rest, len(rest)-len(tail), false):]
+		default:
+			return lead + cutKeeping(rest, room)
+		}
+	}
+	return cutKeeping(s, w)
+}
+
+// statusWords are what a file manager outcome says, in the middle of its
+// detail, of the file it was writing ("…report.pdf unchanged: connection
+// lost"), or that the connection was dropped. A cut keeps the last of them,
+// and the end after it.
+var statusWords = []string{"unchanged", "not created", "partly written", "left as it was", "connection dropped"}
+
+// cutKeeping is cutEnds, except that a status word in the middle of s (see
+// statusWords) is kept, with the file it's said of, as well as the end of
+// s: the start, then the file and its status, then the final words, each
+// part cut at a word where it can be.
+func cutKeeping(s string, w int) string {
+	at, status := -1, ""
+	for _, word := range statusWords {
+		if i := strings.LastIndex(s, word); i >= 0 && i+len(word) > at {
+			at, status = i+len(word), word
+		}
+	}
+	if at < 0 || at == len(s) || w < 24 {
+		return cutEnds(s, w)
+	}
+	before, after := s[:at], s[at:]
+	if limit := w / 2; cellwidth.Width(after) > limit {
+		after = "…" + lastWords(after, limit-1)
+	}
+	room := w - cellwidth.Width(after)
+	if cellwidth.Width(before) <= room {
+		return before + after
+	}
+	// The file it's said of: the last path segment, or the last word before
+	// the status.
+	subject := before
+	if i := strings.LastIndexAny(before, "/ "); i >= 0 {
+		subject = before[i+1:]
+		if j := strings.LastIndex(before, "/"); j >= 0 {
+			subject = before[j+1:]
+		}
+	}
+	if cellwidth.Width(subject)+1 > room {
+		subject = status // no room for the file's name: its status at least
+	}
+	if sw := cellwidth.Width(subject); sw+1 <= room {
+		kept := ""
+		if room-sw-1 >= 4 { // less than that is noise
+			kept = strings.TrimSuffix(cellwidth.Fit(before[:len(before)-len(subject)], room-sw-1), "…")
+		}
+		return before[:wholeMarkers(before, len(kept), true)] + "…" + subject + after
+	}
+	return cutEnds(before, room) + after
+}
+
+// lastWords is the end of s in at most w cells, starting at a word where
+// one fits, and never inside a [REDACTED].
+func lastWords(s string, w int) string {
+	tail := strings.TrimPrefix(cellwidth.TruncLeft(s, w), "…")
+	if cut := len(s) - len(tail); cut > 0 && s[cut-1] != ' ' {
+		if i := strings.Index(tail, " "); i >= 0 && i < len(tail)-1 {
+			tail = tail[i+1:]
+		}
+	}
+	return s[wholeMarkers(s, len(s)-len(tail), false):]
+}
+
+// cutEnds fits s, wider than w (8 or more), to w by leaving out its middle.
+func cutEnds(s string, w int) string {
+	tail := ""
+	if i := strings.LastIndex(s, "/"); i >= 0 && cellwidth.Width(s[i+1:]) <= 2*w/3 {
+		tail = s[i+1:]
+	} else if i := strings.LastIndex(s, " "); i >= 0 && cellwidth.Width(s[i+1:]) <= w/2 {
+		tail = s[i+1:]
+	}
+	if tail == "" {
+		tail = strings.TrimPrefix(cellwidth.TruncLeft(s, w/2), "…")
+	}
+	tail = s[wholeMarkers(s, len(s)-len(tail), false):]
+	head := cellwidth.Fit(s[:len(s)-len(tail)], w-cellwidth.Width(tail))
+	if !strings.HasSuffix(head, "…") {
+		head += "…"
+		for cellwidth.Width(head)+cellwidth.Width(tail) > w {
+			head = cellwidth.Fit(strings.TrimSuffix(head, "…"), cellwidth.Width(head)-1)
+		}
+	}
+	kept := strings.TrimSuffix(head, "…")
+	return s[:wholeMarkers(s, len(kept), true)] + "…" + tail
+}
+
+// wholeMarkers moves a cut at byte i of s out of any [REDACTED] it falls
+// in: back to its start when the text before the cut is kept (left), on
+// past its end when the text after it is. Half a marker reads as a value
+// cut short, or as one that was never masked.
+func wholeMarkers(s string, i int, left bool) int {
+	const marker = "[REDACTED]"
+	for at := 0; ; {
+		j := strings.Index(s[at:], marker)
+		if j < 0 {
+			return i
+		}
+		a, b := at+j, at+j+len(marker)
+		if a < i && i < b {
+			if left {
+				return a
+			}
+			return b
+		}
+		at = b
+	}
+}
+
+// terminalWidth is f's width in columns when it's a terminal, 0 when it
+// isn't (a pipe or a file, where nothing should be cut).
+func terminalWidth(f *os.File) int {
+	if !isTerminal(f) {
+		return 0
+	}
+	if w, _, err := term.GetSize(int(f.Fd())); err == nil && w > 0 {
+		return w
+	}
+	if w, err := strconv.Atoi(os.Getenv("COLUMNS")); err == nil && w > 0 {
+		return w
+	}
+	return 80
 }

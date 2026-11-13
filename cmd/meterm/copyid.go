@@ -81,7 +81,7 @@ func newCopyIDCmd() *cobra.Command {
 			c.Stderr = io.MultiWriter(os.Stderr, &stderr)
 			if err := c.Run(); err != nil {
 				if strings.Contains(stderr.String(), "Permission denied (publickey") {
-					fmt.Fprintf(os.Stderr, "\n%s doesn't take passwords, so copy-id can't get in as %s. Through an account that can log in and has sudo:\n  meterm copy-id %s --via <account>\n", cfg.Hosts[idx].Name, h.User, args[0])
+					fmt.Fprintf(os.Stderr, "\n%s doesn't take passwords, so copy-id can't get in as %s. Through an account that can log in and has sudo:\n  meterm copy-id %s --via <account>\n", lbl(cfg.Hosts[idx].Name), h.User, args[0])
 				}
 				if ee, ok := err.(*exec.ExitError); ok {
 					finish(ee.ExitCode())
@@ -135,7 +135,7 @@ func copyIDVia(cfg *config.Config, idx int, target, via, identity string, yes bo
 	if err != nil {
 		return err
 	}
-	fmt.Printf("Installing %s for %s on %s, through %s...\n", pubPath, target, host.Name, via)
+	fmt.Printf("Installing %s for %s on %s, through %s...\n", pubPath, target, lbl(host.Name), via)
 	var out bytes.Buffer
 	c.Stdout = io.MultiWriter(&out, &markerFilter{w: os.Stdout})
 	if err := c.Run(); err != nil {
@@ -173,7 +173,7 @@ func copyIDVia(cfg *config.Config, idx int, target, via, identity string, yes bo
 	if b, err := test.CombinedOutput(); err != nil {
 		return fmt.Errorf("the key is installed, but logging in as %s still fails: %s", target, strings.TrimSpace(string(b)))
 	}
-	fmt.Printf("Logged in as %s@%s with the key: it works.\n", target, host.Name)
+	fmt.Printf("Logged in as %s@%s with the key: it works.\n", target, lbl(host.Name))
 	if !slices.Contains(host.Logins(), target) {
 		err := cfg.Update(func(c *config.Config) error {
 			if h, i := c.Find(host.Name); i >= 0 && !slices.Contains(h.Logins(), target) {
@@ -184,7 +184,7 @@ func copyIDVia(cfg *config.Config, idx int, target, via, identity string, yes bo
 		if err != nil {
 			return err
 		}
-		fmt.Printf("Added %s to %s's users (meterm connect %s@%s).\n", target, host.Name, target, host.Name)
+		fmt.Printf("Added %s to %s's users (meterm connect %s@%s).\n", target, lbl(host.Name), target, lbl(host.Name))
 		if host.Team != "" {
 			fmt.Println("It's a team host: `meterm team push` shares that with the team.")
 		}

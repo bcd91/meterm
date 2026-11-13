@@ -2,6 +2,7 @@ package sshrun
 
 import (
 	"errors"
+	"os"
 	"os/exec"
 	"strings"
 	"testing"
@@ -98,33 +99,113 @@ func TestUnsafeHostsDontRun(t *testing.T) {
 
 var errUnsafe = errors.New("unsafe host")
 
+// sshParse reads argv the way OpenSSH's ssh(1) does, as far as these tests
+// need: getopt over its option letters, then the destination, then — unless a
+// "--" ended the options — getopt again over what follows it (ssh.c, "goto
+// again"), then the remote command. Tests never run the real ssh, not even
+// -G: METERM_TEST_REAL_SSH_G=1 also checks this model against the ssh in PATH.
+type sshParsed struct {
+	dest     string
+	opts     map[byte][]string
+	command  []string
+	badFlags []string
+}
+
+const sshArgFlags = "BbcDEeFIiJLlmOoPpQRSWw"
+
+func sshParse(args []string) sshParsed {
+	p := sshParsed{opts: map[byte][]string{}}
+	getopt := func(av []string) (rest []string, terminated bool) {
+		i := 0
+		for i < len(av) {
+			a := av[i]
+			if a == "--" {
+				return av[i+1:], true
+			}
+			if len(a) < 2 || a[0] != '-' {
+				return av[i:], false
+			}
+			i++
+			for k := 1; k < len(a); k++ {
+				c := a[k]
+				if !strings.ContainsRune(sshArgFlags, rune(c)) {
+					if !strings.ContainsRune("46AaCfGgKkMNnqsTtVvXxYy", rune(c)) {
+						p.badFlags = append(p.badFlags, string(c))
+					}
+					p.opts[c] = append(p.opts[c], "")
+					continue
+				}
+				val := a[k+1:]
+				if val == "" && i < len(av) {
+					val = av[i]
+					i++
+				}
+				p.opts[c] = append(p.opts[c], val)
+				break
+			}
+		}
+		return nil, false
+	}
+	rest, term := getopt(args)
+	if len(rest) > 0 {
+		p.dest = rest[0]
+		rest = rest[1:]
+		if len(rest) > 0 && !term {
+			rest, _ = getopt(rest)
+		}
+	}
+	p.command = rest
+	return p
+}
+
+func TestSSHParseModel(t *testing.T) {
+	p := sshParse([]string{"-p", "22", "-tt", "-oX=1", "u@h", "-L", "1:a:2", "--", "-x", "y"})
+	if p.dest != "u@h" || strings.Join(p.opts['p'], ",") != "22" || strings.Join(p.opts['o'], ",") != "X=1" ||
+		strings.Join(p.opts['L'], ",") != "1:a:2" || strings.Join(p.command, " ") != "-x y" || len(p.opts['t']) != 2 {
+		t.Errorf("model: %+v", p)
+	}
+	if p := sshParse([]string{"h", "uptime", "-L", "1:a:2"}); strings.Join(p.command, " ") != "uptime -L 1:a:2" || len(p.opts['L']) != 0 {
+		t.Errorf("after the command nothing is an option: %+v", p)
+	}
+}
+
+// realSSHG runs the real `ssh -G` on args, only when asked (it parses and
+// prints its config; it doesn't connect).
+func realSSHG(t *testing.T, args []string) string {
+	t.Helper()
+	if os.Getenv("METERM_TEST_REAL_SSH_G") != "1" {
+		return ""
+	}
+	out, err := exec.Command("ssh", append([]string{"-G", "-F", "/dev/null"}, args...)...).Output()
+	if err != nil {
+		t.Fatalf("ssh -G %q: %v", args, err)
+	}
+	return string(out)
+}
+
 // What `meterm connect web1 -L 8080:localhost:80` relies on: ssh still
 // reads options after the destination, and `connect web1 -- cmd` relies on
-// ssh taking that "--" itself. Checked with the real ssh (-G parses only).
+// ssh taking that "--" itself.
 func TestOptionsAfterTheDestinationStillWork(t *testing.T) {
-	if _, err := exec.LookPath("ssh"); err != nil {
-		t.Skip("no ssh")
-	}
 	r := config.Resolved{Address: "198.51.100.7", User: "deploy", Port: 2222}
-	out, err := exec.Command("ssh", append([]string{"-G", "-F", "/dev/null"}, BuildArgs(r, "-L", "8080:localhost:80")...)...).Output()
-	if err != nil {
-		t.Fatalf("ssh -G: %v", err)
+	args := BuildArgs(r, "-L", "8080:localhost:80")
+	p := sshParse(args)
+	if p.dest != "deploy@198.51.100.7" || strings.Join(p.opts['p'], ",") != "2222" ||
+		strings.Join(p.opts['L'], ",") != "8080:localhost:80" || len(p.command) != 0 || len(p.badFlags) != 0 {
+		t.Errorf("ssh would read %q as %+v", args, p)
 	}
-	cfg := string(out)
-	for _, want := range []string{"hostname 198.51.100.7", "user deploy", "port 2222", "localforward 8080 [localhost]:80"} {
-		if !strings.Contains(cfg, want) {
-			t.Errorf("ssh -G lacks %q; the options after the destination weren't read", want)
+	if cfg := realSSHG(t, args); cfg != "" {
+		for _, want := range []string{"hostname 198.51.100.7", "user deploy", "port 2222", "localforward 8080 [localhost]:80"} {
+			if !strings.Contains(cfg, want) {
+				t.Errorf("ssh -G lacks %q; the options after the destination weren't read", want)
+			}
 		}
 	}
 }
 
 func TestCommandAfterDoubleDashReachesTheHost(t *testing.T) {
-	if _, err := exec.LookPath("ssh"); err != nil {
-		t.Skip("no ssh")
-	}
 	// With "--" between options and destination, ssh would hand the second
-	// "--" to the remote shell ("bash: --: invalid option"). -G stops before
-	// connecting, so what we can check is that the args parse as a command.
+	// "--" to the remote shell ("bash: --: invalid option").
 	r := config.Resolved{Address: "198.51.100.7"}
 	args := BuildArgs(r, "--", "uptime")
 	for i, a := range args {
@@ -132,7 +213,8 @@ func TestCommandAfterDoubleDashReachesTheHost(t *testing.T) {
 			t.Errorf("-- before the destination: %q", args)
 		}
 	}
-	if err := exec.Command("ssh", append([]string{"-G", "-F", "/dev/null"}, args...)...).Run(); err != nil {
-		t.Errorf("ssh -G rejects %q: %v", args, err)
+	if p := sshParse(args); p.dest != "198.51.100.7" || strings.Join(p.command, " ") != "uptime" {
+		t.Errorf("ssh would read %q as %+v, not a command", args, p)
 	}
+	realSSHG(t, args)
 }

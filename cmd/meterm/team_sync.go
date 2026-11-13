@@ -74,7 +74,7 @@ func teamShareCmd(teamFlag *string) *cobra.Command {
 			for _, sel := range hosts {
 				h, _ := cfg.Find(sel.Name)
 				if h.Team != "" && h.Team != t.ID {
-					fmt.Fprintf(os.Stderr, "skipping %s: already shared with another team\n", h.Name)
+					fmt.Fprintf(os.Stderr, "skipping %s: already shared with another team\n", lbl(h.Name))
 					continue
 				}
 				only[h.Name] = true
@@ -184,8 +184,7 @@ func runTeamSync(ctx context.Context, tc *teamCtx, t team.Team, cfg *config.Conf
 				}
 				ans, _ := promptLine("Push these changes? [y/N] ")
 				if strings.ToLower(ans) != "y" {
-					fmt.Println("Nothing pushed.")
-					return nil
+					return cancelled("nothing pushed")
 				}
 			}
 		}
@@ -228,11 +227,7 @@ func runTeamSync(ctx context.Context, tc *teamCtx, t team.Team, cfg *config.Conf
 	}
 
 	for _, c := range res.Changes {
-		line := fmt.Sprintf("  %-16s %s", c.Outcome, c.Host)
-		if c.Detail != "" {
-			line += " — " + c.Detail
-		}
-		fmt.Println(line)
+		fmt.Println(changeLine(c))
 	}
 	if len(res.Changes) == 0 {
 		fmt.Printf("Hosts for %q are up to date.\n", t.Name)
@@ -266,6 +261,17 @@ func runTeamSync(ctx context.Context, tc *teamCtx, t team.Team, cfg *config.Conf
 	return nil
 }
 
+// changeLine is one result line of a pull or push: the outcome, the host
+// spelled as `list` and the picker spell it (exactName), so pay1 and
+// pay<ZWSP>1 don't read as one host, and the detail.
+func changeLine(c team.Change) string {
+	line := fmt.Sprintf("  %-16s %s", c.Outcome, exactName(c.Host))
+	if c.Detail != "" {
+		line += " — " + lbl(c.Detail)
+	}
+	return line
+}
+
 // printPushPreview shows, field by field, what each outgoing change does to
 // the team's copy — the place to catch a typo before everyone gets it.
 func printPushPreview(outgoing []team.Change, cfg *config.Config, remote []team.SharedHost) {
@@ -276,18 +282,18 @@ func printPushPreview(outgoing []team.Change, cfg *config.Config, remote []team.
 	for _, c := range outgoing {
 		old, existed := byName[c.Host]
 		if _, here := cfg.Find(c.Host); c.Outcome == team.PushedRemoval || (c.Outcome == team.Proposed && here < 0) {
-			fmt.Printf("  - remove %s (%s) from the team\n", c.Host, old.Address)
+			fmt.Printf("  - remove %s (%s) from the team\n", exactName(c.Host), lbl(old.Address))
 			continue
 		}
 		h, _ := cfg.Find(c.Host)
 		cur := team.SharedFromHost(*h)
 		if !existed {
-			fmt.Printf("  + add %s (%s)\n", c.Host, cur.Describe())
+			fmt.Printf("  + add %s (%s)\n", exactName(c.Host), lbl(cur.Describe()))
 			continue
 		}
-		fmt.Printf("  ~ update %s\n", c.Host)
+		fmt.Printf("  ~ update %s\n", exactName(c.Host))
 		for _, d := range team.Diff(old, cur) {
-			fmt.Printf("      %s\n", d)
+			fmt.Printf("      %s\n", lbl(d))
 		}
 	}
 }
@@ -317,7 +323,7 @@ func teamStatusCmd(teamFlag *string) *cobra.Command {
 				return err
 			}
 
-			fmt.Printf("Team %q — you are %s\n", t.Name, t.Role)
+			fmt.Printf("Team %q — you are %s\n", t.Name, lbl(string(t.Role)))
 			groups := []struct {
 				title string
 				match func(team.Outcome) bool
@@ -327,6 +333,7 @@ func teamStatusCmd(teamFlag *string) *cobra.Command {
 				{"Needs you (meterm team resolve <host> --theirs|--mine):", func(o team.Outcome) bool { return o == team.Conflict || o == team.NameTaken }},
 				{"Can't push with your role:", func(o team.Outcome) bool { return o == team.Forbidden }},
 				{"Waiting for an owner or admin (meterm team proposals; push again after edits):", func(o team.Outcome) bool { return o == team.Proposed }},
+				{"Refused, not used here (fix the team's copy, or yours):", func(o team.Outcome) bool { return o == team.Rejected }},
 			}
 			any := false
 			for _, g := range groups {
@@ -342,7 +349,11 @@ func teamStatusCmd(teamFlag *string) *cobra.Command {
 						case team.PulledRemoval:
 							verb = "removed by team"
 						}
-						lines = append(lines, fmt.Sprintf("  %-16s %s", verb, c.Host))
+						line := fmt.Sprintf("  %-16s %s", verb, exactName(c.Host))
+						if c.Outcome == team.Rejected {
+							line += " — " + lbl(c.Detail)
+						}
+						lines = append(lines, line)
 					}
 				}
 				if len(lines) > 0 {
@@ -377,7 +388,7 @@ func teamStatusCmd(teamFlag *string) *cobra.Command {
 				}
 			}
 			if ign := tc.state.Ignored[t.ID]; len(ign) > 0 {
-				fmt.Printf("Ignored here: %s (meterm team unignore <host>)\n", strings.Join(ign, ", "))
+				fmt.Printf("Ignored here: %s (meterm team unignore <host>)\n", lbl(strings.Join(ign, ", ")))
 			}
 			auto := "on"
 			if !tc.state.AutosyncOn() {
@@ -389,7 +400,7 @@ func teamStatusCmd(teamFlag *string) *cobra.Command {
 			}
 			fmt.Printf("Autosync: %s, last pull %s.\n", auto, last)
 			if tc.state.LastError != "" {
-				fmt.Printf("Last background error: %s\n", tc.state.LastError)
+				fmt.Printf("Last background error: %s\n", lbl(tc.state.LastError))
 			}
 			return nil
 		},
@@ -673,6 +684,10 @@ func backgroundSync(ctx context.Context, tc *teamCtx, hosts, upload bool) error 
 		}
 	}
 	for _, t := range teams {
+		if t.Err != nil {
+			keep(t.Err)
+			continue
+		}
 		tc.state.TeamNames[t.ID] = t.Name
 		if hosts {
 			keep(backgroundPull(ctx, tc, t, path))
@@ -812,6 +827,8 @@ func hostAttention() map[string]string {
 				what = "name taken"
 			case team.Forbidden:
 				what = "can't push"
+			case team.Rejected:
+				what = "refused"
 			default:
 				continue
 			}
@@ -852,13 +869,15 @@ func teamNotice() string {
 				counts["name taken"]++
 			case team.Forbidden:
 				counts["can't push"]++
+			case team.Rejected:
+				counts["refused"]++
 			}
 		}
 		if len(counts) == 0 {
 			continue
 		}
 		var bits []string
-		for _, k := range []string{"not pushed", "conflict", "name taken", "can't push"} {
+		for _, k := range []string{"not pushed", "conflict", "name taken", "can't push", "refused"} {
 			if counts[k] > 0 {
 				bits = append(bits, fmt.Sprintf("%d %s", counts[k], k))
 			}
@@ -881,7 +900,7 @@ func teamNotice() string {
 // teamEditHint reminds that edits to a team host stay local until pushed.
 func teamEditHint(h config.Host) {
 	if h.Team != "" {
-		fmt.Fprintf(os.Stderr, "%s is shared with a team: this change stays on this machine until `meterm team push`.\n", h.Name)
+		fmt.Fprintf(os.Stderr, "%s is shared with a team: this change stays on this machine until `meterm team push`.\n", lbl(h.Name))
 	}
 }
 

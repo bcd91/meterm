@@ -1,8 +1,10 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"text/tabwriter"
 
@@ -63,7 +65,11 @@ func newRouteAddCmd() *cobra.Command {
 			var h *config.Host
 			err = cfg.Update(func(c *config.Config) error {
 				var idx int
-				h, idx = c.Find(args[0])
+				var lerr error
+				h, idx, lerr = c.Lookup(args[0])
+				if lerr != nil {
+					return lerr
+				}
 				if idx < 0 {
 					return fmt.Errorf("no such host: %s (use `meterm list` to see saved hosts)", args[0])
 				}
@@ -85,7 +91,7 @@ func newRouteAddCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			fmt.Printf("Added route %q to %s (tried after its own address).\n", name, h.Name)
+			fmt.Printf("Added route %q to %s (tried after its own address).\n", name, lbl(h.Name))
 			teamEditHint(*h)
 			return nil
 		},
@@ -133,7 +139,7 @@ func newRouteListCmd() *cobra.Command {
 					} else if rt.Name == "default" && cfg.Groups[h.Group].ProxyJump != "" {
 						path = "via " + cfg.Groups[h.Group].ProxyJump + " (group)"
 					}
-					fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n", h.Name, rt.Name, addr, port, path)
+					fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n", lbl(h.Name), lbl(rt.Name), lbl(addr), port, lbl(path))
 				}
 			}
 			return w.Flush()
@@ -155,7 +161,11 @@ func newRouteRmCmd() *cobra.Command {
 			var removed string
 			err = cfg.Update(func(c *config.Config) error {
 				var idx int
-				h, idx = c.Find(args[0])
+				var lerr error
+				h, idx, lerr = c.Lookup(args[0])
+				if lerr != nil {
+					return lerr
+				}
 				if idx < 0 {
 					return fmt.Errorf("no such host: %s", args[0])
 				}
@@ -171,7 +181,7 @@ func newRouteRmCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			fmt.Printf("Removed route %q from %s.\n", removed, h.Name)
+			fmt.Printf("Removed route %q from %s.\n", removed, lbl(h.Name))
 			teamEditHint(*h)
 			return nil
 		},
@@ -198,17 +208,18 @@ func newRouteCheckCmd() *cobra.Command {
 				fmt.Println("No host has routes yet.")
 				return nil
 			}
+			last := map[string]string{}
+			if path, err := resolveCfgPath(); err == nil {
+				if b, err := os.ReadFile(filepath.Join(filepath.Dir(path), "routes.json")); err == nil {
+					_ = json.Unmarshal(b, &last)
+				}
+			}
 			p := route.Install(cfg, "")
 			w := tabwriter.NewWriter(os.Stdout, 0, 2, 2, ' ', 0)
 			fmt.Fprintln(w, "HOST\tROUTE\tFIRST HOP\tRESULT\t")
 			for _, h := range hosts {
 				probes := p.CheckAll(h)
-				chosen := ""
-				for _, pr := range probes {
-					if pr.Err == "" && chosen == "" {
-						chosen = pr.Route
-					}
-				}
+				chosen := usedRoute(probes, last[h.Name])
 				for _, pr := range probes {
 					res := "answers"
 					if pr.Err != "" {
@@ -217,12 +228,30 @@ func newRouteCheckCmd() *cobra.Command {
 					if pr.Route == chosen {
 						res += "  ← used"
 					}
-					fmt.Fprintf(w, "%s\t%s\t%s\t%s\t\n", h.Name, pr.Route, pr.Hop, res)
+					fmt.Fprintf(w, "%s\t%s\t%s\t%s\t\n", lbl(h.Name), lbl(pr.Route), lbl(pr.Hop), lbl(res))
 				}
 			}
 			return w.Flush()
 		},
 	}
+}
+
+// usedRoute is the route connect would take given these answers: the one
+// that worked last when it still answers, else the first that does, in
+// order (internal/route Picker.Check; the picker's health check agrees).
+// "" when none answers.
+func usedRoute(probes []route.Probe, last string) string {
+	for _, pr := range probes {
+		if pr.Route == last && pr.Err == "" {
+			return last
+		}
+	}
+	for _, pr := range probes {
+		if pr.Err == "" {
+			return pr.Route
+		}
+	}
+	return ""
 }
 
 // routeHosts is the named hosts, or every host that has routes.
@@ -237,7 +266,10 @@ func routeHosts(cfg *config.Config, names []string) ([]config.Host, error) {
 		return out, nil
 	}
 	for _, n := range names {
-		h, idx := cfg.Find(n)
+		h, idx, lerr := cfg.Lookup(n)
+		if lerr != nil {
+			return nil, lerr
+		}
 		if idx < 0 {
 			return nil, fmt.Errorf("no such host: %s", n)
 		}

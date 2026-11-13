@@ -241,3 +241,26 @@ func TestHopHostAcceptsPlainForms(t *testing.T) {
 		}
 	}
 }
+
+// A value meterm doesn't know counts as production, and is reported as
+// unrecognised so it can be fixed.
+func TestEnvUnrecognised(t *testing.T) {
+	c := &Config{Groups: map[string]Group{"g": {Env: "prdo"}}}
+	for _, c2 := range []struct {
+		h    Host
+		want string
+	}{
+		{Host{Name: "a", Env: "prodution"}, "prodution"},
+		{Host{Name: "b", Env: "Production"}, ""},
+		{Host{Name: "c"}, ""},
+		{Host{Name: "d", Group: "g"}, "prdo"},
+		{Host{Name: "e", Env: "dev"}, ""},
+	} {
+		if got := c.EnvUnrecognised(c2.h); got != c2.want {
+			t.Errorf("%s: %q, want %q", c2.h.Name, got, c2.want)
+		}
+	}
+	if !c.IsProduction(Host{Env: "prodution"}) {
+		t.Error("a typo turned production off")
+	}
+}

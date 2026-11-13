@@ -3,16 +3,22 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
+	"strings"
 
 	"github.com/spf13/cobra"
+
+	_ "earlyterm" // settles the background before Bubble Tea's init asks the terminal: see the package
 
 	"meterm/internal/config"
 	"meterm/internal/route"
 	"meterm/internal/team"
 	"meterm/internal/termsafe"
+	"meterm/internal/tui"
 )
 
 var cfgPath string
@@ -49,6 +55,83 @@ func loadConfig() (*config.Config, error) {
 }
 
 func main() {
+	if err := newRootCmd().Execute(); err != nil {
+		afterRun(err)
+		// Errors can quote what was typed, or a saved name: not for the terminal to obey.
+		fmt.Fprintln(os.Stderr, "meterm:", termsafe.Lines(err.Error()))
+		finish(1)
+	}
+	finish(0)
+}
+
+// errCancelled is a command the person said n to: not done, but not failed.
+// It still exits 1, with "meterm: cancelled: …" on stderr.
+var errCancelled = errors.New("cancelled")
+
+// cancelled is errCancelled saying what didn't happen: "nothing removed".
+func cancelled(what string) error { return fmt.Errorf("%w: %s", errCancelled, what) }
+
+// tellPicker says to the picker that started this command, through the file
+// it named (tui.SessionOutcomeEnv), how it ended when that wasn't a failure
+// though it exits non-zero: "cancelled", "stopped". Nothing when no picker
+// asked.
+func tellPicker(word string) {
+	if p := os.Getenv(tui.SessionOutcomeEnv); p != "" {
+		_ = os.WriteFile(p, []byte(word+"\n"), 0o600)
+	}
+}
+
+// afterRun tells the picker, if one started this, that a command which
+// ends with err was cancelled rather than failed. It still exits 1: a
+// script must see it didn't happen.
+func afterRun(err error) {
+	if errors.Is(err, errCancelled) {
+		tellPicker("cancelled")
+	}
+}
+
+// takeGlobalFlags takes meterm's own flags (--config, --debug) off the
+// front of args, for a command that parses its own arguments (connect,
+// sync): cobra hands such a command every argument, the flags given before
+// its name included, so "meterm --config x connect web1" would otherwise
+// look for a host called "--config".
+//
+// own are the command's own flags that may come before or among them
+// (connect's --tmux, --log-args): they are stepped over and kept, in
+// order, so `connect --tmux --config X host` takes --config too. Scanning
+// stops at the first other argument (the host) or at --, so what follows
+// either is never taken.
+func takeGlobalFlags(args []string, own ...string) ([]string, error) {
+	var kept []string
+	for len(args) > 0 {
+		if slices.Contains(own, args[0]) {
+			kept, args = append(kept, args[0]), args[1:]
+			continue
+		}
+		switch a := args[0]; {
+		case a == "--config":
+			if len(args) < 2 {
+				return nil, errors.New("--config needs the path to a host file")
+			}
+			cfgPath, args = args[1], args[2:]
+		case strings.HasPrefix(a, "--config="):
+			cfgPath, args = strings.TrimPrefix(a, "--config="), args[1:]
+		case a == "--debug":
+			team.SetDebug(os.Stderr)
+			os.Setenv("METERM_DEBUG", "1")
+			args = args[1:]
+		default:
+			return append(kept, args...), nil
+		}
+	}
+	return kept, nil
+}
+
+// newRootCmd is meterm with all its commands, as main runs it: tests drive
+// it too, so what runs before every command (the picker's token) runs there.
+// --config binds to cfgPath; a value already set (a test's) stays.
+func newRootCmd() *cobra.Command {
+	keep := cfgPath
 	root := &cobra.Command{
 		Use:     "meterm",
 		Short:   "Remember your SSH hosts so you don't have to",
@@ -61,10 +144,11 @@ func main() {
 	// time plus the whole usage text, which buries the actual message.
 	root.SilenceUsage = true
 	root.SilenceErrors = true
-	root.PersistentFlags().StringVar(&cfgPath, "config", "", "path to meterm's host file (default: OS config dir)/meterm/hosts.yaml")
+	root.PersistentFlags().StringVar(&cfgPath, "config", keep, "path to meterm's host file (default: OS config dir)/meterm/hosts.yaml")
 	var debug bool
 	root.PersistentFlags().BoolVar(&debug, "debug", false, "trace the git commands team commands run, on stderr; same as METERM_DEBUG=1")
 	root.PersistentPreRun = func(*cobra.Command, []string) {
+		takePickerAnswer() // before anything else: see pickerAnswer
 		if debug {
 			team.SetDebug(os.Stderr)
 			os.Setenv("METERM_DEBUG", "1") // and in background syncs started from here
@@ -107,10 +191,5 @@ func main() {
 		newTeamCmd(),
 	)
 
-	if err := root.Execute(); err != nil {
-		// Errors can quote what was typed, or a saved name: not for the terminal to obey.
-		fmt.Fprintln(os.Stderr, "meterm:", termsafe.Lines(err.Error()))
-		finish(1)
-	}
-	finish(0)
+	return root
 }

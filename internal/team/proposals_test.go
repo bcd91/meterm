@@ -163,7 +163,9 @@ func TestRoleAfterProposingStaysMember(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, _ = bob.git(ctx, "fetch", "-q") // and nothing else: Teams reads locally
-	_ = bob.read(ctx)
+	if done, err := bob.read(ctx); err == nil {
+		done()
+	}
 	if ts, _ := bob.Teams(ctx); len(ts) != 1 || ts[0].Role != RoleMember {
 		t.Fatalf("bob after proposing = %+v", ts)
 	}

@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -185,6 +186,18 @@ func TestMain(m *testing.M) {
 	}
 	KnownHosts = func() string { return filepath.Join(dir, "known_hosts") } // never the real one
 	done := testenv.Setup()
+	// Nor the real ssh: `ssh -G` (for HashKnownHosts) reads the person's own
+	// ~/.ssh/config whatever HOME says. This one says names aren't hashed.
+	if runtime.GOOS != "windows" {
+		bin := filepath.Join(dir, "bin")
+		if err := os.MkdirAll(bin, 0o700); err != nil {
+			panic(err)
+		}
+		if err := os.WriteFile(filepath.Join(bin, "ssh"), []byte("#!/bin/sh\necho 'hashknownhosts no'\n"), 0o755); err != nil {
+			panic(err)
+		}
+		os.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	}
 	code := m.Run()
 	done()
 	os.RemoveAll(dir)

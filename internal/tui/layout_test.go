@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 
 	"meterm/internal/config"
 )
@@ -14,18 +15,21 @@ var ansiRE = regexp.MustCompile("\x1b\\[[0-9;]*m")
 
 func stripANSI(s string) string { return ansiRE.ReplaceAllString(s, "") }
 
+// maxLineWidth is the widest line in cells, so a wide character counts as
+// the two columns it takes on screen.
 func maxLineWidth(s string) int {
 	max := 0
 	for _, l := range strings.Split(s, "\n") {
-		if w := len([]rune(l)); w > max {
+		if w := lipgloss.Width(l); w > max {
 			max = w
 		}
 	}
 	return max
 }
 
-func testModel(width, height int) model {
-	m := New("/tmp/hosts.yaml", "/usr/local/bin/meterm")
+func testModel(t *testing.T, width, height int) model {
+	t.Helper()
+	m := newModel(t)
 	m.cfg = &config.Config{
 		Hosts: []config.Host{
 			{Name: "bastion", Address: "203.0.113.9", User: "jump"},
@@ -47,7 +51,7 @@ func testModel(width, height int) model {
 // visibly in a quick narrow-terminal check, only a wider one.
 func TestViewNeverExceedsTerminalWidth(t *testing.T) {
 	for _, width := range []int{60, 80, 100, 120, 200} {
-		m := testModel(width, 30)
+		m := testModel(t, width, 30)
 		got := maxLineWidth(stripANSI(m.View()))
 		if got > width {
 			t.Errorf("width=%d: rendered a line %d columns wide (overflow)", width, got)
@@ -57,7 +61,7 @@ func TestViewNeverExceedsTerminalWidth(t *testing.T) {
 
 func TestFullHelpViewNeverExceedsTerminalWidth(t *testing.T) {
 	for _, width := range []int{60, 100, 200} {
-		m := testModel(width, 30)
+		m := testModel(t, width, 30)
 		updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("?")})
 		got := maxLineWidth(stripANSI(updated.(model).View()))
 		if got > width {
@@ -68,7 +72,7 @@ func TestFullHelpViewNeverExceedsTerminalWidth(t *testing.T) {
 
 func TestPaletteViewNeverExceedsTerminalWidth(t *testing.T) {
 	for _, width := range []int{60, 100, 200} {
-		m := testModel(width, 30)
+		m := testModel(t, width, 30)
 		updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(":")})
 		got := maxLineWidth(stripANSI(updated.(model).View()))
 		if got > width {
@@ -79,7 +83,7 @@ func TestPaletteViewNeverExceedsTerminalWidth(t *testing.T) {
 
 func TestDeleteConfirmViewNeverExceedsTerminalWidth(t *testing.T) {
 	for _, width := range []int{60, 100, 200} {
-		m := testModel(width, 30)
+		m := testModel(t, width, 30)
 		updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("d")})
 		got := maxLineWidth(stripANSI(updated.(model).View()))
 		if got > width {
@@ -93,7 +97,7 @@ func TestTitleShowsVersion(t *testing.T) {
 	defer func() { Version = old }()
 	for v, want := range map[string]string{"0.15.0": "meterm v0.15.0  ·", "v0.15.0": "meterm v0.15.0  ·", "dev": "meterm dev  ·", "": "meterm dev  ·"} {
 		Version = v
-		m := testModel(120, 40)
+		m := testModel(t, 120, 40)
 		m.retitle()
 		if !strings.HasPrefix(m.list.Title, want) {
 			t.Errorf("Version %q: title %q", v, m.list.Title)

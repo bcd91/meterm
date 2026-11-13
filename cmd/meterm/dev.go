@@ -23,6 +23,7 @@ import (
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
 
+	"meterm/internal/activity"
 	"meterm/internal/config"
 	"meterm/internal/history"
 	"meterm/internal/sshrun"
@@ -97,7 +98,15 @@ func newDevCmd() *cobra.Command {
 			return nil
 		},
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runDev(args[0], args[1:], session, tunnels, !noReconnect, logArgs)
+			quietOnSuccess = true
+			code, err := dev(args[0], args[1:], session, tunnels, !noReconnect, logArgs)
+			if err != nil {
+				return err
+			}
+			if code != 0 {
+				finish(code)
+			}
+			return nil
 		},
 	}
 	cmd.Flags().StringVar(&session, "session", "", "tmux session name (default: the directory's name)")
@@ -107,10 +116,12 @@ func newDevCmd() *cobra.Command {
 	return cmd
 }
 
-func runDev(target string, command []string, session string, tunnels []string, reconnect, logArgs bool) error {
+// dev runs a dev session (see newDevCmd) and returns the exit code to leave
+// with.
+func dev(target string, command []string, session string, tunnels []string, reconnect, logArgs bool) (int, error) {
 	cfg, err := loadConfig()
 	if err != nil {
-		return err
+		return 0, err
 	}
 	hostArg, dir := splitDevTarget(target, func(name string) bool {
 		_, idx, err := cfg.Target(name)
@@ -118,23 +129,23 @@ func runDev(target string, command []string, session string, tunnels []string, r
 	})
 	h, idx, err := cfg.Target(hostArg)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	if idx < 0 {
-		return fmt.Errorf("no such host: %s (use `meterm list` to see saved hosts)", hostArg)
+		return 0, fmt.Errorf("no such host: %s (use `meterm list` to see saved hosts)", hostArg)
 	}
 	name, err := devSessionName(session, dir)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	script, err := devRemoteScript(dir, name, session == "")
 	if err != nil {
-		return err
+		return 0, err
 	}
 	again := script
 	if len(command) > 0 {
 		if script, again, err = devCommandScripts(dir, name, session == "", command); err != nil {
-			return err
+			return 0, err
 		}
 	}
 	var specs []string
@@ -148,28 +159,31 @@ func runDev(target string, command []string, session string, tunnels []string, r
 	var sets []tunnelSet
 	if len(specs) > 0 {
 		if sets, err = pickTunnels(cfg, specs); err != nil {
-			return err
+			return 0, err
 		}
 	}
 
 	if err := cfg.Resolve(*h).Err; err != nil {
-		return err
+		return 0, err
 	}
-	_ = history.RecordAndSave(h.Name)
+	// The start now, so a crash or SIGKILL mid-session still leaves evidence;
+	// the outcome when it ends. Last-connected only once it got there.
 	detail := "dev " + name
 	if len(command) > 0 {
 		detail += ": " + commandDetail(command, logArgs)
 	}
-	recordActivity(cfg, *h, "connect", detail)
+	run := beginActivity(cfg, *h, "connect", noteDetail(namedNote(cfg, *h, false), detail))
 	for _, s := range sets {
 		var names []string
+		leads := false
 		for _, f := range s.forward {
 			names = append(names, f.Name)
 			if cfg.IsProduction(s.host) || f.MentionsProduction() {
-				fmt.Fprintf(os.Stderr, "⚠ %s/%s reaches PRODUCTION: %s\n", s.host.Name, f.Name, f.Note)
+				fmt.Fprintf(os.Stderr, "⚠ %s/%s reaches PRODUCTION: %s\n", lbl(s.host.Name), lbl(f.Name), lbl(f.Note))
 			}
+			leads = leads || f.MentionsProduction()
 		}
-		recordActivity(cfg, s.host, "tunnel", strings.Join(names, ","))
+		recordActivity(cfg, s.host, "tunnel", noteDetail(namedNote(cfg, s.host, leads), strings.Join(names, ",")))
 	}
 	kickAutosync(false, true)
 
@@ -183,7 +197,7 @@ func runDev(target string, command []string, session string, tunnels []string, r
 	if len(sets) > 0 {
 		log, logPath, err := openDevTunnelLog()
 		if err != nil {
-			return err
+			return 0, err
 		}
 		defer log.Close()
 		fmt.Fprintf(os.Stderr, "meterm: holding tunnels; problems are logged in %s\n", logPath)
@@ -201,28 +215,51 @@ func runDev(target string, command []string, session string, tunnels []string, r
 		}
 	}
 
-	code, err := holdDevSession(ctx, hostArg, script, again, reconnect, reg.Add(status.KindSession, h.Name, name))
+	code, connected, err := holdDevSession(ctx, hostArg, script, again, reconnect, reg.Add(status.KindSession, h.Name, name))
+	interrupted := ctx.Err() != nil
 	stop()
 	wg.Wait()
 	reg.Close() // finish doesn't run deferred calls
+	if connected {
+		_ = history.RecordAndSave(h.Name)
+	}
+	run.outcome(devOutcome(code, connected, interrupted, err, time.Since(run.began)))
+	kickAutosync(false, true)
 	if err != nil {
-		return err
+		return 0, err
 	}
-	if code != 0 {
-		if code == devDirMissing {
-			fmt.Fprintf(os.Stderr, "meterm: no directory %s on %s\n", dir, h.Name)
-		}
-		finish(code)
+	if code == devDirMissing {
+		fmt.Fprintf(os.Stderr, "meterm: no directory %s on %s\n", dir, lbl(h.Name))
 	}
-	return nil
+	return code, nil
+}
+
+// devOutcome is how a dev session ended, for the log. An error's text stays
+// out, as outcomeOf's does.
+func devOutcome(code int, connected, interrupted bool, err error, took time.Duration) activity.Outcome {
+	o := activity.Outcome{Took: took}
+	got := "never connected"
+	if connected {
+		got = "connected"
+	}
+	switch {
+	case err != nil:
+		o.Note = "failed, " + got
+	case interrupted:
+		o.Note = "stopped, " + got
+	case !connected:
+		o.ExitCode, o.Note = &code, got
+	default:
+		o.ExitCode = &code
+	}
+	return o
 }
 
 // holdDevSession runs the session, reconnecting after drops, and returns the
 // exit code to leave with. script runs until one has got in, and again after that,
-// so a command to start starts once.
-func holdDevSession(ctx context.Context, hostArg, script, again string, reconnect bool, state *status.Handle) (int, error) {
+// so a command to start starts once. connected says whether any attempt got in.
+func holdDevSession(ctx context.Context, hostArg, script, again string, reconnect bool, state *status.Handle) (code int, connected bool, err error) {
 	backoff := 2 * time.Second
-	connected := false
 	marker := newConnectMarker()
 	defer marker.close()
 	stderr := &sshrun.Tail{Max: 16 << 10}
@@ -236,18 +273,18 @@ func holdDevSession(ctx context.Context, hostArg, script, again string, reconnec
 		// A fresh load so routes are checked again: the network may have changed.
 		cfg, err := loadConfig()
 		if err != nil {
-			return 1, err
+			return 1, connected, err
 		}
 		h, idx, err := cfg.Target(hostArg)
 		if err != nil {
-			return 1, err
+			return 1, connected, err
 		}
 		if idx < 0 {
-			return 1, fmt.Errorf("no such host: %s", hostArg)
+			return 1, connected, fmt.Errorf("no such host: %s", hostArg)
 		}
 		r := cfg.Resolve(*h)
 		if r.Err != nil {
-			return 1, r.Err
+			return 1, connected, r.Err
 		}
 		if via := routeNote(r); via != "" {
 			fmt.Fprintf(os.Stderr, "meterm: %s\n", via)
@@ -288,7 +325,7 @@ func holdDevSession(ctx context.Context, hostArg, script, again string, reconnec
 		lasted := time.Since(started)
 		kicked := stopAttempt()
 		if ctx.Err() != nil {
-			return 0, nil
+			return 0, connected || marker.seen(lasted), nil
 		}
 		if kicked != "" {
 			state.Set(status.Reconnecting, kicked)
@@ -298,15 +335,15 @@ func holdDevSession(ctx context.Context, hostArg, script, again string, reconnec
 			restoreTerminal(os.Stdout)
 			connected = true
 			backoff = 2 * time.Second
-			fmt.Fprintf(os.Stderr, "meterm: %s; reconnecting to %s\n", kicked, h.Name)
+			fmt.Fprintf(os.Stderr, "meterm: %s; reconnecting to %s\n", kicked, lbl(h.Name))
 			continue
 		}
 		if err == nil || errors.Is(err, exec.ErrWaitDelay) {
-			return 0, nil
+			return 0, true, nil
 		}
 		var exit *exec.ExitError
 		if !errors.As(err, &exit) {
-			return 1, err
+			return 1, connected, err
 		}
 		if exit.ExitCode() == sshConnectionError {
 			restoreTerminal(os.Stdout)
@@ -322,30 +359,31 @@ func holdDevSession(ctx context.Context, hostArg, script, again string, reconnec
 		}
 		if !devShouldRetry(exit.ExitCode(), connected, reconnect, failure) {
 			if failure != sshrun.FailureNone && (connected || failure == sshrun.FailureUnknownHost) {
-				fmt.Fprintf(os.Stderr, "meterm: giving up on %s: %s\n", h.Name, failure)
+				fmt.Fprintf(os.Stderr, "meterm: giving up on %s: %s\n", lbl(h.Name), failure)
 			}
-			return exit.ExitCode(), nil
+			// A code other than ssh's own 255 is the session's: it got there.
+			return exit.ExitCode(), connected || exit.ExitCode() != sshConnectionError, nil
 		}
 		if lasted > time.Minute {
 			backoff = 2 * time.Second
 		}
 		if got {
 			state.Set(status.Reconnecting, "connection lost")
-			fmt.Fprintf(os.Stderr, "meterm: connection to %s lost; reconnecting in %s (Ctrl-C to stop)\n", h.Name, backoff)
+			fmt.Fprintf(os.Stderr, "meterm: connection to %s lost; reconnecting in %s (Ctrl-C to stop)\n", lbl(h.Name), backoff)
 		} else {
 			if connected {
 				state.Set(status.Reconnecting, "no connection")
 			} else {
 				state.Set(status.Connecting, "no connection")
 			}
-			fmt.Fprintf(os.Stderr, "meterm: still no connection to %s; trying again in %s (Ctrl-C to stop)\n", h.Name, backoff)
+			fmt.Fprintf(os.Stderr, "meterm: still no connection to %s; trying again in %s (Ctrl-C to stop)\n", lbl(h.Name), backoff)
 		}
 		select {
 		case <-ctx.Done():
-			return 0, nil
+			return 0, connected, nil
 		case why := <-kicks:
 			state.Set(status.Reconnecting, why)
-			fmt.Fprintf(os.Stderr, "meterm: %s; trying %s now\n", why, h.Name)
+			fmt.Fprintf(os.Stderr, "meterm: %s; trying %s now\n", why, lbl(h.Name))
 			backoff = 2 * time.Second
 			continue
 		case <-time.After(backoff):

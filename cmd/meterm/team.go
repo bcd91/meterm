@@ -88,13 +88,18 @@ func (tc *teamCtx) current(ctx context.Context, flag string) (team.Team, error) 
 	}
 	if want == "" {
 		if len(teams) == 1 {
-			return teams[0], nil
+			return teams[0], teams[0].Err
 		}
 		return team.Team{}, errors.New("no team selected — run `meterm team use <name>` or pass --team")
 	}
 	t, err := pickTeam(teams, want)
 	if err != nil {
 		return team.Team{}, err
+	}
+	if t.Err != nil {
+		// Busy (another meterm is syncing it) or unreadable: say that, not
+		// that you aren't in it.
+		return team.Team{}, fmt.Errorf("team %s: %w", lbl(t.Name), t.Err)
 	}
 	return t, nil
 }
@@ -195,14 +200,31 @@ func newTeamCmd() *cobra.Command {
 				}
 				w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
 				fmt.Fprintln(w, "\tTEAM\tROLE\tREPOSITORY")
+				var unread []string
 				for _, t := range teams {
 					mark := ""
 					if t.ID == tc.state.Current {
 						mark = "*"
 					}
-					fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", mark, t.Name, t.Role, tc.state.GitTeams[t.ID].Remote)
+					role := lbl(string(t.Role))
+					switch {
+					case errors.Is(t.Err, team.ErrRepoBusy):
+						role = "(busy, try again)"
+						unread = append(unread, lbl(t.Name)+": busy")
+					case t.Err != nil:
+						role = "(can't read it)"
+						unread = append(unread, lbl(t.Name)+": "+lbl(t.Err.Error()))
+					}
+					fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", mark, lbl(t.Name), role, lbl(tc.state.GitTeams[t.ID].Remote))
 				}
-				return w.Flush()
+				if err := w.Flush(); err != nil {
+					return err
+				}
+				if len(unread) > 0 {
+					// Not a whole answer: a script must see it.
+					return fmt.Errorf("couldn't read %d team(s) just now (%s); retry in a moment", len(unread), strings.Join(unread, "; "))
+				}
+				return nil
 			},
 		},
 		&cobra.Command{
@@ -244,7 +266,7 @@ func newTeamCmd() *cobra.Command {
 				w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
 				fmt.Fprintln(w, "EMAIL\tROLE")
 				for _, m := range members {
-					fmt.Fprintf(w, "%s\t%s\n", m.Email, m.Role)
+					fmt.Fprintf(w, "%s\t%s\n", lbl(m.Email), lbl(string(m.Role)))
 				}
 				return w.Flush()
 			},
@@ -351,8 +373,7 @@ func teamRemoveCmd(teamFlag *string) *cobra.Command {
 				fmt.Print(what + " [y/N] ")
 				resp, _ := bufio.NewReader(os.Stdin).ReadString('\n')
 				if r := strings.ToLower(strings.TrimSpace(resp)); r != "y" && r != "yes" {
-					fmt.Println("Nothing changed.")
-					return nil
+					return cancelled("nothing changed")
 				}
 			}
 			if err := tc.be.RemoveMember(cmd.Context(), t.ID, target.UID); err != nil {
@@ -484,7 +505,7 @@ func teamLogCmd(teamFlag *string) *cobra.Command {
 			for _, e := range events {
 				c := e.Event.Clean()
 				fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n",
-					e.Time.Local().Format("2006-01-02 15:04:05"), termsafe.Text(e.UploaderEmail), c.Action, c.Host, oneLine(c.Detail, 60))
+					e.Time.Local().Format("2006-01-02 15:04:05"), lbl(e.UploaderEmail), lbl(c.Action), lbl(c.Host), oneLine(c.Detail, 60))
 			}
 			if err := w.Flush(); err != nil {
 				return err

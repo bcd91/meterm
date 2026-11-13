@@ -18,25 +18,37 @@ func newRenameCmd() *cobra.Command {
 		Args:  cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			oldName, newName := args[0], args[1]
+			if err := config.CheckName("new name", newName); err != nil {
+				return err
+			}
 			cfg, err := loadConfig()
 			if err != nil {
 				return err
 			}
+			// The name as shown finds a host whose real name holds control
+			// characters; from here on it's the real one.
+			if h, i, err := cfg.Lookup(oldName); err != nil {
+				return err
+			} else if i >= 0 {
+				oldName = h.Name
+			}
 			var wasTeam string
 			var n int
+			var renamed config.Host
 			err = cfg.Update(func(c *config.Config) error {
 				h, i := c.Find(oldName)
 				if i < 0 {
-					return fmt.Errorf("no such host: %s", oldName)
+					return fmt.Errorf("no such host: %s", exactName(oldName))
 				}
 				if _, j := c.Find(newName); j >= 0 {
-					return fmt.Errorf("a host called %s already exists", newName)
+					return fmt.Errorf("a host called %s already exists", exactName(newName))
 				}
 				if strings.ContainsAny(newName, " ,:") {
 					return fmt.Errorf("host names can't contain spaces, commas or colons")
 				}
 				wasTeam = h.Team
 				h.Name = newName
+				renamed = *h
 				n = renameJumps(c, oldName, newName)
 				return nil
 			})
@@ -44,32 +56,42 @@ func newRenameCmd() *cobra.Command {
 				return err
 			}
 
-			// History is keyed by name; carry it over (best-effort).
-			if p, err := history.Path(); err == nil {
-				if hist, err := history.Load(p); err == nil {
-					if e, ok := hist[oldName]; ok {
-						hist[newName] = e
-						delete(hist, oldName)
-						_ = hist.Save(p)
-					}
-				}
+			carryHistory(oldName, newName)
+			d := "name " + exactName(oldName) + "→" + exactName(newName)
+			if n > 0 {
+				d += fmt.Sprintf("; %d jump-host reference(s) updated", n)
 			}
+			recordActivity(cfg, renamed, "rename", d)
 
-			fmt.Printf("Renamed %s to %s.", oldName, newName)
+			fmt.Printf("Renamed %s to %s.", exactName(oldName), exactName(newName))
 			if n > 0 {
 				fmt.Printf(" Updated %d jump-host reference(s).", n)
 			}
 			fmt.Println()
 			if wasTeam != "" {
-				fmt.Fprintf(os.Stderr, "%s is a team host: `meterm team push` will rename it for everyone (remove %s, add %s).\n", newName, oldName, newName)
+				fmt.Fprintf(os.Stderr, "%s is a team host: `meterm team push` will rename it for everyone (remove %s, add %s).\n", exactName(newName), exactName(oldName), exactName(newName))
 			}
 			return nil
 		},
 	}
 }
 
-// renameJumps rewrites proxy_jump chains (comma-separated) in hosts and
-// groups that name oldName, returning how many were changed.
+// carryHistory moves a renamed host's history to its new name (history is
+// keyed by name), best-effort.
+func carryHistory(oldName, newName string) {
+	if p, err := history.Path(); err == nil {
+		if hist, err := history.Load(p); err == nil {
+			if e, ok := hist[oldName]; ok {
+				hist[newName] = e
+				delete(hist, oldName)
+				_ = hist.Save(p)
+			}
+		}
+	}
+}
+
+// renameJumps rewrites proxy_jump chains (comma-separated) in hosts, their
+// routes and groups that name oldName, returning how many were changed.
 func renameJumps(cfg *config.Config, oldName, newName string) int {
 	n := 0
 	fix := func(spec string) string {
@@ -92,6 +114,9 @@ func renameJumps(cfg *config.Config, oldName, newName string) int {
 	}
 	for i := range cfg.Hosts {
 		cfg.Hosts[i].ProxyJump = fix(cfg.Hosts[i].ProxyJump)
+		for k := range cfg.Hosts[i].Routes {
+			cfg.Hosts[i].Routes[k].ProxyJump = fix(cfg.Hosts[i].Routes[k].ProxyJump)
+		}
 	}
 	for name, g := range cfg.Groups {
 		g.ProxyJump = fix(g.ProxyJump)

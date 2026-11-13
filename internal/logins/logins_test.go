@@ -98,7 +98,7 @@ func TestMatchLeavesLocalLoginsAlone(t *testing.T) {
 func TestParseHostileOutput(t *testing.T) {
 	for name, line := range map[string]string{
 		"escape in the user":   "a\x1b]0;x\x07b  pts/0  1.2.3.4  Sat Oct 31 20:11:03 2026   still logged in",
-		"bidi in the terminal": "bcd  pts‮/0  1.2.3.4  Sat Oct 31 20:11:03 2026   still logged in",
+		"bidi in the terminal": "bcd  pts\u202e/0  1.2.3.4  Sat Oct 31 20:11:03 2026   still logged in",
 		"long user":            strings.Repeat("u", 500) + "  pts/0  1.2.3.4  Sat Oct 31 20:11:03 2026   still logged in",
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -108,7 +108,7 @@ func TestParseHostileOutput(t *testing.T) {
 			}
 			l := p.Logins[0]
 			for _, s := range []string{l.User, l.TTY, l.Source} {
-				if strings.ContainsAny(s, "\x1b\x07‮") {
+				if strings.ContainsAny(s, "\x1b\x07\u202e") {
 					t.Errorf("not cleaned: %q", s)
 				}
 				if n := len([]rune(s)); n > maxText {

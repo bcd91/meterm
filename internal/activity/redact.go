@@ -43,7 +43,7 @@ var (
 	// echo x | sudo -S, echo x | docker login --password-stdin
 	echoedRE = regexp.MustCompile(`(\becho\s+(?:-n\s+)?)(?:` + secretValue + `)(\s*\|\s*\S*(?:sudo\s[^|;]*-\w*S\b|[^|;]*--password-stdin))`)
 	// Tokens recognisable by their shape alone.
-	tokenRE   = regexp.MustCompile(`\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|glpat-[A-Za-z0-9_-]{16,}|xox[abeoprs]-[A-Za-z0-9-]{10,}|A(?:KIA|SIA)[0-9A-Z]{16}|sk-[A-Za-z0-9_-]{20,}|[sr]k_(?:live|test)_[A-Za-z0-9]{6,}|tskey-[A-Za-z0-9-]+|npm_[A-Za-z0-9]{20,}|pypi-[A-Za-z0-9_-]{20,}|AIza[0-9A-Za-z_-]{20,}|ya29\.[0-9A-Za-z_-]{20,}|SG\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}|shp(?:at|ss)_[A-Za-z0-9]{16,}|dop_v1_[a-f0-9]{16,}|eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,})\b`)
+	tokenRE   = regexp.MustCompile(`\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|glpat-[A-Za-z0-9_-]{16,}|xox[abeoprs]-[A-Za-z0-9-]{10,}|A(?:KIA|SIA)[0-9A-Z]{16}|sk-[A-Za-z0-9_-]{20,}|hv[sbr]\.[A-Za-z0-9_-]{20,}|[sr]k_(?:live|test)_[A-Za-z0-9]{6,}|tskey-[A-Za-z0-9-]+|npm_[A-Za-z0-9]{20,}|pypi-[A-Za-z0-9_-]{20,}|AIza[0-9A-Za-z_-]{20,}|ya29\.[0-9A-Za-z_-]{20,}|SG\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}|shp(?:at|ss)_[A-Za-z0-9]{16,}|dop_v1_[a-f0-9]{16,}|eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,})\b`)
 	webhookRE = regexp.MustCompile(`(?i)\b((?:hooks\.slack\.com/services|discord(?:app)?\.com/api/webhooks)/)\S+`)
 
 	// What these mean depends on the program, so they're only read this way after
@@ -56,7 +56,13 @@ var (
 	redisAuthRE        = regexp.MustCompile(`((?:^|\s)-a\s*)(` + secretValue + `)`)
 	keygenRE           = regexp.MustCompile(`((?:^|\s)-[NP]\s*)(` + secretValue + `)`)
 	userPassRE         = regexp.MustCompile(`((?:^|[\s'"])[\w.-]+:)([^\s'"|;]+)`)
-	htpasswdRE         = regexp.MustCompile(`((?:^|\s)-[A-Za-z]*b[A-Za-z]*\s+\S+\s+\S+\s+)(` + secretValue + `)`)
+	// openssl's -k is a password and -K a raw key, each the next word.
+	// (-pass, -passin, -passout are caught as credential flags.)
+	opensslKeyRE = regexp.MustCompile(`((?:^|\s)-[kK]\s+)(` + secretValue + `)`)
+	// vault login TOKEN, after any flags: the token is the one word without
+	// an = (key=value pairs, token=x among them, are caught as assignments).
+	vaultLoginRE = regexp.MustCompile(`(\bvault\s+login\s+(?:-\S+\s+)*)([^\s=\-][^\s=]*)(\s|$)`)
+	htpasswdRE   = regexp.MustCompile(`((?:^|\s)-[A-Za-z]*b[A-Za-z]*\s+\S+\s+\S+\s+)(` + secretValue + `)`)
 )
 
 // Redact masks what looks like a credential in a command or path about to go
@@ -142,8 +148,14 @@ func programFlags(s string) string {
 	if has("chpasswd") {
 		mask(userPassRE)
 	}
+	if has("openssl") {
+		mask(opensslKeyRE)
+	}
 	if has("htpasswd") {
 		mask(htpasswdRE)
+	}
+	if has("vault") && words["login"] {
+		s = vaultLoginRE.ReplaceAllString(s, "${1}"+redacted+"${3}")
 	}
 	return s
 }

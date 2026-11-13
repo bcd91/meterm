@@ -224,3 +224,17 @@ func (c *Config) productionAddress(addr string) bool {
 	}
 	return false
 }
+
+// EnvUnrecognised is h's env as written when meterm doesn't know it (its
+// own, or else its group's), "" when it's known or unset. Env counts such a
+// value as production; this is for saying so, so the typo can be fixed.
+func (c *Config) EnvUnrecognised(h Host) string {
+	raw := h.Env
+	if raw == "" {
+		raw = c.Groups[h.Group].Env
+	}
+	if _, err := NormalizeEnv(raw); err != nil {
+		return raw
+	}
+	return ""
+}

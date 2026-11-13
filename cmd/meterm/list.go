@@ -1,19 +1,23 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 	"sync"
-	"text/tabwriter"
+	"unicode/utf16"
 
 	"github.com/spf13/cobra"
 
+	"meterm/internal/cellwidth"
 	"meterm/internal/config"
 	"meterm/internal/health"
 	"meterm/internal/history"
 	"meterm/internal/team"
+	"meterm/internal/termsafe"
 )
 
 // listRow is the --format json shape for one host: a stable, documented
@@ -28,9 +32,11 @@ type listRow struct {
 	Target        string   `json:"target"`
 	Route         string   `json:"route,omitempty"` // the route used (list --check), when not the host's own address
 	Group         string   `json:"group,omitempty"`
-	Team          string   `json:"team,omitempty"` // the team's name; empty for a personal host
+	GroupMissing  bool     `json:"group_missing,omitempty"` // the host names a group the host file doesn't have (removed): it inherits nothing
+	Team          string   `json:"team,omitempty"`          // the team's name; empty for a personal host
 	Tags          []string `json:"tags,omitempty"`
-	Env           string   `json:"env,omitempty"` // the host's, or else its group's; absent when neither says
+	Env           string   `json:"env,omitempty"`              // the host's, or else its group's; absent when neither says
+	EnvRaw        string   `json:"env_unrecognised,omitempty"` // the env as written when meterm doesn't know it (env is then production)
 	Jump          string   `json:"jump,omitempty"`
 	LastConnected string   `json:"last_connected,omitempty"`
 	Status        string   `json:"status,omitempty"`
@@ -118,9 +124,11 @@ func newListCmd() *cobra.Command {
 					Route:         r.Route,
 					routeNote:     routeNote,
 					Group:         h.Group,
+					GroupMissing:  h.Group != "" && !groupKnown(cfg, h.Group),
 					Team:          names[h.Team],
 					Tags:          h.Tags,
 					Env:           cfg.Env(h),
+					EnvRaw:        cfg.EnvUnrecognised(h),
 					Jump:          jump,
 					LastConnected: lastRFC3339,
 					Status:        status[h.Name],
@@ -129,40 +137,10 @@ func newListCmd() *cobra.Command {
 			}
 
 			if format == "json" {
-				enc := json.NewEncoder(os.Stdout)
-				enc.SetIndent("", "  ")
-				return enc.Encode(rows)
+				return encodeJSON(os.Stdout, rows)
 			}
 
-			w := tabwriter.NewWriter(os.Stdout, 0, 2, 2, ' ', 0)
-			showEnv := false
-			for _, row := range rows {
-				showEnv = showEnv || row.Env != ""
-			}
-			header := "NAME\tTARGET\tTEAM\tGROUP\tTAGS\tJUMP"
-			if showEnv {
-				header += "\tENV"
-			}
-			header += "\tLAST CONNECTED"
-			if check {
-				header = "STATUS\t" + header
-			}
-			fmt.Fprintln(w, header)
-			for _, row := range rows {
-				tgt := row.Target
-				if row.routeNote != "" {
-					tgt += " (" + row.routeNote + ")"
-				}
-				line := fmt.Sprintf("%s\t%s\t%s\t%s\t%s\t%s", row.Name, tgt, row.Team, row.Group, strings.Join(row.Tags, ","), row.Jump)
-				if showEnv {
-					line += "\t" + row.Env
-				}
-				if check {
-					line = row.Status + "\t" + line
-				}
-				fmt.Fprintln(w, line+"\t"+row.lastHuman)
-			}
-			if err := w.Flush(); err != nil {
+			if err := writeListText(os.Stdout, rows, check); err != nil {
 				return err
 			}
 			if n := teamNotice(); n != "" {
@@ -177,6 +155,126 @@ func newListCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&check, "check", false, "TCP-ping each host's port before listing (adds latency)")
 	cmd.Flags().StringVar(&format, "format", "text", "output format: text or json")
 	return cmd
+}
+
+// writeListText is list's table for a terminal.
+func writeListText(out io.Writer, rows []listRow, check bool) error {
+	w := &cellTable{}
+	showEnv := false
+	for _, row := range rows {
+		showEnv = showEnv || row.Env != ""
+	}
+	header := "NAME\tTARGET\tTEAM\tGROUP\tTAGS\tJUMP"
+	if showEnv {
+		header += "\tENV"
+	}
+	header += "\tLAST CONNECTED"
+	if check {
+		header = "STATUS\t" + header
+	}
+	fmt.Fprintln(w, header)
+	for _, row := range rows {
+		tgt := row.Target
+		if row.routeNote != "" {
+			tgt += " (" + row.routeNote + ")"
+		}
+		// Every field is outside text: a label can't carry an escape
+		// sequence, or a tab that would shift the columns.
+		l := termsafe.Label
+		// A name with a hidden character is spelled out, so it can't pass
+		// for the host whose name it shows.
+		group := l(row.Group)
+		if row.GroupMissing {
+			group += " (no such group)" // removed: it inherits nothing from it
+		}
+		line := fmt.Sprintf("%s\t%s\t%s\t%s\t%s\t%s", exactName(row.Name), l(tgt), l(row.Team), group, l(strings.Join(row.Tags, ",")), exactName(row.Jump))
+		if showEnv {
+			env := l(row.Env)
+			if row.EnvRaw != "" {
+				env += " (" + l(row.EnvRaw) + "?)" // a typo: taken as production
+			}
+			line += "\t" + env
+		}
+		if check {
+			line = row.Status + "\t" + line
+		}
+		fmt.Fprintln(w, line+"\t"+row.lastHuman)
+	}
+	return w.flush(out)
+}
+
+// cellTable is a table of tab-separated lines, lined up by the columns a
+// terminal gives each cell (tabwriter counts runes, so Thai with marks
+// above the line, or an emoji, pushed the rest of its row out of line).
+type cellTable struct{ rows [][]string }
+
+func (t *cellTable) Write(p []byte) (int, error) {
+	for _, l := range strings.Split(strings.TrimSuffix(string(p), "\n"), "\n") {
+		t.rows = append(t.rows, strings.Split(l, "\t"))
+	}
+	return len(p), nil
+}
+
+func (t *cellTable) flush(out io.Writer) error {
+	var widths []int
+	for _, r := range t.rows {
+		for c, cell := range r {
+			if c >= len(widths) {
+				widths = append(widths, 0)
+			}
+			widths[c] = max(widths[c], cellwidth.Width(cell))
+		}
+	}
+	for _, r := range t.rows {
+		var b strings.Builder
+		for c, cell := range r {
+			b.WriteString(cell)
+			if c < len(r)-1 {
+				b.WriteString(strings.Repeat(" ", widths[c]-cellwidth.Width(cell)+2))
+			}
+		}
+		if _, err := fmt.Fprintln(out, strings.TrimRight(b.String(), " ")); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// encodeJSON writes v as indented JSON with bidi controls spelled as \u
+// escapes: the decoded text is the same, but a terminal showing the raw
+// output has nothing to reorder ("gnp.exe" reading as "exe.png").
+func encodeJSON(out io.Writer, v any) error {
+	var b bytes.Buffer
+	enc := json.NewEncoder(&b)
+	enc.SetIndent("", "  ")
+	if err := enc.Encode(v); err != nil {
+		return err
+	}
+	var esc strings.Builder
+	for _, r := range b.String() {
+		if jsonEscaped(r) {
+			if r > 0xffff { // JSON's \u is UTF-16: a pair for anything past U+FFFF
+				hi, lo := utf16.EncodeRune(r)
+				fmt.Fprintf(&esc, "\\u%04x\\u%04x", hi, lo)
+			} else {
+				fmt.Fprintf(&esc, "\\u%04x", r)
+			}
+			continue
+		}
+		esc.WriteRune(r)
+	}
+	_, err := io.WriteString(out, esc.String())
+	return err
+}
+
+// jsonEscaped is a character JSON output spells as \uXXXX though
+// encoding/json leaves it raw (it escapes C0 itself): DEL and the C1
+// controls (U+009B is CSI to a terminal that reads 8-bit controls), and
+// everything else termsafe.Label drops — bidi controls, zero-width and other format characters, the soft
+// hyphen. Outside a string JSON is ASCII, so it can only be inside one,
+// where \uXXXX means the same.
+func jsonEscaped(r rune) bool {
+	return r >= 0x7f && ((r <= 0x9f) || termsafe.Drops(r)) // C0 is escaped already, and \n lays the JSON out
 }
 
 // checkHosts probes every host's port concurrently and returns "up"/"down",
@@ -239,4 +337,10 @@ func teamNames() map[string]string {
 		}
 	}
 	return out
+}
+
+// groupKnown says the host file has the group a host names.
+func groupKnown(cfg *config.Config, name string) bool {
+	_, ok := cfg.Groups[name]
+	return ok
 }
