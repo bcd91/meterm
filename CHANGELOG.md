@@ -166,8 +166,9 @@ v0.23.1 asked about nothing but deleting a host in the picker.
   someone else created. A team host with what v0.23.1 refused as well
   (control characters such as escape sequences and line breaks, bidi
   controls, ssh options that run commands) is not applied: `team pull` and
-  `team sync` report it as `rejected`, `team status` lists it, and the
-  command exits non-zero. Before, a rejected host was only reported and the
+  `team sync` report it as `rejected`, `team status` lists it, `list` and the
+  picker count it in the team reminder ("1 refused"), and the command
+  exits non-zero. Before, a rejected host was only reported and the
   command exited 0.
 - `add` and `edit` refuse an address, user or jump that ssh would read as an
   option or split (`--address=-oProxyCommand=…`), and an identity file

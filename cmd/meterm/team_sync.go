@@ -820,6 +820,8 @@ func hostAttention() map[string]string {
 				what = "name taken"
 			case team.Forbidden:
 				what = "can't push"
+			case team.Rejected:
+				what = "refused"
 			default:
 				continue
 			}
@@ -860,13 +862,15 @@ func teamNotice() string {
 				counts["name taken"]++
 			case team.Forbidden:
 				counts["can't push"]++
+			case team.Rejected:
+				counts["refused"]++
 			}
 		}
 		if len(counts) == 0 {
 			continue
 		}
 		var bits []string
-		for _, k := range []string{"not pushed", "conflict", "name taken", "can't push"} {
+		for _, k := range []string{"not pushed", "conflict", "name taken", "can't push", "refused"} {
 			if counts[k] > 0 {
 				bits = append(bits, fmt.Sprintf("%d %s", counts[k], k))
 			}
