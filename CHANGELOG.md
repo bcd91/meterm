@@ -124,8 +124,8 @@ key map, so some keys moved. `?` in the picker lists these first.
 
 ### File manager
 
-What `meterm files` does to the files it touches was reworked; on v0.20.0
-an overwrite truncated the target and wrote into it.
+What `meterm files` does to the files it touches was reworked; up to
+v0.23.1 an overwrite truncated the target and wrote into it.
 
 - **Overwrites are atomic.** A copy is written to a hidden temporary file
   next to the target (`.name.meterm-….part`) and renamed over it only when
@@ -134,20 +134,45 @@ an overwrite truncated the target and wrote into it.
   the copy was worked out. On a server without `posix-rename` the old file
   is moved aside, the new one moved in, and only then the old one removed;
   if that fails part way, one of the two is always left and the message
-  says where.
-- **What an overwrite keeps:** the old file's permission bits, and its owner
-  and group where they can be given (as root, or a group you're in). A new
-  file is never more open than the one it replaces: if the host won't set
-  permissions, the old file is left. It's a new file, so ACLs and extended
+  says where. The temporary name cuts the file's name to 64 bytes, so a
+  long name (a 78-character Thai one is 234 bytes) can still be
+  overwritten, on eCryptfs's 143-byte limit too.
+- **No room is not a reason to truncate.** If the temporary file can't be
+  made for want of space, inodes or quota, the copy stops with the target
+  as it was. If only the rename fails (a bind-mounted file, such as a
+  container's `/etc/hosts`), the target is untouched and is written in
+  place, as v0.23.1 did, and the copy says "couldn't replace … in one
+  step; wrote it in place".
+- **The temporary file is only touched through its handle.** Owner and
+  mode are set and read back on the open file, never by name, and it isn't
+  renamed into place unless its name still leads to it (the same inode
+  here; a regular file of the size written on a host): in a directory
+  others can write, a swapped-in symlink isn't followed or moved over the
+  target.
+- **What an overwrite keeps:** the old file's permission bits, setuid,
+  setgid and sticky (set only on the finished copy, just before the rename),
+  and its owner and group where they can be given (as root, or a group
+  you're in). A new file is never more open than the one it replaces: if the
+  host won't set permissions, the old file is left. A file we may not write
+  is never renamed over: it's written in place, which a read-only file
+  refuses, changing nothing. On a host uid 0 isn't taken for root, since a
+  server that sends no owners shows 0 for everyone. It's a new file, so ACLs and extended
   attributes are not kept, and other hard links keep the old content. Hard
   links are only seen on this machine; SFTP doesn't report them, so on a
   host they split unasked.
 - **Questions before losing something.** When owner or group can't be
   kept, or a file has other hard links, it asks once per copy: write in
   place (keeps them, not atomic), replace anyway, or skip. Where no
-  temporary file can be made (a read-only directory) it asks before writing
-  in place. A write in place that fails or is cancelled says the file may be
-  partly written.
+  temporary file can be made (a read-only directory, or on this machine a
+  read-only filesystem with the file bind-mounted into it) it asks before
+  writing in place. A write in place that fails or is cancelled says the
+  file may be partly written.
+- **A stop says what it left.** A cancel or failure names the file it was
+  writing as unchanged, not created, or partly written; a temporary file
+  that couldn't be removed (the connection went) is named, as v0.23.1 named
+  an unfinished new file it couldn't remove; a copy that stops part way
+  says which files it had already copied. A listing that fails after it no
+  longer hides those words.
 - **A file never replaces a directory, nor a directory a file.** That's
   refused when the copy is worked out, with nothing copied and nothing
   asked. Before, on a server without `posix-rename`, the directory was moved
@@ -177,12 +202,18 @@ an overwrite truncated the target and wrote into it.
 - **A host that stops answering** no longer freezes it: the progress line
   says "no data for 12s", `esc` cancels, and `esc` again drops the
   connection and quits, saying what may be left behind.
-- **The activity log** has every copy's start and outcome, deletes (what
-  went before a failure, what wasn't reached), renames, new directories and
-  the answers to questions asked part way. Each line leads with how it went
-  (`started:`, `ok:`, `failed:`, `cancelled:`, `aborted:`, `partial:`,
-  `stopped:`, `already gone:`, `asked:`), so `meterm activity` on a terminal
-  never cuts it off. Deleting something already gone says so.
+- **The activity log** has each copy, delete, rename and new directory on
+  the host as a start, written before anything is touched and carrying the
+  production note, and an `outcome` event pointing back at it (`ref_seq`,
+  `exit_code` 0 when it did what was asked, otherwise no exit code and its
+  word: `failed`, `partial`, `cancelled`, `stopped`, `aborted`), the same
+  model as `connect`, `exec` and `cp`, so `meterm activity` shows EXIT and
+  TOOK on the operation's own row. What only the end knows (written in
+  place, an error, what went before a failed delete, what was copied before
+  a stop, a temporary file left behind) and the answers to questions asked
+  part way are events of their own, each leading with how it went
+  (`failed:`, `partial:`, `asked:` …). Deleting something already gone says
+  so. A copy whose only file was skipped now logs its end too.
 - Names from the host are shown with escape sequences, control and invisible
   characters dropped (tabs and line breaks as spaces);
   `?` shows what the last operation did, in full.

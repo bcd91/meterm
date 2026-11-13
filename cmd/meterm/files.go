@@ -45,15 +45,19 @@ func newFilesCmd() *cobra.Command {
 			"space marks, / finds, esc clears, ? helps, q quits.\n\n" +
 			"A copy is written under a temporary name and renamed into place when\n" +
 			"complete, so a cancelled or failed copy leaves the target as it was.\n" +
+			"No room for that name (a full disk) stops the copy, the target as it\n" +
+			"was; a target that can't be renamed over (bind-mounted) is written in\n" +
+			"place, and a file you may not write is never renamed over.\n" +
 			"Copying over existing files asks first: overwrite them, or skip them.\n" +
-			"An overwrite keeps the old file's permissions, and its owner and group\n" +
-			"where they can be given; when they can't, or the file has other hard\n" +
-			"links (seen on this machine only), it asks whether to write in place\n" +
-			"instead. It never keeps ACLs or extended attributes. The README says\n" +
-			"exactly what's kept.\n" +
+			"An overwrite keeps the old file's permissions, setuid too, and its\n" +
+			"owner and group where they can be given; when they can't, or the file\n" +
+			"has other hard links (seen on this machine only), it asks whether to\n" +
+			"write in place instead. It never keeps ACLs or extended attributes.\n" +
+			"The README says exactly what's kept.\n" +
 			"It runs SFTP through your own ssh, so jump hosts and keys work as for\n" +
-			"`meterm connect`. Uploads, downloads, deletes and renames on the host are\n" +
-			"recorded in the activity log.\n\n" +
+			"`meterm connect`. Uploads, downloads, deletes, renames and new directories\n" +
+			"on the host are recorded in the activity log, each as a start and an\n" +
+			"outcome, as for `meterm cp`.\n\n" +
 			"On a production host it asks first (--yes: without asking; from the\n" +
 			"picker, which has asked already, it doesn't ask again; with stdin not a\n" +
 			"terminal it warns and goes on), the host's pane is marked ⚑PROD, and its\n" +

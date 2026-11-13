@@ -318,10 +318,20 @@ renames, `m` makes a directory, `r` reloads, `?` shows the rest.
 
 - **Copying over existing files asks first:** overwrite them, or skip them.
 - **Overwriting is atomic:** the copy goes to a temporary file next to the
-  target and is renamed over it only when complete, so a cancelled or failed
-  copy leaves the target as it was.
-- **What an overwrite keeps:** the replaced file's permission bits, and its
-  owner and group where they can be given (as root, or a group you're in).
+  target (`.<name>.meterm-<random>.part`, the name cut to 64 bytes so it fits
+  any filesystem) and is renamed over it only when complete, so a cancelled or
+  failed copy leaves the target as it was. If there's no room for the
+  temporary file (a full disk, no inodes left, a quota), the copy stops and
+  the target is left as it was: it's never emptied to be written in place. If
+  the target can't be renamed over (a file bind-mounted into a container, as
+  `/etc/hosts` is, or `docker -v file:file`), it's written in place, as before
+  v0.24, and the copy says so. The temporary file is changed only through its
+  own open handle, and isn't renamed into place if its name no longer leads to
+  the file written (something swapped it in a directory others can write).
+- **What an overwrite keeps:** the replaced file's permission bits, setuid,
+  setgid and sticky (set only on the finished copy, just before the rename, so
+  a half-written setuid file never exists), and its owner and group where they
+  can be given (as root, or a group you're in).
   It's a new file (a new inode), so it does **not** keep ACLs or extended
   attributes, and other hard links to the old file keep the old content.
   When the owner or group can't be kept, or the file has other hard links,
@@ -334,11 +344,26 @@ renames, `m` makes a directory, `r` reloads, `?` shows the rest.
   open than the old one (a `0600` file replaced by a `0644` one), the old
   file is left as it was and the copy says so.
 - **Read-only directories:** where no temporary file can be made next to
-  the target, you're asked before it's written in place.
+  the target because the directory can't be written, or on this machine
+  because it's a read-only filesystem the file is mounted into
+  (`docker --read-only -v file:file`, a Kubernetes `subPath` under
+  `readOnlyRootFilesystem`), you're asked before it's written in place. Over
+  SFTP a read-only filesystem and a full disk give the same "failure", so there
+  the copy stops instead, the target left as it was.
+- **Read-only files:** a file you may not write is never replaced by renaming
+  over it, which would get round its mode: it's written in place, which the
+  system refuses, changing nothing, if it's read-only. On a host, uid 0 isn't
+  taken to mean root (a server that sends no owners shows 0 for everyone), so
+  a file that only root could write is written in place too, and the copy
+  says so.
 - **Progress:** a running copy shows a progress bar and its speed.
 - **Stopping:** `esc` stops a copy at once: the file being written goes to
   a temporary name, so the target is left as it was and nothing half-written
-  stays behind. meterm never removes an existing file it is overwriting.
+  stays behind; the copy says which file it was ("big.bin unchanged", or "not
+  created" for a new one). If the temporary file can't be removed (the
+  connection went), it's named, on screen and in the activity log. A copy
+  that fails part way says which files it had already copied. meterm never
+  removes an existing file it is overwriting.
   A file you agreed to have written in place (above) is the exception: the
   first `esc` lets it finish, then stops; `esc` again stops at once and
   leaves it partly written, and meterm says "may be partly written", on
@@ -351,8 +376,15 @@ renames, `m` makes a directory, `r` reloads, `?` shows the rest.
 The host side is SFTP through your own `ssh` (`ssh -s host sftp`), so jump
 hosts, keys, the agent and `known_hosts` behave exactly as for
 `meterm connect`. Uploads, downloads, deletes, renames and new directories on
-the host go into the activity log (and to the team, for shared hosts). Use
-`meterm cp --sync` (rsync) instead for very large trees you want to resume.
+the host go into the activity log (and to the team, for shared hosts), each as
+`connect` and `cp` are: a start, written before anything on the host is
+touched (with the production note), and an `outcome` pointing back at it,
+exit 0 when it did what was asked and otherwise its word (`failed`, `partial`,
+`cancelled`, `stopped`, `aborted`). What only the end knows (a file written in
+place, an error, what was copied before a stop, a temporary file left behind)
+is an event of its own, in words, just before the outcome; so is an answer
+given part way, such as agreeing to write in place. Use `meterm cp --sync`
+(rsync) instead for very large trees you want to resume.
 
 ## Running commands on a fleet
 
