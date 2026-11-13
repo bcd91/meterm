@@ -563,3 +563,8 @@ func tunnelLeadsToProduction(args []string, cfg *config.Config) bool {
 	}
 	return false
 }
+
+// shownName is a host's name as a row shows it: as it is when that's what
+// it is, otherwise spelled out and quoted (exactArg), as `meterm list` does,
+// so two names that differ only by a hidden character don't look alike.
+func shownName(name string) string { return exactArg(name) }

@@ -205,6 +205,9 @@ func tunnelFromFlags(name, local, remote string, dynamic int) (config.Forward, e
 	if name == "" || strings.ContainsAny(name, "/ \t") {
 		return config.Forward{}, fmt.Errorf("tunnel name %q: use letters, digits, - or _", name)
 	}
+	if err := config.CheckName("tunnel name", name); err != nil {
+		return config.Forward{}, err
+	}
 	set := 0
 	for _, on := range []bool{local != "", remote != "", dynamic != 0} {
 		if on {

@@ -39,6 +39,11 @@ func newGroupAddCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			if _, ok := cfg.Groups[args[0]]; !ok {
+				if err := config.CheckName("group name", args[0]); err != nil {
+					return err
+				}
+			}
 			var changes []envChange
 			err = cfg.Update(func(c *config.Config) error {
 				before := envSnapshot(c)

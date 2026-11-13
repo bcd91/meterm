@@ -196,7 +196,7 @@ func layoutFor(items []list.Item, inner int) layout {
 		if !ok {
 			continue
 		}
-		name = max(name, cellwidth.Width(termsafe.Label(it.host.Name)))
+		name = max(name, cellwidth.Width(shownName(it.host.Name)))
 		for c := range natural {
 			natural[c] = max(natural[c], it.natural(c))
 		}
@@ -436,8 +436,11 @@ func markFit(text string, start int, matches []int, style lipgloss.Style, w int)
 func (i item) detail(l layout) string {
 	var parts []string
 	if q := exactArg(i.host.Name); q != i.host.Name {
-		// The row shows the name it looks like; another host may have it.
+		// Another host may have the name it looks like.
 		parts = append(parts, "name has hidden characters: "+q)
+	}
+	if m := config.MixedScripts(i.host.Name); m != "" {
+		parts = append(parts, "name mixes "+m+" letters: it can look like another host's")
 	}
 	if l.cols[colAddr] == 0 {
 		parts = append(parts, termsafe.Label(i.target()))

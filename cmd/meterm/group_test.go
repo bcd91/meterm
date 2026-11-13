@@ -128,3 +128,33 @@ func TestListFlagsAMissingGroup(t *testing.T) {
 		t.Errorf("json: %s", o)
 	}
 }
+
+// A name that mixes alphabets is refused where it's typed; one already saved
+// can still be edited.
+func TestLookalikeNamesAreRefusedOnInput(t *testing.T) {
+	cliSandbox(t)
+	run := func(c interface {
+		SetArgs([]string)
+		Execute() error
+	}, args ...string) error {
+		var err error
+		_ = stdout(t, func() { _ = stderrOf(t, func() { c.SetArgs(args); err = c.Execute() }) })
+		return err
+	}
+	if err := run(newAddCmd(), "pаy1", "--address", "192.0.2.60"); err == nil || !strings.Contains(err.Error(), "Latin and Cyrillic") {
+		t.Errorf("add: %v", err)
+	}
+	if err := run(newAddCmd(), "web1", "--address", "192.0.2.61", "--group", "wеb"); err == nil {
+		t.Error("add --group: taken")
+	}
+	if err := run(newGroupCmd(), "add", "pаy"); err == nil {
+		t.Error("group add: taken")
+	}
+	if err := run(newRenameCmd(), "web1", "wеb1"); err == nil {
+		t.Error("rename: taken")
+	}
+	saveHosts(t, config.Host{Name: "pаy2", Address: "192.0.2.62"})
+	if err := run(newEditCmd(), "pаy2", "--notes", "old box"); err != nil {
+		t.Errorf("editing a saved look-alike: %v", err)
+	}
+}

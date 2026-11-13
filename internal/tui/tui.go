@@ -114,7 +114,7 @@ func (i item) target() string {
 // as a plain substring.
 func (i item) filterFields() []string {
 	return []string{
-		termsafe.Label(i.host.Name), termsafe.Label(i.host.Group), i.tagsText(), i.res.Env,
+		shownName(i.host.Name), termsafe.Label(i.host.Group), i.tagsText(), i.res.Env,
 		termsafe.Label(i.host.Notes), termsafe.Label(strings.Join(i.logins(), " ")), termsafe.Label(i.team),
 		termsafe.Label(i.target()),
 	}

@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -420,7 +421,11 @@ func addWizard(cfg *config.Config, existing *config.Host, in io.Reader) error {
 		quietOnSuccess = false // from the picker, wait so this can be read
 	}
 	if err := h.CheckPrintable(); err != nil {
-		return err
+		// A look-alike name already saved can still be edited: refusing would
+		// only block the edit, not the name. A new one is refused.
+		if !(editing && errors.Is(err, config.ErrMixedScript) && h.Name == existing.Name && h.Group == existing.Group) {
+			return err
+		}
 	}
 	if err := h.CheckConnection(); err != nil {
 		return err

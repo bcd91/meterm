@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"regexp"
 	"strings"
@@ -91,6 +92,44 @@ func hasControl(s string) bool {
 func CheckText(field, s string) error {
 	if hasControl(s) {
 		return fmt.Errorf("%s contains control or invisible characters", field)
+	}
+	return nil
+}
+
+// ErrMixedScript is a name that mixes Latin, Cyrillic or Greek letters:
+// "pаy1" with a Cyrillic а shows as "pay1" and is another host.
+var ErrMixedScript = errors.New("mixes letters from different alphabets, so it can look like another name")
+
+// MixedScripts names the alphabets s mixes ("Latin and Cyrillic"), or ""
+// when it doesn't mix Latin, Cyrillic and Greek. Other scripts (Thai, CJK)
+// alongside Latin are fine: they can't pass for Latin letters.
+func MixedScripts(s string) string {
+	var found []string
+	for _, sc := range []struct {
+		name string
+		t    *unicode.RangeTable
+	}{{"Latin", unicode.Latin}, {"Cyrillic", unicode.Cyrillic}, {"Greek", unicode.Greek}} {
+		for _, r := range s {
+			if unicode.IsLetter(r) && unicode.Is(sc.t, r) {
+				found = append(found, sc.name)
+				break
+			}
+		}
+	}
+	if len(found) < 2 {
+		return ""
+	}
+	return strings.Join(found, " and ")
+}
+
+// CheckName is CheckText for a name, which also mustn't mix alphabets that
+// share look-alike letters (MixedScripts).
+func CheckName(field, s string) error {
+	if err := CheckText(field, s); err != nil {
+		return err
+	}
+	if m := MixedScripts(s); m != "" {
+		return fmt.Errorf("%s %q %w (%s)", field, s, ErrMixedScript, m)
 	}
 	return nil
 }
@@ -206,10 +245,13 @@ func (h Host) CheckShared() error {
 	if h.Name == "" || strings.HasPrefix(h.Name, "-") || len(h.Name) > 128 {
 		return fmt.Errorf("host name %q isn't usable", h.Name)
 	}
-	for _, f := range []struct{ name, val string }{{"name", h.Name}, {"notes", h.Notes}, {"group", h.Group}} {
-		if err := CheckText(f.name, f.val); err != nil {
+	for _, f := range []struct{ name, val string }{{"name", h.Name}, {"group", h.Group}} {
+		if err := CheckName(f.name, f.val); err != nil {
 			return err
 		}
+	}
+	if err := CheckText("notes", h.Notes); err != nil {
+		return err
 	}
 	if _, err := NormalizeEnv(h.Env); err != nil {
 		return err
@@ -220,12 +262,12 @@ func (h Host) CheckShared() error {
 		}
 	}
 	for _, rt := range h.Routes {
-		if err := CheckText("a route name", rt.Name); err != nil {
+		if err := CheckName("a route name", rt.Name); err != nil {
 			return err
 		}
 	}
 	for _, f := range h.Forwards {
-		if err := CheckText("a tunnel name", f.Name); err != nil {
+		if err := CheckName("a tunnel name", f.Name); err != nil {
 			return err
 		}
 		if err := CheckText("a tunnel note", f.Note); err != nil {
@@ -267,6 +309,21 @@ func (h Host) CheckPrintable() error {
 	}
 	for _, f := range fields {
 		if err := CheckText(f.name, f.val); err != nil {
+			return err
+		}
+	}
+	for _, f := range []struct{ name, val string }{{"name", h.Name}, {"group", h.Group}} {
+		if err := CheckName(f.name, f.val); err != nil {
+			return err
+		}
+	}
+	for _, f := range h.Forwards {
+		if err := CheckName("a tunnel name", f.Name); err != nil {
+			return err
+		}
+	}
+	for _, rt := range h.Routes {
+		if err := CheckName("a route name", rt.Name); err != nil {
 			return err
 		}
 	}

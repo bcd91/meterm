@@ -18,7 +18,7 @@ func newRenameCmd() *cobra.Command {
 		Args:  cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			oldName, newName := args[0], args[1]
-			if err := config.CheckText("new name", newName); err != nil {
+			if err := config.CheckName("new name", newName); err != nil {
 				return err
 			}
 			cfg, err := loadConfig()
