@@ -48,13 +48,9 @@ func lbl(s string) string { return termsafe.Label(s) }
 
 // exactName is a host name for a message that must say which host it was:
 // as it is when it shows as itself, Go-quoted ("zw\u200bsp") when it holds
-// a character that wouldn't show, so it can't pass for another host.
-func exactName(s string) string {
-	if termsafe.Label(s) == s {
-		return s
-	}
-	return termsafe.Quote(s) // every invisible spelled: U+3164 too, as strconv.Quote doesn't
-}
+// a character that wouldn't show, a quote or a backslash, so it can't pass
+// for another host (termsafe.Exact).
+func exactName(s string) string { return termsafe.Exact(s) }
 
 // lblLines is lbl for each line of a multi-line text, keeping the lines.
 func lblLines(s string) string {

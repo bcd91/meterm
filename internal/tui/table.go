@@ -437,7 +437,11 @@ func (i item) detail(l layout) string {
 	var parts []string
 	if q := exactArg(i.host.Name); q != i.host.Name {
 		// Another host may have the name it looks like.
-		parts = append(parts, "name has hidden characters: "+q)
+		if termsafe.Label(i.host.Name) != i.host.Name {
+			parts = append(parts, "name has hidden characters: "+q)
+		} else {
+			parts = append(parts, "name has quotes or a backslash, so it's shown quoted: "+q)
+		}
 	}
 	if m := config.MixedScripts(i.host.Name); m != "" {
 		parts = append(parts, "name mixes "+m+" letters: it can look like another host's")

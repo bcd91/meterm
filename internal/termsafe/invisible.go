@@ -62,3 +62,16 @@ func Quote(s string) string {
 	b.WriteByte('"')
 	return b.String()
 }
+
+// Exact is s for a message, a row or a log line that must say which name
+// it was: as it is when every character shows as itself (Label) and it
+// holds no double quote or backslash, otherwise Quote(s). The quote and
+// backslash count because Quote writes them: a name typed in plain ASCII
+// as "pay\u200b1", quotes and all, would otherwise show exactly as the
+// quoted pay<ZWSP>1 does.
+func Exact(s string) string {
+	if Label(s) == s && !strings.ContainsAny(s, `"\`) {
+		return s
+	}
+	return Quote(s)
+}

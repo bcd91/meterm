@@ -296,13 +296,9 @@ func refAt(s string, i int) string {
 }
 
 // exactArg is an argument as the picker shows it: as it is when that's
-// what it is, Go-quoted when it holds a character that wouldn't show.
-func exactArg(a string) string {
-	if termsafe.Label(a) == a {
-		return a
-	}
-	return strconv.Quote(a)
-}
+// what it is, Go-quoted when it holds a character that wouldn't show, a
+// quote or a backslash (termsafe.Exact).
+func exactArg(a string) string { return termsafe.Exact(a) }
 
 // exactLine is args as the picker shows a command it will run.
 func exactLine(args []string) string {

@@ -52,7 +52,10 @@ map now, so some keys moved. `?` in the picker lists the picker's first.
   `meterm list`.
 - A name with hidden characters (`zw\u200bsp`) is spelled out and quoted in
   its row, so it can't pass for the plain one, and the line under the table
-  says so. A name with a word that mixes Latin, Cyrillic or Greek letters
+  says so. A name holding a `"` or `\` is quoted too, so one typed as
+  `"zw\u200bsp"` in plain ASCII doesn't look like it (`meterm list` and
+  messages do the same; the file manager quotes a file name with `"`, not
+  one with only `\`, so Windows paths read as they are). A name with a word that mixes Latin, Cyrillic or Greek letters
   is flagged there too. `x`, `R` and `L` put a name with hidden characters, spaces or
   quotes in the palette as a reference,
   `‹zw\u200bsp›`, that stands for exactly that host. Quotes you type in the

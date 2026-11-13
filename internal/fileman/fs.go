@@ -162,13 +162,18 @@ func where(fsys FS, p string) string {
 }
 
 // shown is a name or path from a host for a message, a row or the log: as
-// it is when every character in it shows as itself, otherwise quoted with
-// each hidden one spelled out (termsafe.Quote), as the picker shows such a
-// host name. Cleaned up instead, "ev\x1b]0;x\a il\u202etxt.exe" would show
-// as "ev ilexe.txt", pass for another file, and the log would keep U+FFFD
-// where the escape was.
+// it is when every character in it shows as itself and it holds no double
+// quote, otherwise quoted with each hidden one spelled out
+// (termsafe.Quote), as the picker shows such a host name. Cleaned up
+// instead, "ev\x1b]0;x\a il\u202etxt.exe" would show as "ev ilexe.txt",
+// pass for another file, and the log would keep U+FFFD where the escape
+// was. A name with a quote is quoted too, so a file called "a\u200bb" in
+// plain ASCII, quotes and all, can't show as the quoted a<ZWSP>b does:
+// every quoted form starts with a quote and no plain one does. Unlike
+// termsafe.Exact, a backslash alone doesn't quote, so a Windows path reads
+// as it is (C:\Users, not "C:\\Users").
 func shown(s string) string {
-	if termsafe.Label(s) == s {
+	if termsafe.Label(s) == s && !strings.Contains(s, `"`) {
 		return s
 	}
 	return termsafe.Quote(s)
