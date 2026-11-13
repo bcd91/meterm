@@ -187,8 +187,10 @@ v0.23.1 asked about nothing but deleting a host in the picker.
   Thai and emoji names, and shows `pay (no such group)` (`group_missing` in
   JSON) for a host whose group was removed. JSON output spells C1 and bidi
   controls and invisible characters as `\u` escapes.
-- `meterm --config <file> connect <host>` (and `--debug`, or either right
-  after `connect`) works; it looked for a host called `--config`.
+- `meterm --config <file> connect <host>` (and `--debug`, or either after
+  `connect`, among `--tmux` and `--log-args`, anywhere before the host)
+  works; it looked for a host called `--config`. After `--` they are
+  ssh's.
 - Commands other than the picker start at once on a terminal that doesn't
   answer a colour query; they waited 5 seconds. The picker itself still
   waits up to 5 seconds there unless `$COLORFGBG` is set.

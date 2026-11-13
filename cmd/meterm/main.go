@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -94,8 +95,19 @@ func afterRun(err error) {
 // sync): cobra hands such a command every argument, the flags given before
 // its name included, so "meterm --config x connect web1" would otherwise
 // look for a host called "--config".
-func takeGlobalFlags(args []string) ([]string, error) {
+//
+// own are the command's own flags that may come before or among them
+// (connect's --tmux, --log-args): they are stepped over and kept, in
+// order, so `connect --tmux --config X host` takes --config too. Scanning
+// stops at the first other argument (the host) or at --, so what follows
+// either is never taken.
+func takeGlobalFlags(args []string, own ...string) ([]string, error) {
+	var kept []string
 	for len(args) > 0 {
+		if slices.Contains(own, args[0]) {
+			kept, args = append(kept, args[0]), args[1:]
+			continue
+		}
 		switch a := args[0]; {
 		case a == "--config":
 			if len(args) < 2 {
@@ -109,10 +121,10 @@ func takeGlobalFlags(args []string) ([]string, error) {
 			os.Setenv("METERM_DEBUG", "1")
 			args = args[1:]
 		default:
-			return args, nil
+			return append(kept, args...), nil
 		}
 	}
-	return args, nil
+	return kept, nil
 }
 
 // newRootCmd is meterm with all its commands, as main runs it: tests drive

@@ -34,7 +34,7 @@ func newConnectCmd() *cobra.Command {
 		Args:               cobra.MinimumNArgs(1),
 		DisableFlagParsing: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			args, err := takeGlobalFlags(args)
+			args, err := takeGlobalFlags(args, "--tmux", "--log-args")
 			if err != nil {
 				return err
 			}

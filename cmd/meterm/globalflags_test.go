@@ -17,6 +17,8 @@ func TestGlobalFlagsBeforeConnect(t *testing.T) {
 		{"--config=OTHER", "connect", "web9"},
 		{"connect", "--config", "OTHER", "web9"},
 		{"--debug", "--config", "OTHER", "c", "web9"},
+		{"connect", "--tmux", "--config", "OTHER", "web9"},
+		{"connect", "--log-args", "--config=OTHER", "--tmux", "web9"},
 	} {
 		t.Run(strings.Join(args, " "), func(t *testing.T) {
 			dir := cliSandbox(t)
@@ -45,5 +47,21 @@ func TestGlobalFlagsBeforeConnect(t *testing.T) {
 				t.Errorf("ssh ran %q", b)
 			}
 		})
+	}
+}
+
+// After --, --config is ssh's, not meterm's.
+func TestGlobalFlagsAfterDoubleDashGoToSSH(t *testing.T) {
+	dir := cliSandbox(t)
+	installFakeSSH(t, t.TempDir())
+	t.Setenv(fakeSSHExitEnv, "0")
+	sshLog := filepath.Join(dir, "ssh.log")
+	t.Setenv("METERM_TEST_SSH_LOG", sshLog)
+	saveHosts(t, config.Host{Name: "web9", Address: "192.0.2.99"})
+	if err := runRoot(t, "connect", "web9", "--", "--config", "elsewhere"); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(sshLog); !strings.Contains(string(b), "192.0.2.99") || !strings.Contains(string(b), "--config elsewhere") {
+		t.Errorf("ssh ran %q", b)
 	}
 }
