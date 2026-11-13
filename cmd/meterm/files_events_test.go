@@ -8,6 +8,7 @@ import (
 	"meterm/internal/activity"
 	"meterm/internal/config"
 	"meterm/internal/fileman"
+	"meterm/internal/termsafe"
 )
 
 // Each file manager operation on the host is a start and an outcome, as
@@ -61,5 +62,39 @@ func TestFileManagerOperationsStartAndEnd(t *testing.T) {
 		if e.Action == activity.ActionOutcome && e.RefSeq == 0 {
 			t.Errorf("an outcome that points at nothing: %+v", e)
 		}
+	}
+}
+
+// A name the file manager spelled out (termsafe.Quote) reaches the log as
+// it is: the exact name, not U+FFFD where a hidden character was.
+func TestFileManagerLogKeepsSpelledNames(t *testing.T) {
+	cliSandbox(t)
+	saveHosts(t, config.Host{Name: "web1", Address: "192.0.2.10"})
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	h, _, err := cfg.Target("web1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	q := termsafe.Quote("/srv/ev\x1b]0;PWN\x07 il\n name‮txt.exe")
+	on := fileEventLogger(cfg, *h, "")
+	on(fileman.Event{Op: 1, Kind: "delete", Outcome: "started", Detail: q, Remote: true})
+	on(fileman.Event{Op: 1, Kind: "delete", Outcome: "ok", Detail: q, Remote: true})
+	l, err := activity.Open(os.Getenv("METERM_ACTIVITY_DIR"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	all, _ := l.All()
+	found := false
+	for _, e := range all {
+		if strings.Contains(e.Detail, "�") {
+			t.Errorf("logged %q", e.Detail)
+		}
+		found = found || strings.Contains(e.Detail, q)
+	}
+	if !found {
+		t.Errorf("no event holds %s: %+v", q, all)
 	}
 }
