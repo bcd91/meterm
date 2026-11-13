@@ -33,3 +33,36 @@ func TestMixedScriptNamesAreRefused(t *testing.T) {
 		t.Error("notes mixing alphabets refused: prose is fine")
 	}
 }
+
+// A whole word of Cyrillic or Greek letters that all look Latin passes the
+// per-word rule but shows as Latin beside a Latin word: "web-арр" reads
+// "web-app". In a name with Latin letters such a word is refused too.
+func TestLookalikeWordBesideLatinIsRefused(t *testing.T) {
+	for name, bad := range map[string]bool{
+		"web-арр":       true,  // Cyrillic арр
+		"web1а":         true,  // Cyrillic а
+		"web-Ρ":         true,  // Greek capital Rho
+		"pаypal":        true,  // mixed in one word, as before
+		"АРР-web":       true,  // Cyrillic АРР, capitals
+		"db-москва":     false, // москва: м к в don't look like a, k, b
+		"api-μ":         false, // μ
+		"web.сервер_02": false, // сервер holds в
+		"арр":           false, // all Cyrillic, no Latin word to pass for
+		"арр-сервер":    false,
+		"web-ไทย":       false, // Thai
+		"web-فارسی":     false, // Persian
+	} {
+		err := CheckName("name", name)
+		if bad != (err != nil) || bad && !errors.Is(err, ErrMixedScript) {
+			t.Errorf("%+q: %v", name, err)
+		}
+		h := Host{Name: name, Address: "192.0.2.1"}
+		if bad != (h.CheckShared() != nil) {
+			t.Errorf("%+q: CheckShared %v", name, h.CheckShared())
+		}
+		warn, err := h.CheckFromTeam()
+		if err != nil || bad != (warn != nil) {
+			t.Errorf("%+q: CheckFromTeam warn %v err %v (a team host is warned, not refused)", name, warn, err)
+		}
+	}
+}

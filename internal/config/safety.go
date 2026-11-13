@@ -127,20 +127,26 @@ func checkText(field, s string, ctl func(rune) bool) error {
 // "pаy1" with a Cyrillic а shows as "pay1" and is another host.
 var ErrMixedScript = errors.New("mixes letters from different alphabets, so it can look like another name")
 
-// MixedScripts names the alphabets one word of s mixes ("Latin and
-// Cyrillic"), or "" when no word mixes Latin, Cyrillic and Greek. A word is
-// a run of letters (with their combining marks): "-", "_", ".", digits and
-// anything else that isn't a letter split words, so "db-москва" and
-// "api-μ" are fine while "pаypal" with a Cyrillic а is not. Other scripts
-// (Thai, CJK) alongside Latin are fine: they can't pass for Latin letters.
+// MixedScripts names the alphabets s mixes ("Latin and Cyrillic"), or ""
+// when it mixes none of Latin, Cyrillic and Greek in a way that can look
+// like another name. A word is a run of letters (with their combining
+// marks): "-", "_", ".", digits and anything else that isn't a letter split
+// words. Two things count as mixing:
+//
+//   - one word holding letters of two of the three alphabets: "pаypal"
+//     with a Cyrillic а;
+//   - in a name that has Latin letters, a Cyrillic or Greek word made only
+//     of letters that look Latin (lookalikeLatin): "web-арр" in Cyrillic
+//     shows as "web-app", "web1а" as "web1a".
+//
+// So "db-москва" and "api-μ" are fine, and so are other scripts (Thai,
+// Persian, CJK) alongside Latin: they can't pass for Latin letters.
 func MixedScripts(s string) string {
 	words := strings.FieldsFunc(s, func(r rune) bool { return !unicode.IsLetter(r) && !unicode.IsMark(r) })
+	latin := false
 	for _, w := range words {
 		var found []string
-		for _, sc := range []struct {
-			name string
-			t    *unicode.RangeTable
-		}{{"Latin", unicode.Latin}, {"Cyrillic", unicode.Cyrillic}, {"Greek", unicode.Greek}} {
+		for _, sc := range scripts {
 			for _, r := range w {
 				if unicode.IsLetter(r) && unicode.Is(sc.t, r) {
 					found = append(found, sc.name)
@@ -151,9 +157,59 @@ func MixedScripts(s string) string {
 		if len(found) >= 2 {
 			return strings.Join(found, " and ")
 		}
+		latin = latin || len(found) == 1 && found[0] == "Latin"
+	}
+	if !latin {
+		return ""
+	}
+	for _, w := range words {
+		for _, sc := range scripts[1:] {
+			if allLookalike(w, sc.t) {
+				return "Latin and " + sc.name
+			}
+		}
 	}
 	return ""
 }
+
+var scripts = []struct {
+	name string
+	t    *unicode.RangeTable
+}{{"Latin", unicode.Latin}, {"Cyrillic", unicode.Cyrillic}, {"Greek", unicode.Greek}}
+
+// allLookalike says every letter of w is in script t and in lookalikeLatin.
+func allLookalike(w string, t *unicode.RangeTable) bool {
+	n := 0
+	for _, r := range w {
+		if unicode.IsMark(r) {
+			continue
+		}
+		if !unicode.Is(t, r) || !lookalikeLatin[r] {
+			return false
+		}
+		n++
+	}
+	return n > 0
+}
+
+// lookalikeLatin are the Cyrillic and Greek letters that show as a Latin
+// letter in common fonts. Picked by hand from the Latin look-alikes in
+// Unicode's confusables data (UTS #39, confusables.txt), keeping only
+// letters that read as a plain Latin letter. Lowercase letters shaped like
+// small capitals (Cyrillic в к м н т, Greek κ τ) are left out on purpose:
+// they don't pass for Latin in running text, and with them ordinary words
+// such as "москва" would be refused.
+var lookalikeLatin = func() map[rune]bool {
+	m := map[rune]bool{}
+	for _, r := range "" +
+		"\u0430\u0435\u043e\u0440\u0441\u0443\u0445\u0456\u0458\u0455\u0501\u051b\u051d\u04af\u04bb\u04cf" + // Cyrillic lowercase: a e o p c y x i j s d q w y h l
+		"\u0410\u0412\u0415\u041a\u041c\u041d\u041e\u0420\u0421\u0422\u0425\u0405\u0406\u0408\u04ae" + // Cyrillic capitals: A B E K M H O P C T X S I J Y
+		"\u0391\u0392\u0395\u0396\u0397\u0399\u039a\u039c\u039d\u039f\u03a1\u03a4\u03a5\u03a7" + // Greek capitals: A B E Z H I K M N O P T Y X
+		"\u03bf\u03bd\u03c1\u03c5\u03c7\u03b9" { // Greek lowercase: o v p u x i
+		m[r] = true
+	}
+	return m
+}()
 
 // CheckName is CheckText for a name, which also mustn't mix alphabets that
 // share look-alike letters (MixedScripts).

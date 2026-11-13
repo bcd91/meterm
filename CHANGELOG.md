@@ -154,7 +154,9 @@ v0.23.1 asked about nothing but deleting a host in the picker.
   tunnel name is refused when one word in it mixes Latin with Cyrillic or
   Greek letters (`pаypal` with a Cyrillic `а`); words are split at `-`,
   `_`, `.`, digits and anything else that isn't a letter, so `db-москва`
-  and `api-μ` are fine. `add`, `edit`, `rename`, `group add`, `tunnel add`
+  and `api-μ` are fine. In a name with Latin letters, a Cyrillic or Greek
+  word made only of letters that look Latin is refused too: `web-арр` in
+  Cyrillic shows as `web-app`. `add`, `edit`, `rename`, `group add`, `tunnel add`
   and `import` apply this; a look-alike name already saved still works and
   can still be edited.
 - **Team pulls keep and flag, and never drop a host silently.** A team host
