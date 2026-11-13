@@ -29,7 +29,8 @@ func newCpCmd() *cobra.Command {
 			"  meterm cp ./deploy.tar.gz web1:/tmp/                # upload\n" +
 			"  meterm cp -r web1:/var/log/myapp ./logs             # a directory\n" +
 			"  meterm cp --sync ./dist/ web1:/var/www/app/ -- -avz --delete\n\n" +
-			"--sync with --delete on a production host asks first (y only; --yes doesn't).\n" +
+			"--sync with --delete on a production host asks first, and only y goes ahead;\n" +
+			"--yes goes ahead without asking.\n" +
 			"When stdin isn't a terminal it doesn't wait: it warns on stderr, and the\n" +
 			"activity log says so. The log has a line when the copy starts and one with\n" +
 			"how it ended.\n\n" +

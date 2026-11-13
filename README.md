@@ -142,9 +142,13 @@ since v0.20.0; [CHANGELOG.md](CHANGELOG.md) lists them.
 | `:` | command palette, below | – |
 
 Anything that would run on a production host asks first, and so does a
-delete. Only `y` answers yes (`enter` cancels, like any other key), and only
-once the question has been on screen for 150ms: a key typed before it could
-be read, such as a double `enter`, is ignored and the question stays. A key pressed
+delete (and, in the file manager, replacing a file). Only the key the
+question names goes ahead: `y`, or in the file manager `o`, `r` or `i` where
+it offers them; `enter` cancels, like any other key. That key counts only
+once the question has been on screen for 150ms: typed sooner (a double
+`enter`, a `y` typed ahead), it's ignored and the question stays. In the
+picker every key is ignored that early; in the file manager a key that
+cancels cancels at once. A key pressed
 straight after `esc` can reach meterm in the same read and look like
 `alt`+key; neither screen binds `alt`, so it's taken as `esc` and then the
 key.
@@ -1095,9 +1099,14 @@ is touched and is never changed. So a machine losing power, or a kill, leaves a 
 outcome, which means nobody can say how it ended, and a long `connect` is in the log from its
 first moment. `exec` writes an outcome per host, as each finishes. There's no `exit_code` for a
 timeout or something killed: no exit code isn't a success. Tunnels held by `tunnel up` have no
-outcome. A start on production carries how it went ahead first in its detail:
-`(production, asked)`, `(production, picker asked)`, `(production, --yes)` or
-`(production, no prompt: not a terminal)`.
+outcome. Every start on a production host carries how it went ahead first in its detail:
+`(production, asked)`, `(production, picker asked)`, `(production, --yes)`,
+`(production, no prompt: not a terminal)`, `(production, named on the command line)` (a host
+named outright isn't asked about again) or `(production, picker didn't ask)` (started from the
+picker without its answer). A host reached through a production jump host says
+`(via production, …)`, and a tunnel whose name or note says it leads to production
+`(tunnel to production, …)`. The narrow view shortens these to `⚑picker`, `⚑named`,
+`⚑via picker` and so on.
 
 **Who.** Each event has `actor_type`, and `attribution_source: declared`, because it's only ever
 what the environment claims. A process with `CLAUDECODE=1` or an `AI_AGENT` marker reads as

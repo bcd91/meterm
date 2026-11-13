@@ -183,10 +183,11 @@ func (m model) footerLines() []string {
 	return []string{faintStyle.Render(cellwidth.Fit(line+tail, m.width))}
 }
 
-// keysChanged is the top of the ? screen: keys that moved in this version,
-// so a hand that remembers the old ones finds out here.
+// keysChanged is the top of the ? screen: keys that moved in v0.24, so a
+// hand that remembers the old ones finds out here. Its title names the
+// version: the build's own version says nothing about when keys moved.
 var keysChanged = []string{
-	"Keys changed in this version",
+	"Keys changed in v0.24 (from v0.23)",
 	"  d\tdeletes a host (asks first); it used to turn the page",
 	"  f\topens files; it used to turn the page",
 	"  h l b u ← →\tno longer turn the page",
@@ -243,7 +244,7 @@ var pickerHelp = []string{
 	"  ⇶1 tunnels (red: one reaches production)   ⧉ shared with a team",
 	"  ↑ team change not pushed   ‼ team conflict (see T)",
 	"",
-	"Anything that runs on a production host asks first, and so does a delete: only y answers yes, and not in the question's first moment.",
+	"Anything that runs on a production host asks first, and so does a delete: only y answers yes, and only once the question has been up 150ms; a key typed sooner is ignored and the question stays.",
 }
 
 // helpKeyCol is where a key line's description starts.

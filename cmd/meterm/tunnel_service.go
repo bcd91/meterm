@@ -68,7 +68,8 @@ func newTunnelEnableCmd() *cobra.Command {
 			"in `journalctl --user -u <the unit this prints>` on Linux, and in\n" +
 			"~/Library/Logs/meterm/<the label this prints>.log on macOS.\n\n" +
 			"A tunnel to a production host, or whose note says it reaches production, asks\n" +
-			"first (y only; --yes doesn't). When stdin isn't a terminal it warns and goes on.",
+			"first, and only y goes ahead; --yes goes ahead without asking. When stdin\n" +
+			"isn't a terminal it warns and goes on.",
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if err := checkServiceSupport(); err != nil {
