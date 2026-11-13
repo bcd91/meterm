@@ -235,7 +235,7 @@ var pickerHelp = []string{
 	"",
 	"Marks",
 	"  ● up   ◐ its jump host up, the host itself not checked   ✕ down   ? checking, or unsure (port open, no SSH greeting)   ◌ not checked",
-	"  checked the way connect goes: each route's first hop, the jump host if there is one; again every 5 minutes, and when you come back; a dim mark is older than that",
+	"  checked by the saved routes connect tries: each route's first hop, the jump host if there is one, dialled directly (not through your ssh_config: a Host alias or ProxyCommand there isn't followed); again every 5 minutes, and when you come back; a dim mark is older than that",
 	"  the line under the table says how and when: up via vpn, 2m ago · via bastion: down: connection refused, 30s ago · via bastion: bastion up, the host itself not checked",
 	"  ✓ marked   ⚑prod ⚑staging   ⚷ key installed   ⇄2 other routes",
 	"  ⇶1 tunnels (red: one reaches production)   ⧉ shared with a team",

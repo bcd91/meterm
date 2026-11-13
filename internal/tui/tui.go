@@ -624,9 +624,11 @@ func (m *model) reload() tea.Cmd {
 // out to stay off the network.
 var dialHealth health.Dialer = health.Dial
 
-// healthCmds checks every host the way connect would reach it (see
+// healthCmds checks every host by the saved routes connect would try (see
 // health.CheckHost), as the round under way: each route's first hop, which
-// for a host behind a jump host is the jump host.
+// for a host behind a jump host is the jump host. It dials with Go's net
+// package, not ssh, so ssh_config (a Host alias, HostName, ProxyCommand,
+// ProxyJump set there) plays no part.
 func (m model) healthCmds() []tea.Cmd {
 	cmds := make([]tea.Cmd, 0, len(m.cfg.Hosts))
 	cfg, round, now := m.cfg, m.round, m.now

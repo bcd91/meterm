@@ -71,9 +71,13 @@ line each, filling the terminal:
  enter connect  / filter  space mark  x exec  f files  s sort  ? help  q quit
 ```
 
-The first mark is the live status, checked the way `connect` goes: each
+The first mark is the live status, checked by the routes `connect` tries: each
 route's first hop, which for a host behind a `proxy_jump` is the jump host,
-wanting an SSH greeting. `●` up, `◐` the jump host answered (the host behind
+wanting an SSH greeting. The check dials the saved address and port itself, not
+through `ssh`, so your `~/.ssh/config` plays no part: a host saved under a `Host`
+alias that only ssh_config resolves, or reached through a `ProxyCommand` or a
+`ProxyJump` set there rather than in meterm, can show down (or not checked) while
+`connect` works. `●` up, `◐` the jump host answered (the host behind
 it isn't checked), `✕` down (behind a jump host: the jump host didn't
 answer), `?` still checking or unsure (the port took the connection
 but no SSH greeting came within 2s: a multiplexer such as sslh that waits for

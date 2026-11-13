@@ -27,11 +27,14 @@ map now, so some keys moved. `?` in the picker lists the picker's first.
   first on a narrow one; the selected host's details on the line under it.
   `s` cycles the order: recent, name, group, env. Under 40×10 it says the
   terminal is too small, and a question open at that moment is cancelled.
-- Health checks go the way `connect` would, where v0.23.1 dialled the
-  saved address and port and didn't check a host behind a jump host at
+- Health checks follow the routes `connect` tries, where v0.23.1 dialled
+  the saved address and port and didn't check a host behind a jump host at
   all: each of a host's routes in the order connect tries them (the one
   that worked last first), dialling the first hop and wanting an SSH
-  greeting. `●` up; `◐` the jump host answered, the host behind it isn't
+  greeting. They dial the saved address themselves, not through `ssh`, so
+  ssh_config plays no part: a name only a `Host` alias resolves, or a
+  `ProxyCommand` or `ProxyJump` set there, isn't followed, and such a host
+  can show down while `connect` works. `●` up; `◐` the jump host answered, the host behind it isn't
   checked; `✕` down; `?` checking, or the port took the connection but no
   SSH greeting came within 2s (sslh, a slow server); `◌` not checked (a
   host meterm won't connect to as it stands). The line under the table
