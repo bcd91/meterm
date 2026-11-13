@@ -3,6 +3,7 @@
 package fileman
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -110,12 +111,18 @@ func TestCancelSaysWhichFileIsUnchanged(t *testing.T) {
 	m, _ = update(t, m, key("esc"))
 	close(gate)
 	m = untilIdle(t, m)
-	want := "cancelled: test:" + filepath.Join(right, "big.bin") + " unchanged"
-	if !strings.Contains(m.status, want) {
-		t.Errorf("status = %q, want %q", m.status, want)
+	if want := "cancelled: big.bin unchanged"; !strings.HasPrefix(m.status, want) {
+		t.Errorf("status = %q, want %q first", m.status, want)
 	}
-	if last := (*events)[len(*events)-1]; !strings.Contains(last.detail, want) {
+	want := "; test:" + filepath.Join(right, "big.bin") + " unchanged"
+	if last := (*events)[len(*events)-1]; !strings.HasPrefix(last.detail, "cancelled: upload") || !strings.Contains(last.detail, want) {
 		t.Errorf("log = %q, want %q", last.detail, want)
+	}
+	// At 60 columns the words that matter are on screen.
+	m, _ = update(t, m, tea.WindowSizeMsg{Width: 60, Height: 20})
+	checkFits(t, "cancel at 60", m)
+	if v := viewText(m); !strings.Contains(v, "big.bin unchanged") {
+		t.Errorf("at 60 columns the cancel doesn't say big.bin is unchanged:\n%s", v)
 	}
 }
 
@@ -137,5 +144,47 @@ func TestAStoppedBatchNamesWhatItCopied(t *testing.T) {
 	last := h.lastEvent().detail
 	if !strings.HasPrefix(last, "failed: upload") || !strings.Contains(last, "copied before it stopped: "+filepath.Join(right, "a")+", "+filepath.Join(right, "b")) {
 		t.Errorf("log %q doesn't list what was copied", last)
+	}
+}
+
+// 7. A listing that fails after a copy failed (the connection went with
+// it) doesn't hide what the copy said: which file is unchanged, and the
+// temporary file left behind.
+func TestAFailedListingKeepsTheCopysWords(t *testing.T) {
+	left, right := t.TempDir(), t.TempDir()
+	h := newHarness(t, left, right)
+	m := h.model()
+	m.setStatus("copy failed after 0 of 1 file(s): web1:/srv/a unchanged; the unfinished copy is still at web1:/srv/.a.meterm-1.part", true)
+	h.m = m
+	h.send(dirLoadedMsg{pane: 1, dir: right, err: errors.New("connection lost")})
+	st := h.model().status
+	if !strings.Contains(st, "unfinished copy is still at web1:/srv/.a.meterm-1.part") || !strings.Contains(st, "connection lost") {
+		t.Errorf("status = %q, want the copy's words and the listing's", st)
+	}
+	h.send(dirLoadedMsg{pane: 1, dir: right, err: errors.New("connection lost")})
+	if got := h.model().status; strings.Count(got, "connection lost") != 1 {
+		t.Errorf("a second failed listing repeated itself: %q", got)
+	}
+}
+
+// 7, on screen: a failed copy's status says first which file is unchanged
+// and why, then the leftover's name, short enough for 60 columns.
+func TestAFailedCopySaysWhatItLeftFirst(t *testing.T) {
+	left, right := t.TempDir(), t.TempDir()
+	write(t, filepath.Join(left, "a.txt"), "new", 0o644)
+	write(t, filepath.Join(right, "a.txt"), "old", 0o644)
+	h := newHarnessWith(t, left, right, func(o *Options) { o.Right = removeFails{failWrites{Local{}}} })
+	h.send(tea.WindowSizeMsg{Width: 60, Height: 20})
+	h.keys("c", "o")
+	st := h.model().status
+	if !strings.HasPrefix(st, "copy failed after 0 of 1 file(s): a.txt unchanged (input/output error (test)); unfinished copy left: .a.txt.meterm-") {
+		t.Errorf("status = %q", st)
+	}
+	checkFits(t, "failed copy at 60", h.model())
+	if v := viewText(h.model()); !strings.Contains(v, "a.txt unchanged") || !strings.Contains(v, "unfinished copy left") {
+		t.Errorf("at 60 columns:\n%s", v)
+	}
+	for _, n := range partFiles(t, right) {
+		os.Remove(filepath.Join(right, n))
 	}
 }

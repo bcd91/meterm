@@ -557,7 +557,17 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		p := m.panes[msg.pane]
 		if msg.err != nil {
 			p.err = msg.err.Error()
-			m.setStatus(fmt.Sprintf("%s: %v", p.fs.Label(), msg.err), true)
+			say := fmt.Sprintf("%s: %v", p.fs.Label(), msg.err)
+			switch {
+			case m.statusErr && strings.Contains(m.status, say):
+				// Said already.
+			case m.statusErr && m.status != "":
+				// After a copy or delete that failed: what it left is what
+				// matters, so the listing's failure goes after it.
+				m.setStatus(m.status+"; listing "+say, true)
+			default:
+				m.setStatus(say, true)
+			}
 			return m, nil
 		}
 		changed := p.dir != msg.dir
@@ -691,11 +701,26 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			var s string
 			switch {
 			case errors.Is(msg.err, context.Canceled):
-				s = fmt.Sprintf("%s; %d of %d file(s) copied before that", stopNote(msg.err), msg.res.Copied, len(msg.plan.Files))
+				short := func(p, _ string) string { return relTo(msg.plan.Dst, msg.plan.DstDir, p) }
+				s = fmt.Sprintf("%s; %d of %d file(s) copied before that", stopNote(msg.err, short), msg.res.Copied, len(msg.plan.Files))
 			case errors.As(msg.err, &partial):
 				s = fmt.Sprintf("copy stopped after %d file(s): %v", msg.res.Copied, partial)
 			default:
 				s = fmt.Sprintf("copy failed after %d of %d file(s): %v", msg.res.Copied, len(msg.plan.Files), msg.err)
+				var u *Unchanged
+				if errors.As(msg.err, &u) {
+					// The words that matter first, short: the whole is in
+					// the log and under ?.
+					what := "unchanged"
+					if u.New {
+						what = "not created"
+					}
+					s = fmt.Sprintf("copy failed after %d of %d file(s): %s %s (%v)", msg.res.Copied, len(msg.plan.Files),
+						relTo(msg.plan.Dst, msg.plan.DstDir, u.Path), what, rootCause(u.Err))
+					if u.Leftover != "" {
+						s += "; unfinished copy left: " + relTo(msg.plan.Dst, msg.plan.DstDir, u.LeftoverPath) + " (? for more)"
+					}
+				}
 			}
 			if n := len(msg.res.Files); n > 0 {
 				rel := make([]string, n)
@@ -704,7 +729,8 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				s += "; already copied: " + firstFew(rel, 3) + " (? for all)"
 			}
-			if n := len(msg.res.Leftovers); n > 0 {
+			var u *Unchanged
+			if n := len(msg.res.Leftovers); n > 0 && !(errors.As(msg.err, &u) && u.Leftover != "" && n == 1) {
 				s += "; unfinished temporary file left: " + firstFew(msg.res.Leftovers, 2)
 			}
 			m.setStatus(s, true)
@@ -1629,7 +1655,7 @@ func (m Model) reportAs(outcome string, plan Plan, res Result, err error) string
 	case errors.As(err, &partial):
 		d += "; stopped: " + partial.Error()
 	case errors.Is(err, context.Canceled):
-		d += "; " + stopNote(err)
+		d += "; " + strings.TrimPrefix(stopNote(err, inFull), "cancelled: ")
 	}
 	more := err != nil || res.Skipped > 0 || len(res.InPlace) > 0 || len(res.Lost) > 0 || len(res.Warnings) > 0 || len(res.Leftovers) > 0
 	m.emit(Event{Op: m.copyOp, Kind: kind, Outcome: outcome, Detail: d, More: more, Remote: remote})
@@ -1637,28 +1663,46 @@ func (m Model) reportAs(outcome string, plan Plan, res Result, err error) string
 }
 
 // stopNote says what a cancel left of the file it stopped in: unchanged,
-// not created, or partly written, and any temporary file left behind.
-func stopNote(err error) string {
+// not created, or partly written, and any temporary file left behind. name
+// is how the file is named: in full with its side for the log, shorter on
+// screen, so the word that matters comes early.
+func stopNote(err error, name func(path, withSide string) string) string {
 	var u *Unchanged
 	var partial *PartialWrite
 	switch {
 	case errors.As(err, &partial):
-		return "cancelled: " + partial.Where + " may be partly written"
+		return "cancelled: " + name(partial.Path, partial.Where) + " may be partly written"
 	case errors.As(err, &u):
-		s := "cancelled: " + u.Where + " unchanged, the unfinished copy discarded"
+		f, what := name(u.Path, u.Where), "unchanged"
 		if u.New {
-			s = "cancelled: " + u.Where + " not created, the unfinished copy discarded"
+			what = "not created"
 		}
-		if u.Leftover != "" {
-			s = "cancelled: " + u.Where + " unchanged; the unfinished copy is still at " + u.Leftover + " (" + u.LeftoverErr.Error() + ")"
-			if u.New {
-				s = "cancelled: " + u.Where + " not created; couldn't remove the unfinished new file " + u.Leftover + " (" + u.LeftoverErr.Error() + ")"
-			}
+		if u.Leftover == "" {
+			return "cancelled: " + f + " " + what + ", the unfinished copy discarded"
 		}
-		return s
+		left := "the unfinished copy is still at "
+		if u.New {
+			left = "couldn't remove the unfinished new file "
+		}
+		return "cancelled: " + f + " " + what + "; " + left + u.Leftover + " (" + u.LeftoverErr.Error() + ")"
 	}
 	return "cancelled between files: none was being written"
 }
+
+// rootCause is the error at the bottom of err's chain: "connection lost",
+// not every path it was wrapped in on the way up.
+func rootCause(err error) error {
+	for {
+		next := errors.Unwrap(err)
+		if next == nil {
+			return cause(err)
+		}
+		err = next
+	}
+}
+
+// inFull names a file by its path with its side, for the log.
+func inFull(_, withSide string) string { return withSide }
 
 // warningsText sums up what went wrong without stopping a copy: the first
 // warning in full, and how many more.

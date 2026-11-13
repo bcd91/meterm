@@ -296,6 +296,7 @@ func (e *InPlaceNeeded) Unwrap() error { return e.Err }
 // PartialWrite is a write in place that failed: the file may now hold some
 // of the new bytes and none of the old ones past them. It is never removed.
 type PartialWrite struct {
+	Path  string // the file, on Dst
 	Where string // the file, with its side
 	Err   error
 }
@@ -430,6 +431,7 @@ type copied struct {
 	// leftover is a temporary file that couldn't be removed, with its
 	// side, and leftErr why.
 	leftover string
+	leftPath string
 	leftErr  error
 }
 
@@ -438,11 +440,14 @@ type copied struct {
 // or, when New, was never created. Leftover, when not "", is the temporary
 // file, which couldn't be removed either, with its side.
 type Unchanged struct {
+	Path        string // the file, on Dst
 	Where       string
 	New         bool
 	Leftover    string
 	LeftoverErr error
-	Err         error
+	// LeftoverPath is Leftover without its side.
+	LeftoverPath string
+	Err          error
 }
 
 func (e *Unchanged) Error() string {
@@ -579,9 +584,9 @@ func copyFile(now, after context.Context, src, dst FS, f FileOp, replace bool, o
 			why := ""
 			var se *sftp.StatusError
 			if errors.As(err, &se) && se.FxCode() == sftp.ErrSSHFxFailure {
-				why = " (the server doesn't say why: a full disk and a read-only filesystem both say this)"
+				why = "; the server doesn't say why: a full disk and a read-only filesystem both say this"
 			}
-			return res, fmt.Errorf("can't make a temporary file in %s (%w)%s; %s was left as it was", where(dst, dir), cause(err), why, where(dst, target))
+			return res, fmt.Errorf("can't make a temporary file in %s (%w); %s was left as it was%s", where(dst, dir), cause(err), where(dst, target), why)
 		}
 		id, idOK := identityOf(dst)
 		ok, known := mayWrite(old, id, idOK)
@@ -606,9 +611,9 @@ func copyFile(now, after context.Context, src, dst FS, f FileOp, replace bool, o
 			_ = out.Close()
 		}
 		if rerr := dst.Remove(tmp); rerr != nil && !errors.Is(rerr, fs.ErrNotExist) {
-			res.leftover, res.leftErr = where(dst, tmp), cause(rerr)
+			res.leftover, res.leftPath, res.leftErr = where(dst, tmp), tmp, cause(rerr)
 			if err != nil {
-				err = &Unchanged{Where: where(dst, target), New: !haveOld, Leftover: where(dst, tmp), LeftoverErr: cause(rerr), Err: err}
+				err = &Unchanged{Path: target, Where: where(dst, target), New: !haveOld, Leftover: where(dst, tmp), LeftoverPath: tmp, LeftoverErr: cause(rerr), Err: err}
 			}
 		}
 	}
@@ -624,7 +629,7 @@ func copyFile(now, after context.Context, src, dst FS, f FileOp, replace bool, o
 			// The file it was for stays as it was: say so, of that file.
 			var u *Unchanged
 			if err != nil && !errors.As(err, &u) && !errors.As(err, &loses) {
-				err = &Unchanged{Where: where(dst, target), New: !haveOld, Err: err}
+				err = &Unchanged{Path: target, Where: where(dst, target), New: !haveOld, Err: err}
 			}
 		}
 		if onTemp != nil {
@@ -765,8 +770,8 @@ func copyFile(now, after context.Context, src, dst FS, f FileOp, replace bool, o
 	err = nil
 	drop()
 	if res.leftover != "" {
-		return res, &Unchanged{Where: where(dst, target), Err: fmt.Errorf("couldn't replace it in one step (%v)", renameErr),
-			Leftover: res.leftover, LeftoverErr: res.leftErr}
+		return res, &Unchanged{Path: target, Where: where(dst, target), Err: fmt.Errorf("couldn't replace it in one step (%v)", renameErr),
+			Leftover: res.leftover, LeftoverPath: res.leftPath, LeftoverErr: res.leftErr}
 	}
 	onBytes(-n) // written again below
 	again, err := src.Open(f.Src)
@@ -893,7 +898,7 @@ func keepOwner(dst FS, out io.Writer, tmp string, old Entry) (*ReplaceLoses, err
 func writeInPlace(now, after context.Context, in io.Reader, dst FS, target string, res copied, onTemp func(string, bool), onBytes func(int64)) (copied, error) {
 	res.inPlace = true
 	if err := after.Err(); err != nil {
-		return res, &Unchanged{Where: where(dst, target), Err: err}
+		return res, &Unchanged{Path: target, Where: where(dst, target), Err: err}
 	}
 	if onTemp != nil {
 		onTemp(target, true)
@@ -909,7 +914,7 @@ func writeInPlace(now, after context.Context, in io.Reader, dst FS, target strin
 		err = cerr
 	}
 	if err != nil {
-		return res, &PartialWrite{Where: where(dst, target), Err: cause(err)}
+		return res, &PartialWrite{Path: target, Where: where(dst, target), Err: cause(err)}
 	}
 	return res, nil
 }
