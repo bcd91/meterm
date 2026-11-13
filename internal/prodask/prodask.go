@@ -127,6 +127,10 @@ func check(path, value string) error {
 	if err != nil {
 		return err
 	}
+	// Pin which file this is now. On Windows an Lstat result only notes the
+	// path, and SameFile looks the file up by it when first asked: after a
+	// swap, that's the new file, and it would match itself.
+	_ = os.SameFile(fi, fi)
 	if !fi.Mode().IsRegular() {
 		return errors.New("not a regular file")
 	}
