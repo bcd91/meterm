@@ -14,7 +14,7 @@ import (
 // "gnp.exe" read as "exe.png") are dropped, and so are invisible ones (a
 // zero-width space, a soft hyphen, every other format character), which
 // make two names that look alike differ. That includes the zero-width
-// joiner inside an emoji sequence (👨‍👩‍👧): terminals disagree on how wide
+// joiner inside an emoji sequence (👨\u200d👩\u200d👧): terminals disagree on how wide
 // the joined picture is (tmux 3.5a gives a family of four 4 cells, wcwidth
 // 8, a grapheme-aware terminal 2), so a row with one ran past its border.
 // Without the joiner each emoji is drawn, and counted, on its own.

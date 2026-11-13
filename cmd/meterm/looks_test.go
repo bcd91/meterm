@@ -33,11 +33,11 @@ func neverAsked(t *testing.T) agentQuery {
 	}
 }
 
-const hostileText = "\x1b]52;c;aGk=\x07 \x1b[2J pwned ‮"
+const hostileText = "\x1b]52;c;aGk=\x07 \x1b[2J pwned \u202e"
 
 func assertNoEscapes(t *testing.T, what, s string) {
 	t.Helper()
-	for _, bad := range []string{"\x1b", "\x07", "‮", "\u009b", `\u001b`, `\u0007`, `‮`, `\u009b`} {
+	for _, bad := range []string{"\x1b", "\x07", "\u202e", "\u009b", `\u001b`, `\u0007`, `\u202e`, `\u009b`} {
 		if strings.Contains(s, bad) {
 			t.Errorf("%s has %q: %q", what, bad, s)
 		}
@@ -335,7 +335,7 @@ func TestAskLogins(t *testing.T) {
 func TestLoginsHostileOutputInBothFormats(t *testing.T) {
 	job := agentJobFor("h\x1b[2J")
 	got := askLogins(context.Background(), job, func(_ context.Context, _ config.Resolved) ([]byte, string, bool, error) {
-		return []byte("a\x1b]0;pwned\x07  pts‮/0  1.2.3.4  Sat Oct 31 20:11:03 2026   still logged in\n" + hostileText + "\n"), "", false, nil
+		return []byte("a\x1b]0;pwned\x07  pts\u202e/0  1.2.3.4  Sat Oct 31 20:11:03 2026   still logged in\n" + hostileText + "\n"), "", false, nil
 	}, nil, time.Second)
 	if got.Unparsed != 1 || len(got.Logins) != 1 {
 		t.Fatalf("%+v", got)
@@ -345,7 +345,7 @@ func TestLoginsHostileOutputInBothFormats(t *testing.T) {
 		if err := writeLogins(&out, logins.Report{Schema: 1, Hosts: []logins.Host{got}}, format); err != nil {
 			t.Fatal(err)
 		}
-		for _, bad := range []string{"\x1b", "\x07", "‮", `\u001b`, `\u0007`, `‮`} {
+		for _, bad := range []string{"\x1b", "\x07", "\u202e", `\u001b`, `\u0007`, `\u202e`} {
 			if strings.Contains(out.String(), bad) {
 				t.Errorf("%s has %q: %q", format, bad, out.String())
 			}
@@ -463,7 +463,7 @@ hosts:
 	}
 	write("history.json", `{"web":{"last":"2026-10-31T01:02:03Z","count":4}}`)
 	write("routes.json", `{"web":"vpn"}`)
-	write("server-os.json", `{"web":{"target":"x","software":"OpenSSH_for_Windows_9 \u001b]0;pwned\u0007‮","checked":"2026-10-01T00:00:00Z"}}`)
+	write("server-os.json", `{"web":{"target":"x","software":"OpenSSH_for_Windows_9 \u001b]0;pwned\u0007\u202e","checked":"2026-10-01T00:00:00Z"}}`)
 	before := snapshot(t, dir)
 	out := captureStdout(t, func() {
 		c := newFactsCmd()

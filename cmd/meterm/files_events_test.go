@@ -78,7 +78,7 @@ func TestFileManagerLogKeepsSpelledNames(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	q := termsafe.Quote("/srv/ev\x1b]0;PWN\x07 il\n name‮txt.exe")
+	q := termsafe.Quote("/srv/ev\x1b]0;PWN\x07 il\n name\u202etxt.exe")
 	on := fileEventLogger(cfg, *h, "")
 	on(fileman.Event{Op: 1, Kind: "delete", Outcome: "started", Detail: q, Remote: true})
 	on(fileman.Event{Op: 1, Kind: "delete", Outcome: "ok", Detail: q, Remote: true})

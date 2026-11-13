@@ -12,7 +12,7 @@ import (
 // A remote name with hidden characters is shown spelled out and quoted, as
 // the picker shows such a host name: in its row, in the delete question, in
 // the status line and in the log. Cleaned up it would pass for another
-// file ("evil name.exe" for one ending ‮txt.exe) and the question would
+// file ("evil name.exe" for one ending \u202etxt.exe) and the question would
 // name a file that isn't the one deleted.
 func TestHiddenNamesAreSpelledNotCleaned(t *testing.T) {
 	left, right := t.TempDir(), t.TempDir()

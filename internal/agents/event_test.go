@@ -36,7 +36,7 @@ func TestClassify(t *testing.T) {
 		{"", "IDLE", "", EventUnknown, ConfidenceLow},
 		{"", "idle ", "", EventUnknown, ConfidenceLow},
 		{"", "\x1b]0;idle\x07", "", EventUnknown, ConfidenceLow},
-		{"", "idle‮", "", EventUnknown, ConfidenceLow},
+		{"", "idle\u202e", "", EventUnknown, ConfidenceLow},
 		{"$(idle)", "", "", EventUnknown, ConfidenceLow},
 	} {
 		event, confidence := Classify(c.state, c.status, c.waiting)
@@ -49,7 +49,7 @@ func TestClassify(t *testing.T) {
 // The enumeration is closed: whatever a host sends, the fields hold only meterm's words.
 func TestNeutralFieldsNeverHoldHostText(t *testing.T) {
 	allowed := map[string]bool{EventWorking: true, EventNeedsInput: true, EventDone: true, EventFailed: true, EventIdle: true, EventUnknown: true}
-	hostile := []string{"\x1b]52;c;aGk=\x07", "idle\n", "<script>", "needs_input;rm -rf /", strings.Repeat("idle", 1000), "working\u0000", "done‮", "Idle"}
+	hostile := []string{"\x1b]52;c;aGk=\x07", "idle\n", "<script>", "needs_input;rm -rf /", strings.Repeat("idle", 1000), "working\u0000", "done\u202e", "Idle"}
 	for _, a := range hostile {
 		for _, b := range hostile {
 			raw, _ := json.Marshal([]map[string]string{{"state": a, "status": b, "event": "idle", "agent_kind": "evil", "source": "evil", "confidence": "high"}})

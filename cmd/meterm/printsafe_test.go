@@ -20,13 +20,13 @@ import (
 // Hostile text as it could arrive from an inventory or a teammate.
 const (
 	evilName = "evil\x1b]0;pwned\x07x"
-	evilText = "t\x1b[5m‮ext\x1b]52;c;aGk=\x07"
+	evilText = "t\x1b[5m\u202eext\x1b]52;c;aGk=\x07"
 )
 
 // raw reports the control characters in s that came from hostile text.
 func raw(t *testing.T, what, s string) {
 	t.Helper()
-	if strings.ContainsAny(s, "\x1b\x07‮") {
+	if strings.ContainsAny(s, "\x1b\x07\u202e") {
 		t.Errorf("%s printed control characters: %q", what, s)
 	}
 }

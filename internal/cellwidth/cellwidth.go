@@ -26,7 +26,7 @@ func Width(s string) int {
 
 // An emoji and what modifies it (a skin tone, VS16) are drawn as one picture:
 // 👍🏽 is two columns, not four. A zero-width joiner joins nothing here:
-// terminals disagree on how wide 👨‍👩‍👧 is, so termsafe.Label drops the
+// terminals disagree on how wide 👨\u200d👩\u200d👧 is, so termsafe.Label drops the
 // joiner and each emoji is drawn, and counted, on its own (a raw joiner
 // counts 0).
 const (

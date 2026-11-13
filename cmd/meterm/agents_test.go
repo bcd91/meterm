@@ -141,7 +141,7 @@ func TestAskAgentsDoesntRunForAnUnsafeHost(t *testing.T) {
 
 // Hostile text from a host or the config gets out of neither format as it went in.
 func TestWriteAgentsHostileText(t *testing.T) {
-	const bad = "x\x1b]52;c;aGk=\x07\x1b[2J\u009b1m‮⁦​\ny"
+	const bad = "x\x1b]52;c;aGk=\x07\x1b[2J\u009b1m\u202e\u2066\u200b\ny"
 	enc, _ := json.Marshal(bad)
 	stdout := `[{"cwd":` + string(enc) + `,"name":` + string(enc) + `,"status":` + string(enc) + `,"waitingFor":` + string(enc) + `,"kind":` + string(enc) + `,"id":` + string(enc) + `}]`
 	job := agentJobFor(bad)
@@ -154,7 +154,7 @@ func TestWriteAgentsHostileText(t *testing.T) {
 			t.Fatal(err)
 		}
 		s := out.String()
-		for _, c := range []string{"\x1b", "\x07", "\u009b", "‮", "⁦", "​", `\u001b`, `\u0007`, `‮`, ` `} {
+		for _, c := range []string{"\x1b", "\x07", "\u009b", "\u202e", "\u2066", "\u200b", `\u001b`, `\u0007`, `\u202e`, "\u2028"} {
 			if strings.Contains(s, c) {
 				t.Errorf("%s: %q in %q", format, c, s)
 			}

@@ -258,8 +258,8 @@ func TestEditKeepsJoinersInNotes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	note := "\U0001F468‍\U0001F4BB oncall می‌خواهم"
-	tun := "\U0001F3F3️‍\U0001F308"
+	note := "\U0001F468\u200d\U0001F4BB oncall می\u200cخواهم"
+	tun := "\U0001F3F3️\u200d\U0001F308"
 	if err := cfg.Update(func(c *config.Config) error {
 		c.Upsert(config.Host{Name: "plain", Address: "192.0.2.80", Notes: note, Forwards: []config.Forward{{Name: "f", Type: "D", LocalPort: 1080, Note: tun}}})
 		return nil

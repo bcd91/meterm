@@ -91,7 +91,7 @@ func TestCleanedNameMustBeUnambiguous(t *testing.T) {
 func TestEditCleansADirtyHost(t *testing.T) {
 	cliSandbox(t)
 	dirtyHosts(t, config.Host{Name: oscName, Address: "192.0.2.73", Group: "g\x1b[5m",
-		Tags: []string{"a‮b"}, Notes: "line one\tcol\nline two"},
+		Tags: []string{"a\u202eb"}, Notes: "line one\tcol\nline two"},
 		config.Host{Name: "inner", Address: "192.0.2.74", ProxyJump: oscName})
 	cfg, _ := config.Load(cfgPath)
 	h, _, err := cfg.Lookup("evilname")

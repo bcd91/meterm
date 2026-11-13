@@ -130,7 +130,7 @@ func TestActivityOutputIsCleanInBothFormats(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("METERM_CONFIG", t.TempDir()+"/hosts.yaml")
 	t.Setenv("METERM_ACTIVITY_DIR", dir)
-	hostile := "a\x1b]52;c;aGk=\x07b‮c\u009b2Jd"
+	hostile := "a\x1b]52;c;aGk=\x07b\u202ec\u009b2Jd"
 	raw, _ := json.Marshal(activity.Event{Device: hostile, Seq: 1, User: hostile, Action: hostile, Host: hostile, Target: hostile, Detail: hostile,
 		ActorType: hostile, AgentKind: hostile, AgentSessionID: hostile, AttributionSource: hostile, Hash: hostile, ExtHash: hostile})
 	if err := os.WriteFile(dir+"/events.jsonl", append(raw, '\n'), 0o600); err != nil {
@@ -144,7 +144,7 @@ func TestActivityOutputIsCleanInBothFormats(t *testing.T) {
 				t.Error(err)
 			}
 		})
-		for _, bad := range []string{"\x1b", "\x07", "‮", "\u009b", `\u001b`, `\u0007`, `‮`, `\u009b`} {
+		for _, bad := range []string{"\x1b", "\x07", "\u202e", "\u009b", `\u001b`, `\u0007`, `\u202e`, `\u009b`} {
 			if strings.Contains(out, bad) {
 				t.Errorf("%s output has %q: %q", format, bad, out)
 			}

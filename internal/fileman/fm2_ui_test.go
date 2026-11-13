@@ -379,12 +379,12 @@ func TestHidingDotfilesDropsThemFromTheSelection(t *testing.T) {
 // found by what's on screen.
 func TestFindMatchesTheShownName(t *testing.T) {
 	left, right := t.TempDir(), t.TempDir()
-	for _, n := range []string{"aaa", "bidi‮txt.exe", "zzz"} {
+	for _, n := range []string{"aaa", "bidi\u202etxt.exe", "zzz"} {
 		write(t, filepath.Join(left, n), "x", 0o644)
 	}
 	h := newHarness(t, left, right)
 	h.keys("/", "biditxt", "enter")
-	if got := h.cursorName(0); got != "bidi‮txt.exe" {
+	if got := h.cursorName(0); got != "bidi\u202etxt.exe" {
 		t.Errorf("cursor on %q", got)
 	}
 }

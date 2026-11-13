@@ -568,8 +568,8 @@ func TestPullKeepsHostsOlderVersionsAccepted(t *testing.T) {
 	teamID, a, b := teamOf(t, s, RoleMember)
 	for _, h := range []SharedHost{
 		{Name: "db-москва", Address: "192.0.2.1"},
-		{Name: "plain", Address: "192.0.2.2", Notes: "\U0001F468‍\U0001F4BB oncall"},
-		{Name: "fa", Address: "192.0.2.3", Notes: "می‌خواهم"},
+		{Name: "plain", Address: "192.0.2.2", Notes: "\U0001F468\u200d\U0001F4BB oncall"},
+		{Name: "fa", Address: "192.0.2.3", Notes: "می\u200cخواهم"},
 		{Name: "pаypal", Address: "192.0.2.4"},
 		{Name: "esc", Address: "192.0.2.5", Notes: "a\x1b]0;PWN\x07"},
 	} {

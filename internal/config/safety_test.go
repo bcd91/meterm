@@ -73,7 +73,7 @@ func TestCheckPrintableNamesTheField(t *testing.T) {
 		"address":       {Name: "x", Address: "192.0.2.1\x1b[2J"},
 		"user":          {Name: "x", User: "r\noot"},
 		"users":         {Name: "x", Users: []string{"a\x1bb"}},
-		"tag":           {Name: "x", Tags: []string{"t‮ag"}},
+		"tag":           {Name: "x", Tags: []string{"t\u202eag"}},
 		"notes":         {Name: "x", Notes: "n\x1b]8;;u\x07"},
 		"identity_file": {Name: "x", IdentityFile: "~/.ssh/k\x1b"},
 		"proxy_jump":    {Name: "x", ProxyJump: "j\x07"},

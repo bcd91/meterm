@@ -60,7 +60,7 @@ func TestAddEditRenameRefuseControlCharacters(t *testing.T) {
 	}{
 		{"name", run(newAddCmd(), "x\x1b]0;own\x07y", "--address", "192.0.2.2")},
 		{"group", run(newAddCmd(), "web2", "--address", "192.0.2.2", "--group", "g\x1b[5m")},
-		{"tag", run(newAddCmd(), "web2", "--address", "192.0.2.2", "--tags", "a,b‮c")},
+		{"tag", run(newAddCmd(), "web2", "--address", "192.0.2.2", "--tags", "a,b\u202ec")},
 		{"notes", run(newEditCmd(), "web1", "--notes", "n\x1b]8;;http://x\x07")},
 		{"group", run(newEditCmd(), "web1", "--group", "g\x1b[5m")},
 		{"address", run(newEditCmd(), "web1", "--address", "192.0.2.9\x1b[2J")},
@@ -107,12 +107,12 @@ func TestImportSkipsHostsWithControlCharacters(t *testing.T) {
 func TestListTextShowsHostTextSafely(t *testing.T) {
 	var b bytes.Buffer
 	rows := []listRow{{Name: "evil\x1b]0;pwned\x07x", Target: "r\x1b[5m@192.0.2.1", Group: "g\x1b[5m",
-		Team: "t‮eam", Tags: []string{"a\tb", "c\x1b[2J"}, Jump: "j\x1b[1;1H", Env: "production", lastHuman: "never"}}
+		Team: "t\u202eeam", Tags: []string{"a\tb", "c\x1b[2J"}, Jump: "j\x1b[1;1H", Env: "production", lastHuman: "never"}}
 	if err := writeListText(&b, rows, false); err != nil {
 		t.Fatal(err)
 	}
 	out := b.String()
-	if strings.ContainsAny(out, "\x1b\x07‮") {
+	if strings.ContainsAny(out, "\x1b\x07\u202e") {
 		t.Errorf("list printed control characters: %q", out)
 	}
 	if !strings.Contains(out, `"evil\x1b]0;pwned\ax"`) || strings.Count(out, "\n") != 2 {

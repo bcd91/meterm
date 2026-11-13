@@ -16,7 +16,7 @@ func evilHost() config.Host {
 		User:      "ro\x1b[5mot",
 		Users:     []string{"adm\x1b]52;c;aGk=\x07in"},
 		Group:     "g\x1b[5m",
-		Tags:      []string{"t‮ag", "w\x1b[31meb"},
+		Tags:      []string{"t\u202eag", "w\x1b[31meb"},
 		ProxyJump: "jump\x1b[1;1H.example",
 		Notes:     "n\x1b]8;;http://x\x07ote",
 		Team:      "git:x",
@@ -27,7 +27,7 @@ func evilHost() config.Host {
 // from the picker's own styling.
 func injected(s string) []string {
 	var found []string
-	for _, bad := range []string{"\x1b]", "\x07", "\x1b[5m", "\x1b[2J", "\x1b[31m", "\x1b[1;1H", "‮"} {
+	for _, bad := range []string{"\x1b]", "\x07", "\x1b[5m", "\x1b[2J", "\x1b[31m", "\x1b[1;1H", "\u202e"} {
 		if strings.Contains(s, bad) {
 			found = append(found, strings.ReplaceAll(bad, "\x1b", "ESC"))
 		}

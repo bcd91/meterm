@@ -86,7 +86,7 @@ func checkJumpBy(spec string, pick func(hop string) func(rune) bool) error {
 func refused(r rune) bool { return unicode.IsControl(r) || termsafe.Drops(r) }
 
 // refusedInNote is refused less the zero-width joiner and non-joiner, which
-// prose needs: emoji sequences hold a joiner (👨‍💻, 🏳️‍🌈) and Persian
+// prose needs: emoji sequences hold a joiner (👨\u200d💻, 🏳️\u200d🌈) and Persian
 // writes with the non-joiner. Display drops both, and a note doesn't tell
 // one host from another, so they can't make two hosts pass for one.
 func refusedInNote(r rune) bool { return r != 0x200c && r != 0x200d && refused(r) }

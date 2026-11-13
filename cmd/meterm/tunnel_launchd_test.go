@@ -182,7 +182,7 @@ func TestLaunchdEnableAndDisable(t *testing.T) {
 func TestLaunchdRefusals(t *testing.T) {
 	f, home := launchdEnv(t)
 	for _, arg := range []string{"box", "box/", "/web", "box/nope", "other/web", "-oProxyCommand=x/web",
-		"box/web\x1b]0;x\x07", "box/we\nb", "bo‮x/web", "../../x/web"} {
+		"box/web\x1b]0;x\x07", "box/we\nb", "bo\u202ex/web", "../../x/web"} {
 		if err := runEnable(arg); err == nil {
 			t.Errorf("%q was accepted", arg)
 		}
@@ -906,12 +906,12 @@ func TestHoldTunnelServiceOutlivesWhatSSHSays(t *testing.T) {
 // Hostile names in a state file don't reach the terminal through `meterm status`.
 func TestWriteStatusTextCleans(t *testing.T) {
 	var b strings.Builder
-	bad := "x\x1b]52;c;aGk=\x07‮\ny"
+	bad := "x\x1b]52;c;aGk=\x07\u202e\ny"
 	rep := statusReport{Schema: status.SchemaVersion, Entries: []status.Row{{Entry: status.Entry{Kind: status.KindTunnel, Host: bad, Name: bad, State: bad, Route: bad, Detail: bad, Since: time.Now()}}}}
 	if err := writeStatus(&b, rep, "text"); err != nil {
 		t.Fatal(err)
 	}
-	if strings.ContainsAny(b.String(), "\x1b\x07‮") || strings.Count(b.String(), "\n") != 2 {
+	if strings.ContainsAny(b.String(), "\x1b\x07\u202e") || strings.Count(b.String(), "\n") != 2 {
 		t.Errorf("%q", b.String())
 	}
 }
