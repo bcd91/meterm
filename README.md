@@ -348,8 +348,10 @@ renames, `m` makes a directory, `r` reloads, `?` shows the rest.
   because it's a read-only filesystem the file is mounted into
   (`docker --read-only -v file:file`, a Kubernetes `subPath` under
   `readOnlyRootFilesystem`), you're asked before it's written in place. Over
-  SFTP a read-only filesystem and a full disk give the same "failure", so there
-  the copy stops instead, the target left as it was.
+  SFTP a read-only filesystem, a full disk and a quota all give the same
+  "failure": the question says the host didn't say why, and that writing in
+  place on a full disk may leave the file partly written (`i` writes in place,
+  `s` skips, any other key stops, the target left as it was).
 - **Read-only files:** a file you may not write is never replaced by renaming
   over it, which would get round its mode: it's written in place, which the
   system refuses, changing nothing, if it's read-only. On a host, uid 0 isn't

@@ -77,7 +77,9 @@ func TestBindMountedFileIsWrittenInPlace(t *testing.T) {
 }
 
 // 2, for real: with no inode free, no temporary file can be made, and the
-// original stays as it was, never truncated.
+// original stays as it was, never truncated. Here that's a stop; a host only
+// says "failure", so the person is asked, and a write in place on a disk
+// that's full too says it may be partly written.
 func TestNoFreeInodeLeavesTheOriginal(t *testing.T) {
 	if !inNamespace(t) {
 		return
@@ -86,19 +88,36 @@ func TestNoFreeInodeLeavesTheOriginal(t *testing.T) {
 		t.Run(side, func(t *testing.T) {
 			src, dst := t.TempDir(), t.TempDir()
 			write(t, filepath.Join(src, "f"), "new", 0o644)
-			if err := syscall.Mount("none", dst, "tmpfs", 0, "nr_inodes=2,size=1m"); err != nil {
+			write(t, filepath.Join(src, "f"), strings.Repeat("n", 64<<10), 0o644)
+			if err := syscall.Mount("none", dst, "tmpfs", 0, "nr_inodes=2,size=8k"); err != nil {
 				t.Fatal(err)
 			}
 			t.Cleanup(func() { syscall.Unmount(dst, syscall.MNT_DETACH) })
 			target := filepath.Join(dst, "f") // the root and this use both inodes
-			write(t, target, "old", 0o644)
-			_, err := overwrite(t, Local{}, mk(t), src, dst, "f", RunOptions{InPlace: map[string]bool{target: true}}, nil)
-			var need *InPlaceNeeded
-			if err == nil || errors.As(err, &need) || !strings.Contains(err.Error(), "left as it was") {
-				t.Errorf("err = %v, want a stop saying the file was left as it was", err)
+			old := strings.Repeat("o", 8000)
+			write(t, target, old, 0o644)
+			dstFS := mk(t)
+			_, err := overwrite(t, Local{}, dstFS, src, dst, "f", RunOptions{}, nil)
+			if got := readFile(t, target); got != old {
+				t.Fatalf("target changed before anyone agreed: %d bytes", len(got))
 			}
-			if got := readFile(t, target); got != "old" {
-				t.Errorf("target = %q, want the original", got)
+			var need *InPlaceNeeded
+			if side == "local" {
+				if err == nil || errors.As(err, &need) || !strings.Contains(err.Error(), "left as it was") {
+					t.Errorf("err = %v, want a stop saying the file was left as it was", err)
+				}
+				return
+			}
+			if !errors.As(err, &need) || !need.Unclear {
+				t.Fatalf("err = %v, want the unclear in-place question", err)
+			}
+			_, err = overwrite(t, Local{}, dstFS, src, dst, "f", RunOptions{InPlace: map[string]bool{need.Target: true}}, nil)
+			var pw *PartialWrite
+			if !errors.As(err, &pw) || !strings.Contains(err.Error(), "may be partly written") {
+				t.Errorf("in place on a full disk: err = %v, want it to say may be partly written", err)
+			}
+			if _, serr := os.Stat(target); serr != nil {
+				t.Errorf("the target was removed: %v", serr)
 			}
 		})
 	}
@@ -108,7 +127,7 @@ func TestNoFreeInodeLeavesTheOriginal(t *testing.T) {
 // (docker --read-only -v file:file, a Kubernetes subPath under
 // readOnlyRootFilesystem). Here, EROFS asks about writing in place, and
 // once agreed the file is written. Over SFTP the server only says
-// "failure", which a full disk says too: that stops.
+// "failure", which a full disk says too: that's asked, saying so.
 func TestReadOnlyFilesystemWithAWritableFile(t *testing.T) {
 	if !inNamespace(t) {
 		return
@@ -131,20 +150,14 @@ func TestReadOnlyFilesystemWithAWritableFile(t *testing.T) {
 			dstFS := mk(t)
 			_, err := overwrite(t, Local{}, dstFS, src, dst, "app.conf", RunOptions{}, nil)
 			var need *InPlaceNeeded
-			if side != "local" {
-				if err == nil || errors.As(err, &need) || !strings.Contains(err.Error(), "left as it was") {
-					t.Errorf("err = %v, want a stop", err)
-				}
-				if side == "openssh-sftp-srv" && !strings.Contains(err.Error(), "doesn't say why") {
-					t.Errorf("err = %v, want it to say the server gave no reason", err)
-				}
-				if got := readFile(t, filepath.Join(outside, "app.conf")); got != "old" {
-					t.Errorf("file = %q", got)
-				}
-				return
-			}
 			if !errors.As(err, &need) {
 				t.Fatalf("err = %v, want the in-place question", err)
+			}
+			if side != "local" && (!need.Unclear || !strings.Contains(err.Error(), "didn't say why")) {
+				t.Errorf("err = %v, want it to say the host gave no reason", err)
+			}
+			if got := readFile(t, filepath.Join(outside, "app.conf")); got != "old" {
+				t.Fatalf("changed before anyone agreed: %q", got)
 			}
 			if _, err := overwrite(t, Local{}, dstFS, src, dst, "app.conf", RunOptions{InPlace: map[string]bool{need.Target: true}}, nil); err != nil {
 				t.Fatal(err)

@@ -14,6 +14,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/pkg/sftp"
 )
 
 // The sides an overwrite is checked against: this machine, pkg/sftp's own
@@ -139,10 +141,19 @@ func TestTempCreateErrorsNeverTruncate(t *testing.T) {
 	if !errors.As(err, &need) {
 		t.Fatalf("EROFS: err = %v, want the in-place question", err)
 	}
-	// Over SFTP a read-only filesystem is only "failure": not a reason.
-	_, err = overwrite(t, Local{}, createFails{newSftpServerRemote(t), errors.New("sftp: \"Failure\" (SSH_FX_FAILURE)")}, src, dst, "f", RunOptions{}, nil)
+	// Over SFTP a read-only filesystem and a full disk are both only
+	// "failure": the person is asked, told that it's unclear.
+	_, err = overwrite(t, Local{}, createFails{newSftpServerRemote(t), &sftp.StatusError{Code: uint32(sftp.ErrSSHFxFailure)}}, src, dst, "f", RunOptions{}, nil)
+	if !errors.As(err, &need) || !need.Unclear || !strings.Contains(err.Error(), "openssh didn't say why it couldn't create a copy beside "+filepath.Join(dst, "f")) {
+		t.Fatalf("SFTP failure: err = %v, want the unclear in-place question", err)
+	}
+	if readFile(t, filepath.Join(dst, "f")) != "old" {
+		t.Errorf("changed before anyone agreed")
+	}
+	// Anything else from a host that isn't "failure" still stops.
+	_, err = overwrite(t, Local{}, createFails{newSftpServerRemote(t), errors.New("sftp: \"Bad message\" (SSH_FX_BAD_MESSAGE)")}, src, dst, "f", RunOptions{}, nil)
 	if errors.As(err, &need) || err == nil {
-		t.Fatalf("SFTP failure: err = %v, want a stop", err)
+		t.Fatalf("SFTP bad message: err = %v, want a stop", err)
 	}
 }
 

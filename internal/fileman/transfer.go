@@ -268,7 +268,8 @@ func (e *ReplaceLoses) Error() string {
 }
 
 // InPlaceNeeded stops a run at a file that is to be replaced, is writable,
-// but sits in a directory where no temporary file can be made. Writing it in
+// but sits in a directory where no temporary file can be made (or on a host
+// that won't say why none could be: see Unclear). Writing it in
 // place is possible but not atomic, so it's the person's call: run the plan
 // again From Index with Target in RunOptions.InPlace.
 type InPlaceNeeded struct {
@@ -281,9 +282,17 @@ type InPlaceNeeded struct {
 	// Known says the file is writable, from its mode and owner; otherwise
 	// it only may be (over SFTP, who we are isn't known).
 	Known bool
+	// Unclear says the host gave no reason ("failure"): a read-only
+	// filesystem, a full disk or a quota. Written in place on a full
+	// disk, the file may be left partly written. Side names the host.
+	Unclear bool
+	Side    string
 }
 
 func (e *InPlaceNeeded) Error() string {
+	if e.Unclear {
+		return fmt.Sprintf("%s didn't say why it couldn't create a copy beside %s (%v): read-only, full disk or quota", e.Side, e.Target, e.Err)
+	}
 	is := "is"
 	if !e.Known {
 		is = "may be"
@@ -580,13 +589,13 @@ func copyFile(now, after context.Context, src, dst FS, f FileOp, replace bool, o
 		if !replace || !haveOld {
 			return res, fmt.Errorf("can't write in %s: %w", where(dst, dir), cause(err))
 		}
-		if !inPlaceWorthAsking(dst, err) {
-			why := ""
-			var se *sftp.StatusError
-			if errors.As(err, &se) && se.FxCode() == sftp.ErrSSHFxFailure {
-				why = "; the server doesn't say why: a full disk and a read-only filesystem both say this"
-			}
-			return res, fmt.Errorf("can't make a temporary file in %s (%w); %s was left as it was%s", where(dst, dir), cause(err), where(dst, target), why)
+		// A host that only says "failure" may be read-only (a file mounted
+		// into a read-only filesystem, where writing in place works) or full
+		// (where it would leave a partial file): only the person can say.
+		var se *sftp.StatusError
+		unclear := errors.As(err, &se) && se.FxCode() == sftp.ErrSSHFxFailure
+		if !unclear && !inPlaceWorthAsking(dst, err) {
+			return res, fmt.Errorf("can't make a temporary file in %s (%w); %s was left as it was", where(dst, dir), cause(err), where(dst, target))
 		}
 		id, idOK := identityOf(dst)
 		ok, known := mayWrite(old, id, idOK)
@@ -595,7 +604,8 @@ func copyFile(now, after context.Context, src, dst FS, f FileOp, replace bool, o
 				where(dst, dir), cause(err), where(dst, target), old.Mode.Perm(), old.Uid, old.Gid)
 		}
 		if !o.InPlace[target] {
-			return res, &InPlaceNeeded{File: f, Target: target, Dir: dir, Where: where(dst, dir), Err: cause(err), Known: known}
+			return res, &InPlaceNeeded{File: f, Target: target, Dir: dir, Where: where(dst, dir), Err: cause(err), Known: known,
+				Unclear: unclear, Side: dst.Label()}
 		}
 		return writeInPlace(now, after, in, dst, target, res, onTemp, onBytes)
 	}

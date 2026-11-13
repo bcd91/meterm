@@ -683,6 +683,10 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.confirmAt = m.now()
 			m.confirmText = fmt.Sprintf("%sReplacing %s: %v.  i = write in place (not atomic: a failure leaves a partial file)   s = skip this file   any other key = stop",
 				m.prodWarning(plan.Dst), where(plan.Dst, need.Target), need)
+			if need.Unclear {
+				m.confirmText = fmt.Sprintf("%s%v.  i = write in place (if the disk is full it may be left partly written)   s = skip   any other key = stop",
+					m.prodWarning(plan.Dst), need)
+			}
 			return m, tea.Batch(m.load(0, m.panes[0].dir), m.load(1, m.panes[1].dir))
 		}
 		var loses *ReplaceLoses
@@ -1223,6 +1227,8 @@ func (m Model) updateConfirm(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m.startTransfer(*plan, opts, m.carry)
 		case "s":
 			m.pendingPlan, m.pendingInPlace = nil, nil
+			kind, remote := m.transferKind(*plan)
+			m.emit(Event{Op: m.copyOp, Kind: kind, Outcome: "asked", Detail: fmt.Sprintf("%s: chose to skip %s, left as it was; %s", m.transferSummary(*plan), where(plan.Dst, need.Target), need.Error()), Remote: remote})
 			carry := m.carry
 			carry.Skipped++
 			opts.From = need.Index + 1
@@ -2120,14 +2126,14 @@ var fullHelp = []string{
 	"overwrite say PRODUCTION. ⚑staging marks a staging host.",
 	"",
 	"Where no temporary file can be written next to a file being replaced",
-	"(its directory is read-only, or on this machine a read-only filesystem",
-	"the file is mounted into), you're asked before it's written in place,",
-	"which isn't atomic: a failure part way leaves a partial file. No room",
-	"for one (a full disk, no inodes, a quota) stops the copy, the file left",
-	"as it was. A file that can't be renamed over (bind-mounted, as in a",
-	"container) is written in place, and the copy says so. A file you may",
-	"not write is never replaced: it's written in place, which fails, and",
-	"changes nothing, if it's read-only.",
+	"(its directory is read-only, a read-only filesystem the file is",
+	"mounted into, or a host that won't say why), you're asked before it's",
+	"written in place, which isn't atomic: a failure part way leaves a",
+	"partial file. Here, no room for one (a full disk, no inodes, a quota)",
+	"stops the copy, the file left as it was. A file that can't be renamed",
+	"over (bind-mounted, as in a container) is written in place, and the",
+	"copy says so. A file you may not write is never replaced: it's written",
+	"in place, which fails, and changes nothing, if it's read-only.",
 	"",
 	"A replacement keeps the old file's permissions (setuid and setgid set",
 	"only on the finished copy), and its owner and group",

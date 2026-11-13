@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/pkg/sftp"
 )
 
 // checkOps says whether every operation logged has one start first and
@@ -78,8 +79,8 @@ func TestEveryOperationStartsAndEnds(t *testing.T) {
 			asked++
 		}
 	}
-	if asked != 1 {
-		t.Errorf("%d answers logged, want the one yes", asked)
+	if asked != 2 {
+		t.Errorf("%d answers logged, want the yes and the skip", asked)
 	}
 
 	right := t.TempDir()
@@ -186,5 +187,65 @@ func TestAFailedCopySaysWhatItLeftFirst(t *testing.T) {
 	}
 	for _, n := range partFiles(t, right) {
 		os.Remove(filepath.Join(right, n))
+	}
+}
+
+// A host that only says "failure" when no copy can be made beside a file
+// is asked about, not stopped at: it may be read-only (writing in place
+// works) or full (writing in place may leave the file partly written).
+// The answer waits for the question to settle, is logged before a byte is
+// written, and anything but i or s stops.
+func TestAHostThatDoesntSayWhyIsAsked(t *testing.T) {
+	left, right := t.TempDir(), t.TempDir()
+	write(t, filepath.Join(left, "app.conf"), "new", 0o644)
+	target := filepath.Join(right, "app.conf")
+	write(t, target, "old", 0o644)
+	var raw []Event
+	failure := &sftp.StatusError{Code: uint32(sftp.ErrSSHFxFailure)}
+	h := newHarnessWith(t, left, right, func(o *Options) {
+		o.Right = createFails{hostFS{}, failure}
+		o.Env = "production"
+		o.OnEvent = func(e Event) { raw = append(raw, e) }
+	})
+	h.keys("c", "o")
+	m := h.model()
+	if m.mode != modeConfirm || m.confirmKind != confirmInPlace {
+		t.Fatalf("mode %v, status %q: want the question", m.mode, m.status)
+	}
+	want := "⚠ PRODUCTION web1: web1 didn't say why it couldn't create a copy beside " + target +
+		" (sftp: \"\" (SSH_FX_FAILURE)): read-only, full disk or quota.  i = write in place (if the disk is full it may be left partly written)   s = skip   any other key = stop"
+	if m.confirmText != want {
+		t.Errorf("question\n  %q\nwant\n  %q", m.confirmText, want)
+	}
+	h.send(key("i")) // too soon to count
+	if h.model().mode != modeConfirm || readFile(t, target) != "old" {
+		t.Fatal("an i typed before the question could be read was taken")
+	}
+	h.keys("i")
+	if got := readFile(t, target); got != "new" {
+		t.Fatalf("after i: %q (status %q)", got, h.model().status)
+	}
+	var asked, ended int
+	for k, e := range raw {
+		switch {
+		case e.Outcome == "asked":
+			asked = k
+		case e.Ends():
+			ended = k
+		}
+	}
+	if asked == 0 || asked > ended || !strings.Contains(raw[asked].Detail, "agreed to write in place") || !strings.Contains(raw[asked].Detail, "didn't say why") {
+		t.Errorf("the yes wasn't logged before the write: %+v", raw)
+	}
+
+	write(t, target, "old", 0o644)
+	raw = nil
+	h.keys("esc", "c", "o", "s")
+	if readFile(t, target) != "old" || !strings.Contains(raw[1].Detail, "chose to skip") {
+		t.Errorf("s: target %q, log %+v", readFile(t, target), raw)
+	}
+	h.keys("esc", "c", "o", "x")
+	if readFile(t, target) != "old" || !strings.HasPrefix(h.model().status, "stopped") {
+		t.Errorf("any other key: target %q, status %q", readFile(t, target), h.model().status)
 	}
 }

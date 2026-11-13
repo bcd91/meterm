@@ -165,7 +165,9 @@ v0.23.1 an overwrite truncated the target and wrote into it.
   place (keeps them, not atomic), replace anyway, or skip. Where no
   temporary file can be made (a read-only directory, or on this machine a
   read-only filesystem with the file bind-mounted into it) it asks before
-  writing in place. A write in place that fails or is cancelled says the
+  writing in place. A host that only says "failure" (read-only, full disk
+  and quota look the same over SFTP) is asked about too, the question
+  saying that on a full disk the file may be left partly written. A write in place that fails or is cancelled says the
   file may be partly written.
 - **A stop says what it left.** A cancel or failure names the file it was
   writing as unchanged, not created, or partly written; a temporary file
