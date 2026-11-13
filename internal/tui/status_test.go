@@ -45,8 +45,9 @@ func TestRefreshForgetsOldResults(t *testing.T) {
 	}
 }
 
-// The keys that changed meaning come first on the ? screen: d used to turn
-// the page and now deletes, f now opens files, and h l b u turn nothing.
+// The keys that changed meaning come first on the ? screen: h l b u and the
+// arrows no longer turn the page (in v0.23 they did), and ctrl+u ctrl+d
+// are half a page.
 func TestHelpPutsThePagingKeysFirst(t *testing.T) {
 	var keys []string
 	for _, l := range keysChanged[1:] {
@@ -54,7 +55,7 @@ func TestHelpPutsThePagingKeysFirst(t *testing.T) {
 			keys = append(keys, strings.TrimSpace(k))
 		}
 	}
-	if len(keys) < 4 || keys[0] != "d" || keys[1] != "f" || !strings.Contains(keys[2], "h l b u") || !strings.Contains(keys[3], "pgup") {
+	if len(keys) < 2 || !strings.Contains(keys[0], "h l b u") || keys[1] != "ctrl+u ctrl+d" {
 		t.Errorf("first changed keys: %q", keys)
 	}
 	for _, k := range []string{"h", "l", "b", "u", "left", "right"} {

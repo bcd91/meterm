@@ -1,126 +1,144 @@
 # Changelog
 
-TODO: this needs rewriting against v0.23.1 before a release. It was written for the
-branch that diverged before v0.21; v0.21-v0.23.1 were merged in since, so some entries may be
-released, or differ in what the merge kept.
-
 What changed between releases that you'd notice in use. Newest first.
 
 ## Unreleased (after v0.23.1)
 
-### Keys that changed
+### Keys that moved
 
-The picker (`meterm`) and the file manager (`meterm files`) now share one
-key map, so some keys moved. `?` in the picker lists these first.
+The picker (`meterm`) and the file manager (`meterm files`) share one key
+map now, so some keys moved. `?` in the picker lists the picker's first.
 
-| Where | Was | Now |
+| Where | In v0.23.1 | Now |
 |---|---|---|
+| picker | `h` `l` `b` `u` `←` `→` turned the page | they don't; `pgup` `pgdn` a page, `ctrl+u` `ctrl+d` half a page |
 | picker | `m` connect in tmux | `M` |
-| picker | `R` route check | `C` (`R` is now rename) |
-| picker | `esc` quit | `esc` clears the filter, then the marks; it never quits (`q` and `ctrl+c` do) |
-| picker | `enter` or `y` at a production or delete question | only `y`, and not in the question's first 150ms; `enter` cancels |
-| picker | `h` `l` `b` `f` `u` `d` turned the page | `pgup` `pgdn` a page, `ctrl+u` `ctrl+d` half a page (`f` is files, `d` delete) |
+| picker | `R` route check | `C`; `R` renames the host |
+| picker | `esc` dropped the marks, then quit | `esc` clears the filter, then the marks, and never quits (`q`, `ctrl+c` do) |
+| picker | `y` at the delete question deleted at once | `y` counts once the question has been up 150ms |
 | file manager | `R` reload, `r` rename | `r` reload, `R` rename |
 | file manager | `a` select all | `*` |
-| file manager | `pgup` `pgdn` half a page | a page (`ctrl+u` `ctrl+d` are half a page) |
+| file manager | `pgup` `pgdn` half a page | a page; `ctrl+u` `ctrl+d` half a page |
 
 ### Picker
 
-- One line per host, in columns that fit the terminal; the selected host's
-  details on the line under the table.
-- Health checks go the way `connect` would: over a host's routes in the order
-  connect tries them (the one that worked last first), dialling each route's
-  first hop — the host, or for a host behind a jump host, the jump host — and
-  wanting an SSH greeting. Past the first hop nothing is checked. The line
-  under the table says how and when ("up via vpn, 2m ago", "via bastion:
-  down: connection refused, 30s ago"). A host whose jump host is down is
-  down, not "not checked"; `◌` is only a host meterm won't connect to. Hosts
-  are checked again every 5 minutes and when you come back to the picker;
-  older marks are dim. `route check`'s "← used" picks the same way.
-- A port that takes the connection but sends no SSH greeting within 2s (a
-  multiplexer such as sslh, a slow banner) shows `?` and "unsure: port open,
-  no SSH greeting in 2s", not `✕` "down: no answer".
-- A session whose last command exited non-zero says "session on X ended,
-  exit 1", not "failed". ssh's own 255 says the connection was lost or never
-  made.
-- Deleting a host is in the activity log, as `meterm rm` now is too.
-- `dev` and `test` hosts have a badge; an env meterm doesn't know
-  ("prodution") is treated as production and flagged as unrecognised, here
-  and in `meterm list`.
-- A host whose name holds control characters can be renamed, edited and
-  removed by the name as shown; `edit` cleans its values. `x` and `R` put
-  such a name in the palette Go-quoted (`exec "zw\u200bsp" -- `), so they act
-  on the selected host and never on another that shows the same.
-- Deleting a jump host, here or with `meterm rm`, lists the hosts that go
-  through it, whose jump would then be looked up by ssh itself.
-- `tunnel enable` asks before a production host, as `t` does.
-- A `y` to the picker's production question is passed to the command it
-  starts as a one-use token (a random value in a 0600 file in the picker's
-  private temp dir), which the command checks and deletes; its log says
-  "production, picker asked". Before, `METERM_FROM_TUI=1` alone made `exec`,
-  `cp --sync --delete` and `tunnel enable` skip their question and log
-  "production, asked", from any script that set it. Now that variable skips
-  nothing. Any process running as you can still forge the token: it stops
-  accidents, not someone who means it.
-- The detail line says when a host's name has hidden characters, and spells
-  it out (`name has hidden characters: "web1\u200b"`).
-- While a filter is typed, the footer shows the filter's keys; the detail
-  line says "last connected 5m ago".
-- `?` lists first the paging keys that changed meaning (`d` deletes, `f`
-  opens files).
+- A table, one line per host, in columns that fit the terminal (name, env,
+  address, group, tags, last connected), dropping the least useful columns
+  first on a narrow one; the selected host's details on the line under it.
+  `s` cycles the order: recent, name, group, env. Under 40×10 it says the
+  terminal is too small, and a question open at that moment is cancelled.
+- Health checks go the way `connect` would, where v0.23.1 dialled the
+  saved address and port and didn't check a host behind a jump host at
+  all: each of a host's routes in the order connect tries them (the one
+  that worked last first), dialling the first hop and wanting an SSH
+  greeting. `●` up; `◐` the jump host answered, the host behind it isn't
+  checked; `✕` down; `?` checking, or the port took the connection but no
+  SSH greeting came within 2s (sslh, a slow server); `◌` not checked (a
+  host meterm won't connect to as it stands). The line under the table
+  says which way and when ("up via vpn, 2m ago", "via bastion: down:
+  connection refused, 30s ago"). Hosts are checked again every 5 minutes
+  and when you come back to the picker; older marks are dim. `route check`
+  marks the route connect would use the same way.
+- When a command started from the picker ends, the footer says how: a
+  session whose last command exited non-zero ("session on X ended, exit 1"),
+  ssh's own 255 ("connection lost, or never made"), a failure.
+- An ENV column: `⚑prod`, `⚑staging`, `dev`, `test`, and "env not set"
+  under the table. An env meterm doesn't know ("prodution") counts as
+  production, shows `⚑prod?`, and is flagged as unrecognised, here and in
+  `meterm list`.
+- A name with hidden characters (`zw\u200bsp`) is spelled out and quoted in
+  its row, so it can't pass for the plain one, and the line under the table
+  says so. A name that mixes Latin, Cyrillic or Greek letters is flagged
+  there too. `x`, `R` and `L` put such a name in the palette as a reference,
+  `‹zw\u200bsp›`, that stands for exactly that host. Quotes you type in the
+  palette are taken as typed, as in v0.23.1.
+- A host whose group no longer exists says so under the table.
+- Deleting a jump host lists the hosts that go through it.
+- `?` lists the keys that moved first, every key, the marks, and the last
+  message in full.
 
-### Commands
+### Safety prompts
 
-- `meterm activity` gives the detail the rest of the line, never cuts it when
-  piped, and wraps it with `--full`. On a terminal HOST is capped (24
-  columns, 16 under 120) and a long detail loses its middle: it keeps the
-  outcome up to the first `:` or `;` (`exit 1 after 0.2s;`, `failed:`), then
-  the start and end of the rest. A cut production note is written short
-  (`⚑asked`, `⚑picker`, `⚑--yes`, `⚑no prompt`). A detail left fewer than
-  24 cells goes on its own line under its row. TARGET (user@address) is
-  shown from 140 columns and with `--full`. `--host` takes the name as
-  shown.
-- `exec`, `cp`, `connect`, `dev` and `sftp` log a line when they start and
-  one with how they ended (exit code, how long); `edit` logs what it changed
-  (env production→dev, address, …), `rename` old→new, `rm` the removal.
-  `tunnel enable` and `tunnel disable` are logged with how they ended, and
-  enable with its production note.
-- `exec --all`/`--tag`/`--group`, `cp --sync … --delete` and `tunnel
-  enable` ask before production hosts (y only; `enter` cancels). `--yes`
-  skips the question and warns. With stdin not a terminal they don't wait:
-  they warn on stderr and go on. The log says which: "production, asked",
-  "production, picker asked", "production, --yes", "production, no prompt:
-  not a terminal". `exec` asks only about production hosts that `--all`,
-  `--tag` or `--group` swept in, not ones named.
+v0.23.1 asked about nothing but deleting a host in the picker.
+
+- The picker asks before anything that runs on a production host, or on a
+  host reached through one (a production jump host): connect, a login,
+  exec, a tunnel, logs, files, audit and the rest. A tunnel whose name or
+  note says it leads to production asks too. Only `y` goes ahead, and only
+  once the question has been up 150ms; `enter` cancels, like any other key.
+  The question shows the command it would run.
+- On the command line, `exec --all`/`--tag`/`--group` asks about the
+  production hosts it swept in (hosts named outright aren't asked about
+  again), and so do `cp --sync … --delete` and `tunnel enable` on
+  production. Only `y` goes ahead; `--yes` goes ahead without asking and
+  warns. With stdin not a terminal they warn on stderr and go on. `tunnel
+  enable` on a host that isn't production, for a tunnel that leads there,
+  says the tunnel leads to production.
+- The picker's `y` reaches the command it starts as a one-use token: a
+  random value in a 0600 file in the picker's private temp directory, which
+  the command checks and deletes before anything else runs. An environment
+  variable alone (`METERM_FROM_TUI`) never skips a question. Any process
+  running as you can still forge the token: it stops accidents, not someone
+  who means it.
+- `meterm group rm` asks when removing the group changes hosts' env (a
+  group that made them production, say), listing the hosts and the change;
+  `--yes` skips the question, and without a terminal it refuses. Before, it
+  took production away silently.
+
+### Evidence and activity
+
+- Every start on a production host says how it went ahead, first in its
+  detail: `(production, asked)`, `(production, picker asked)`,
+  `(production, --yes)`, `(production, no prompt: not a terminal)`,
+  `(production, named on the command line)` or `(production, picker didn't
+  ask)`; `(via production, …)` for a host behind a production jump host and
+  `(tunnel to production, …)` for a tunnel that leads there.
+- New in the log: `dev` sessions and `tunnel enable`/`disable` with how
+  they ended; `edit` with what it changed (env production→dev, address…),
+  `rename` old→new, `rm` and the picker's delete; a group's env change on
+  each host it reaches.
+- `exec` with one argument logs `df (shell line)` instead of counting the
+  line's words as arguments.
+- Redaction also masks openssl's `-k` password and `-K` key, `vault login`
+  tokens, and HashiCorp Vault tokens by their shape (`hvs.…`).
+- `meterm activity` on a terminal gives the detail the rest of the line:
+  HOST is capped, a long detail loses its middle (keeping how it ended, and
+  never half a `[REDACTED]`), production notes are shortened (`⚑picker`,
+  `⚑named`, `⚑via picker`), and TARGET shows from 140 columns. `--full`
+  wraps each detail whole; piped output is never cut. `--host` takes the
+  name as shown.
+
+### Export
+
+- `meterm export` (ssh_config and `--format ansible`) also leaves out a host
+  whose name holds a character that draws as nothing (Hangul fillers, the
+  combining grapheme joiner and the like), as it already did for control
+  and format characters.
+- `meterm import` skips, and names, a host whose fields hold control or
+  invisible characters.
+
+### CLI
+
+- A host can be named as it's shown when its saved name has hidden
+  characters; a name two hosts show as is an error naming both.
+- `add`, `edit`, `rename` and `import`, like hosts from a team, refuse
+  control and invisible characters (zero-width, bidi, soft hyphen, BOM) in
+  names, notes and tags. `add`, `edit`, `rename`, `group add`, `tunnel add`
+  and team hosts refuse a name that mixes Latin, Cyrillic or Greek letters
+  (`pаy1` with a Cyrillic `а`); one already saved still works.
 - `add` and `edit` refuse an address, user or jump that ssh would read as an
-  option or split (`--address=-oProxyCommand=…`, `--user=-o…`), and an
-  identity file starting with `-`, naming the flag. Before, they were saved
-  and only `connect` refused them.
-- The activity log masks openssl's `-k` password and `-K` key.
-- A name two hosts show as (`zwsp` and `zw\u200bsp`) is an error naming both,
-  even when one is called exactly that. Names, notes and tags from this
-  machine or a team can no longer hold invisible characters (zero-width,
-  format, bidi, soft hyphen, BOM).
-- Emoji joined with a zero-width joiner (👨‍👩‍👧) are shown one by one:
-  terminals disagree on how wide the joined picture is, and rows overflowed.
-- `meterm export` leaves out, and names, any host whose name, address, user,
-  identity file or jump ssh_config would split or read as a pattern. This
-  fixes an injection: names were written into the ssh_config as they were,
-  in v0.20.0 and before, so a host whose name held a line break (typed into
-  `hosts.yaml` by hand, say; team copies were already refused) could add a
-  ProxyCommand line.
-  `--format ansible` leaves out the same hosts: it wrote hidden and control
-  characters as they were, and a jump with spaces into
-  `ansible_ssh_common_args`.
-- `meterm list` spells out a name or jump with a hidden character
-  (`"web1\u200b"`), so it can't read as another host's row.
-- `exec` labels a host with a hidden character in its name by its exact
-  name.
-- `meterm list` lines up Thai and emoji names; its JSON (and every other
-  command's) spells C1 controls, bidi controls and invisible characters as
-  `\u` escapes. `group list` shows group names and an unknown env safely.
-- Commands start at once on a terminal that doesn't answer a colour query
-  (they waited 5 seconds).
+  option or split (`--address=-oProxyCommand=…`), and an identity file
+  starting with `-`, naming the flag. Before, only `connect` refused them.
+- `meterm list` spells out a name or jump with a hidden character, lines up
+  Thai and emoji names, and shows `pay (no such group)` (`group_missing` in
+  JSON) for a host whose group was removed. JSON output spells C1 and bidi
+  controls and invisible characters as `\u` escapes.
+- Commands start at once on a terminal that doesn't answer a colour query;
+  they waited 5 seconds.
+- Team commands run quickly one after another no longer collide with the
+  background sync on the team's clone ("cannot lock ref", "index.lock: File
+  exists"): git work on a clone is one at a time, and a command that can't
+  get it within 10s says "team sync busy … retry".
 
 ### File manager
 

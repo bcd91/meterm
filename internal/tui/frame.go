@@ -188,16 +188,13 @@ func (m model) footerLines() []string {
 // version: the build's own version says nothing about when keys moved.
 var keysChanged = []string{
 	"Keys changed in v0.24 (from v0.23)",
-	"  d\tdeletes a host (asks first); it used to turn the page",
-	"  f\topens files; it used to turn the page",
-	"  h l b u ← →\tno longer turn the page",
-	"  pgup pgdn\ta page (were h l b f u d)",
-	"  ctrl+u ctrl+d\thalf a page",
+	"  h l b u ← →\tno longer turn the page: pgup pgdn do",
+	"  ctrl+u ctrl+d\thalf a page (new)",
 	"  M\tconnect in tmux (was m)",
 	"  C\troute check (was R)",
 	"  R\trename (new)",
 	"  esc\tclears the filter, then the marks; it no longer quits (q does)",
-	"  enter\tno longer answers a production or delete question: y does",
+	"  y\tanswers a production or delete question only once it has been up 150ms",
 	"",
 }
 

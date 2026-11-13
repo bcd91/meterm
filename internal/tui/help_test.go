@@ -44,7 +44,7 @@ func TestHelpWrapsOnANarrowTerminal(t *testing.T) {
 func TestHelpSaysWhichKeysChanged(t *testing.T) {
 	m := testModel(t, 100, 30)
 	top := strings.Join(press(m, "?").helpLines()[:12], " ")
-	for _, want := range []string{"deletes a host", "opens files", "pgup", "M", "C", "R", "esc"} {
+	for _, want := range []string{"v0.24", "pgup", "M", "C", "R", "esc", "150ms"} {
 		if !strings.Contains(top, want) {
 			t.Errorf("the top of ? doesn't mention %q:\n%s", want, top)
 		}

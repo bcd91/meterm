@@ -19,7 +19,7 @@ shape is the one below.
 ```json
 [{"device":"7f3a9c01d2e4b568","seq":12,"time":"2026-10-31T16:30:01.123456Z",
   "user":"alice@laptop","action":"exec","host":"web1","target":"deploy@10.0.0.5",
-  "detail":"df (+1 args)","prev_hash":"…","hash":"…",
+  "detail":"df (shell line)","prev_hash":"…","hash":"…",
   "actor_type":"agent","agent_kind":"claude-code","agent_session_id":"sess-…",
   "attribution_source":"declared","prev_ext":"…","ext_hash":"…"},
  {"device":"7f3a9c01d2e4b568","seq":13,"time":"2026-10-31T16:30:02.5Z",
@@ -35,9 +35,9 @@ shape is the one below.
 | `device`, `seq` | string, number | Together, unique everywhere. `seq` goes up by one in a device's log. |
 | `time` | RFC 3339, UTC | When it was logged. |
 | `user` | string | The local account and machine. |
-| `action` | string | `connect`, `exec`, `cp`, `sync`, `sftp`, `logs`, `tunnel`, `tunnel-enable`, `tunnel-disable`, `edit`, `rename`, `rm`, `outcome`, `log-repair` and others. Show one you don't know. |
+| `action` | string | `connect`, `exec`, `cp`, `sync`, `sftp`, `logs`, `tunnel`, `tunnel-enable`, `tunnel-disable`, `edit`, `rename`, `rm`, `group`, `outcome`, `log-repair` and others. Show one you don't know. |
 | `host`, `target` | string | The saved name, and the `user@address` it resolved to. |
-| `detail` | string, optional | The program and argument count, or paths. No command text unless `--log-args` was used, and that's redacted. On production, how it went ahead comes first: `(production, asked)`, `(production, picker asked)`, `(production, --yes)` or `(production, no prompt: not a terminal)`. Cut at 4096 characters. |
+| `detail` | string, optional | The program and argument count, or paths. No command text unless `--log-args` was used, and that's redacted. On production, how it went ahead comes first: `(production, asked)`, `(production, picker asked)`, `(production, --yes)`, `(production, no prompt: not a terminal)`, `(production, named on the command line)` or `(production, picker didn't ask)`; `(via production, …)` for a host reached through a production jump host, `(tunnel to production, …)` for a tunnel whose note says it leads there. Older lines may carry only the first four. Cut at 4096 characters. |
 | `prev_hash`, `hash` | string | The chain every version checks. |
 | `ref_seq` | number, optional | On an `outcome`: the `seq` it reports on. |
 | `exit_code` | number, optional | On an `outcome`. 255 can be ssh's own failure. **Missing isn't 0**: it timed out, was killed, or failed in a way with no code. |

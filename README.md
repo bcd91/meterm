@@ -101,7 +101,7 @@ name, group, env.
 
 The picker and the file manager (`meterm files`) share one key map: where
 both screens have the idea, the key is the same. Some keys moved for that
-since v0.20.0; [CHANGELOG.md](CHANGELOG.md) lists them.
+after v0.23; [CHANGELOG.md](CHANGELOG.md) lists them.
 
 | Key | Picker (`meterm`) | File manager (`meterm files`) |
 |---|---|---|
