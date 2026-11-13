@@ -19,7 +19,7 @@ func TestHealthCmdsCheckTheJumpHost(t *testing.T) {
 		Hosts: []config.Host{
 			{Name: "bastion", Address: "203.0.113.9"},
 			{Name: "inner", Address: "192.168.1.101", ProxyJump: "bastion"},
-			{Name: "raw-jump", Address: "192.168.1.102", ProxyJump: "user@somewhere.example"},
+			{Name: "raw-jump", Address: "192.0.2.102", ProxyJump: "user@somewhere.example"},
 		},
 	}
 	cmds := m.healthCmds()
