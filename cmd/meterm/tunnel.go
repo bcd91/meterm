@@ -511,11 +511,13 @@ func runTunnelUp(args []string, keep, service bool) error {
 	}
 	for _, s := range sets {
 		var names []string
+		leads := false
 		for _, f := range s.forward {
 			names = append(names, f.Name)
 			fmt.Printf("%s/%s: %s\n", lbl(s.host.Name), lbl(f.Name), lbl(describeTunnel(f)))
+			leads = leads || f.MentionsProduction()
 		}
-		recordActivity(cfg, s.host, "tunnel", strings.Join(names, ","))
+		recordActivity(cfg, s.host, "tunnel", noteDetail(namedNote(cfg, s.host, leads), strings.Join(names, ",")))
 	}
 	kickAutosync(false, true)
 	for _, set := range sets {

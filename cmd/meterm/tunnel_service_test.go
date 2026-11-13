@@ -291,3 +291,44 @@ func TestTunnelDisableLogsAHostThatsGone(t *testing.T) {
 		t.Errorf("events: %q", ev)
 	}
 }
+
+// A tunnel whose note says it leads to production, from a host that isn't
+// one, is asked about as that: the question doesn't call the host
+// production, and the log says the tunnel leads there.
+func TestTunnelEnableSaysTheTunnelLeadsToProduction(t *testing.T) {
+	calls, _ := serviceEnv(t)
+	host := "version: 1\nhosts:\n- name: dev1\n  address: 192.0.2.3\n  forwards:\n" +
+		"  - {name: db, type: L, local_port: 5432, remote_host: db.example.com, remote_port: 5432, note: prod db}\n"
+	if err := os.WriteFile(os.Getenv("METERM_CONFIG"), []byte(host), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	asTerminal(t, true)
+	var o, e string
+	withStdin(t, "n\n", func() {
+		o = stdout(t, func() {
+			e = stderrOf(t, func() {
+				c := newTunnelEnableCmd()
+				c.SetArgs([]string{"dev1/db"})
+				_ = c.Execute()
+			})
+		})
+	})
+	if !strings.Contains(o, "the tunnel leads there") || strings.Contains(o+e, "PRODUCTION host") || len(*calls) != 0 {
+		t.Errorf("asked: %q %q, systemctl %q", o, e, *calls)
+	}
+	withStdin(t, "", func() {
+		o = stdout(t, func() {
+			e = stderrOf(t, func() {
+				c := newTunnelEnableCmd()
+				c.SetArgs([]string{"dev1/db", "--yes"})
+				_ = c.Execute()
+			})
+		})
+	})
+	if !strings.Contains(e, "the tunnel leads there") || strings.Contains(e, "PRODUCTION host") {
+		t.Errorf("--yes: %q", e)
+	}
+	if ev := events(t); !has(ev, "tunnel-enable dev1: (tunnel to production, --yes) db") {
+		t.Errorf("events: %q", ev)
+	}
+}

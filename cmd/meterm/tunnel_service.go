@@ -94,16 +94,13 @@ func newTunnelEnableCmd() *cobra.Command {
 				return err
 			}
 			f := sets[0].forward[0]
-			note := ""
-			if cfg.IsProduction(sets[0].host) || f.MentionsProduction() {
-				what := "tunnel enable " + lbl(spec) + " (open from every login on"
-				if f.Note != "" {
-					what += "; " + lbl(f.Note)
-				}
-				var ok bool
-				if note, ok = productionGate([]config.Host{sets[0].host}, what+")", yes); !ok {
-					return nil
-				}
+			what := "tunnel enable " + lbl(spec) + " (open from every login on"
+			if f.Note != "" {
+				what += "; " + lbl(f.Note)
+			}
+			note, ok := tunnelGate(cfg, sets[0].host, f, what+")", yes)
+			if !ok {
+				return nil
 			}
 
 			exe, err := svc.binary()

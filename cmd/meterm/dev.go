@@ -172,16 +172,18 @@ func dev(target string, command []string, session string, tunnels []string, reco
 	if len(command) > 0 {
 		detail += ": " + commandDetail(command, logArgs)
 	}
-	run := beginActivity(cfg, *h, "connect", detail)
+	run := beginActivity(cfg, *h, "connect", noteDetail(namedNote(cfg, *h, false), detail))
 	for _, s := range sets {
 		var names []string
+		leads := false
 		for _, f := range s.forward {
 			names = append(names, f.Name)
 			if cfg.IsProduction(s.host) || f.MentionsProduction() {
 				fmt.Fprintf(os.Stderr, "⚠ %s/%s reaches PRODUCTION: %s\n", lbl(s.host.Name), lbl(f.Name), lbl(f.Note))
 			}
+			leads = leads || f.MentionsProduction()
 		}
-		recordActivity(cfg, s.host, "tunnel", strings.Join(names, ","))
+		recordActivity(cfg, s.host, "tunnel", noteDetail(namedNote(cfg, s.host, leads), strings.Join(names, ",")))
 	}
 	kickAutosync(false, true)
 

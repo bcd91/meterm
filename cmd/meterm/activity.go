@@ -592,7 +592,9 @@ func printActivity(out io.Writer, rows []activityRow, width int, full bool) {
 
 // prodNoteRE is the production note a start's detail carries first:
 // "(production, picker asked) ls (+2 args)" (noteDetail).
-var prodNoteRE = regexp.MustCompile(`\s?\(production(?:, ([^)]*))?\)`)
+// A host reached through production says "(via production, …)", a tunnel
+// whose note says it leads there "(tunnel to production, …)".
+var prodNoteRE = regexp.MustCompile(`\s?\((via |tunnel to )?production(?:, ([^)]*))?\)`)
 
 // shortProdNote writes a detail's production note as ⚑ and a word or two,
 // for a detail about to be cut: "(production, no prompt: not a terminal)"
@@ -600,14 +602,25 @@ var prodNoteRE = regexp.MustCompile(`\s?\(production(?:, ([^)]*))?\)`)
 // read like any other.
 func shortProdNote(d string) string {
 	d = prodNoteRE.ReplaceAllStringFunc(d, func(m string) string {
-		how := prodNoteRE.FindStringSubmatch(m)[1]
+		sub := prodNoteRE.FindStringSubmatch(m)
+		how := sub[2]
 		switch how {
 		case "picker asked":
 			how = "picker"
 		case "no prompt: not a terminal":
 			how = "no prompt"
+		case "named on the command line":
+			how = "named"
+		case "picker didn't ask":
+			how = "not asked"
 		}
-		return " ⚑" + how
+		switch sub[1] {
+		case "via ":
+			how = "via " + how
+		case "tunnel to ":
+			how = "tunnel " + how
+		}
+		return " ⚑" + strings.TrimSpace(how)
 	})
 	return strings.TrimPrefix(d, " ")
 }

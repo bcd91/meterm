@@ -51,7 +51,7 @@ func newLogsCmd() *cobra.Command {
 			}
 			windows := isWindowsServer(r)
 			if len(paths) == 0 {
-				run := beginActivity(cfg, *h, "logs", "list")
+				run := beginActivity(cfg, *h, "logs", noteDetail(namedNote(cfg, *h, false), "list"))
 				kickAutosync(false, true)
 				if windows {
 					list := sshrun.WinListLogsCommand(r, "")
@@ -70,7 +70,7 @@ func newLogsCmd() *cobra.Command {
 				fmt.Printf("\nPick one: meterm logs %s %s/<file> [-f]\n", lbl(h.Name), logfiles.DefaultDir)
 				return nil
 			}
-			run := beginActivity(cfg, *h, "logs", strings.Join(paths, " "))
+			run := beginActivity(cfg, *h, "logs", noteDetail(namedNote(cfg, *h, false), strings.Join(paths, " ")))
 			kickAutosync(false, true)
 			if windows {
 				c, err := sshrun.WinLogsCommand(r, paths, lines, follow)

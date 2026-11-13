@@ -83,32 +83,18 @@ func newExecCmd() *cobra.Command {
 				return fmt.Errorf("--format must be text or json")
 			}
 			// Production hosts picked by name were asked for; those --all, --tag
-			// or --group swept in may not have been meant.
-			named, _ := selectHosts(cfg, hostArgs, nil, nil, false)
-			swept := map[string]bool{}
-			for _, h := range productionOf(cfg, hosts) {
-				swept[h.User+"@"+h.Name] = true
-			}
-			for _, h := range named {
-				delete(swept, h.User+"@"+h.Name)
-			}
-			var ask []config.Host
-			for _, h := range hosts {
-				if swept[h.User+"@"+h.Name] {
-					ask = append(ask, h)
+			// or --group swept in may not have been meant, and are asked about.
+			named := map[string]bool{}
+			if picked, err := selectHosts(cfg, hostArgs, nil, nil, false); err == nil {
+				for _, h := range picked {
+					named[loginKey(h)] = true
 				}
 			}
-			note, ok := productionGate(ask, "exec "+commandDetail(command, false), yes)
+			noteFor, ok := productionNotes(cfg, hosts, named, "exec "+commandDetail(command, false), yes)
 			if !ok {
 				return nil
 			}
 			detail := commandDetail(command, logArgs)
-			noteFor := func(h config.Host) string {
-				if cfg.IsProduction(h) {
-					return note
-				}
-				return ""
-			}
 			// A start per host before it runs, so a crash or a kill still leaves
 			// evidence it started, and an outcome as each one ends.
 			runs := make([]*activityRun, len(hosts))

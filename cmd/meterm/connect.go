@@ -89,7 +89,7 @@ func connect(args []string) (int, error) {
 	// mid-session still leaves evidence that it started, and an outcome when it
 	// ends. The second needs meterm to outlive a Ctrl-C or a closed terminal,
 	// which reach ssh as well; a TERM sent to meterm alone is passed on.
-	run := beginActivity(cfg, *h, "connect", connectDetail(extra, logArgs))
+	run := beginActivity(cfg, *h, "connect", noteDetail(namedNote(cfg, *h, false), connectDetail(extra, logArgs)))
 	kickAutosync(false, true)
 	c := sshrun.Command(r, extra...)
 	started, runErr := runOutliving(c)

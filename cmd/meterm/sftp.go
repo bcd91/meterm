@@ -58,7 +58,7 @@ func sftpShell(args []string) (int, error) {
 	if len(args) == 2 {
 		startDir = args[1]
 	}
-	run := beginActivity(cfg, *h, "sftp", startDir)
+	run := beginActivity(cfg, *h, "sftp", noteDetail(namedNote(cfg, *h, false), startDir))
 	kickAutosync(false, true)
 	started, runErr := runOutliving(sshrun.SftpCommand(cfg.Resolve(*h), startDir))
 	if !started {

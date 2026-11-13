@@ -42,7 +42,7 @@ func newLogsListCmd(raw *bool) *cobra.Command {
 				if len(args) == 2 {
 					dir = args[1]
 				}
-				run := beginActivity(cfg, *h, "logs", strings.TrimSpace("list "+dir))
+				run := beginActivity(cfg, *h, "logs", noteDetail(namedNote(cfg, *h, false), strings.TrimSpace("list "+dir)))
 				kickAutosync(false, true)
 				c := sshrun.WinListLogsCommand(r, dir)
 				guardOutput(c, *raw)
@@ -52,7 +52,7 @@ func newLogsListCmd(raw *bool) *cobra.Command {
 			if len(args) == 2 {
 				dir = args[1]
 			}
-			run := beginActivity(cfg, *h, "logs", "list "+dir)
+			run := beginActivity(cfg, *h, "logs", noteDetail(namedNote(cfg, *h, false), "list "+dir))
 			kickAutosync(false, true)
 			err = listLogs(cfg, *h, dir, all, *raw)
 			run.end(err)

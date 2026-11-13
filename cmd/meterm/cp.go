@@ -95,14 +95,19 @@ func runCopy(src, dst string, recursive, sync bool, rsyncFlags []string, yes boo
 	default:
 		return fmt.Errorf("neither argument references a saved host — write the remote side as <name>:<path>")
 	}
-	note := ""
+	// Naming the host is asking for it; a --delete on production is asked
+	// about all the same.
+	named := namedOnly(*host)
+	what := verb
 	if sync && deletes(rsyncFlags) {
 		detail += " (" + strings.Join(deleteFlags(rsyncFlags), " ") + ")"
-		var ok bool
-		if note, ok = productionGate(productionOf(cfg, []config.Host{*host}), "rsync "+strings.Join(deleteFlags(rsyncFlags), " "), yes); !ok {
-			return nil
-		}
+		named, what = nil, "rsync "+strings.Join(deleteFlags(rsyncFlags), " ")
 	}
+	noteFor, ok := productionNotes(cfg, []config.Host{*host}, named, what, yes)
+	if !ok {
+		return nil
+	}
+	note := noteFor(*host)
 	// A start before it runs, so a crash or a kill still leaves evidence it
 	// started, and an outcome with how it ended.
 	run := beginActivity(cfg, *host, verb, noteDetail(note, detail))

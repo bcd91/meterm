@@ -67,6 +67,7 @@ func main() {
 	var debug bool
 	root.PersistentFlags().BoolVar(&debug, "debug", false, "trace the git commands team commands run, on stderr; same as METERM_DEBUG=1")
 	root.PersistentPreRun = func(*cobra.Command, []string) {
+		takePickerAnswer() // before anything else: see pickerAnswer
 		if debug {
 			team.SetDebug(os.Stderr)
 			os.Setenv("METERM_DEBUG", "1") // and in background syncs started from here
