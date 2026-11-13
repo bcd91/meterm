@@ -132,22 +132,26 @@ func TestExecPrefill(t *testing.T) {
 	}
 }
 
-func TestBadges(t *testing.T) {
+func TestFlags(t *testing.T) {
 	it := item{host: config.Host{Name: "GW1",
 		Routes:   []config.Route{{Name: "a"}, {Name: "b"}},
 		Forwards: []config.Forward{{Name: "db", Note: "prod db"}}},
 		attention: "conflict"}
-	b := stripANSI(it.badges())
-	for _, want := range []string{"⇄2", "⇶1", "✗"} {
+	b := flagsText(it.flags())
+	for _, want := range []string{"⇄2", "⇶1", "‼"} {
 		if !strings.Contains(b, want) {
-			t.Errorf("badges %q missing %q", b, want)
+			t.Errorf("flags %q missing %q", b, want)
 		}
 	}
-	if got := stripANSI(item{host: config.Host{Name: "x"}}.badges()); got != "" {
-		t.Errorf("plain host has badges %q", got)
+	// A conflict mustn't look like a host that's down.
+	if strings.Contains(b, stripANSI(item{status: healthDown}.statusMark())) {
+		t.Errorf("conflict flag %q reads as the down mark", b)
 	}
-	if got := stripANSI(item{host: config.Host{Name: "x"}, attention: "not pushed"}.badges()); got != " ↑" {
-		t.Errorf("unpushed badge = %q", got)
+	if got := flagsText(item{host: config.Host{Name: "x"}}.flags()); got != "" {
+		t.Errorf("plain host has flags %q", got)
+	}
+	if got := flagsText(item{host: config.Host{Name: "x"}, attention: "not pushed"}.flags()); got != "↑" {
+		t.Errorf("unpushed flag = %q", got)
 	}
 }
 
@@ -161,6 +165,23 @@ func keyMsg(s string) tea.KeyMsg {
 		return tea.KeyMsg{Type: tea.KeyTab}
 	case " ":
 		return tea.KeyMsg{Type: tea.KeySpace, Runes: []rune(" ")}
+	case "ctrl+c":
+		return tea.KeyMsg{Type: tea.KeyCtrlC}
+	case "pgdown":
+		return tea.KeyMsg{Type: tea.KeyPgDown}
+	case "down":
+		return tea.KeyMsg{Type: tea.KeyDown}
+	case "up":
+		return tea.KeyMsg{Type: tea.KeyUp}
+	case "pgup":
+		return tea.KeyMsg{Type: tea.KeyPgUp}
+	case "ctrl+d":
+		return tea.KeyMsg{Type: tea.KeyCtrlD}
+	case "ctrl+u":
+		return tea.KeyMsg{Type: tea.KeyCtrlU}
+	}
+	if r, ok := strings.CutPrefix(s, "alt+"); ok {
+		return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(r), Alt: true}
 	}
 	return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(s)}
 }
@@ -174,7 +195,7 @@ func press(m model, keys ...string) model {
 }
 
 func TestMarkAndExec(t *testing.T) {
-	m := testModel(100, 30)
+	m := testModel(t, 100, 30)
 	first := m.selectedName()
 	m = press(m, " ")
 	second := m.selectedName()
@@ -196,7 +217,7 @@ func TestMarkAndExec(t *testing.T) {
 }
 
 func TestPaletteHintShowsFilledHost(t *testing.T) {
-	m := testModel(100, 30)
+	m := testModel(t, 100, 30)
 	sel := m.selectedName()
 	m = press(m, ":", "l", "o", "g", "s")
 	if hint := stripANSI(m.paletteHint()); !strings.Contains(hint, "meterm logs "+sel) {
@@ -208,7 +229,7 @@ func TestPaletteHintShowsFilledHost(t *testing.T) {
 }
 
 func TestTunnelKey(t *testing.T) {
-	m := testModel(80, 30)
+	m := testModel(t, 80, 30)
 	m.cfg.Hosts = []config.Host{{Name: "API", Address: "10.0.0.1", Forwards: []config.Forward{
 		{Name: "api", Type: "L", LocalPort: 8080, RemoteHost: "localhost", RemotePort: 6304, Note: "Billing API (prod)"},
 		{Name: "web", Type: "L", LocalPort: 8081, RemoteHost: "localhost", RemotePort: 80},
@@ -233,7 +254,7 @@ func TestTunnelKey(t *testing.T) {
 
 func TestKeyActions(t *testing.T) {
 	want := map[string][]string{
-		"A": {"audit", "GW1"}, "R": {"route", "check", "GW1"},
+		"A": {"audit", "GW1"}, "C": {"route", "check", "GW1"},
 		"w": {"keys", "list", "GW1"}, "L": {"logs", "GW1"},
 	}
 	for k, w := range want {
@@ -254,11 +275,12 @@ func TestShortcutKeysDontCollide(t *testing.T) {
 		{"connect", keys.Connect.Keys()}, {"add", keys.Add.Keys()}, {"edit", keys.Edit.Keys()},
 		{"files", keys.Files.Keys()}, {"stats", keys.Stats.Keys()}, {"copyid", keys.CopyID.Keys()},
 		{"keygen", keys.Keygen.Keys()}, {"delete", keys.Delete.Keys()}, {"palette", keys.Palette.Keys()},
-		{"refresh", keys.Refresh.Keys()}, {"quit", keys.Quit.Keys()},
+		{"refresh", keys.Refresh.Keys()}, {"quit", keys.Quit.Keys()}, {"rename", keys.Rename.Keys()},
+		{"sort", keys.Sort.Keys()}, {"help", keys.Help.Keys()},
 		{"tunnel", keys.Tunnel.Keys()}, {"tmux", keys.Tmux.Keys()}, {"exec", keys.Exec.Keys()}, {"mark", keys.Mark.Keys()},
 		{"audit", keys.Audit.Keys()}, {"logs", keys.Logs.Keys()}, {"routes", keys.Routes.Keys()},
 		{"access", keys.Access.Keys()}, {"team", keys.Team.Keys()},
-		{"list-nav", []string{"j", "k", "h", "l", "g", "G", "b", "u", "/", "?"}},
+		{"list-nav", []string{"j", "k", "g", "G", "/", "pgup", "pgdown", "ctrl+u", "ctrl+d", "esc"}},
 	} {
 		for _, k := range b.keys {
 			if prev, ok := seen[k]; ok {
@@ -270,7 +292,7 @@ func TestShortcutKeysDontCollide(t *testing.T) {
 }
 
 func TestLoginChoices(t *testing.T) {
-	cs := loginChoices(config.Host{Name: "API", User: "svc", Users: []string{"deploy", "svc", "root"}}, []string{"--tmux"})
+	cs := loginChoices(config.Host{Name: "API", User: "svc", Users: []string{"deploy", "svc", "root"}}, []string{"--tmux"}, false)
 	var got []string
 	for _, c := range cs {
 		got = append(got, strings.Join(c.args, " "))
@@ -279,23 +301,26 @@ func TestLoginChoices(t *testing.T) {
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("got %q, want %q", got, want)
 	}
-	if cs := loginChoices(config.Host{Name: "X", Users: []string{"root"}}, nil); len(cs) != 2 || !strings.Contains(cs[0].label, "default user") {
+	if cs := loginChoices(config.Host{Name: "X", Users: []string{"root"}}, nil, false); len(cs) != 2 || !strings.Contains(cs[0].label, "default user") {
 		t.Errorf("inherited user: %+v", cs)
 	}
-	if cs := loginChoices(config.Host{Name: "X", User: "a"}, nil); len(cs) != 1 {
+	if cs := loginChoices(config.Host{Name: "X", User: "a"}, nil, false); len(cs) != 1 {
 		t.Errorf("one login gives a picker: %+v", cs)
 	}
 }
 
 func TestTeamBadgeAndFilter(t *testing.T) {
-	it := item{host: config.Host{Name: "API", Team: "git:x"}, team: "ACME"}
-	if !strings.Contains(stripANSI(it.badges()), "⧉ACME") {
-		t.Errorf("badges = %q", stripANSI(it.badges()))
+	it := item{host: config.Host{Name: "API", Team: "git:x"}, team: "ACME", attention: "not pushed"}
+	if !strings.Contains(flagsText(it.flags()), "⧉") {
+		t.Errorf("flags = %q", flagsText(it.flags()))
+	}
+	if d := it.detail(layout{}); !strings.Contains(d, "team ACME (not pushed)") {
+		t.Errorf("detail = %q", d)
 	}
 	if !strings.Contains(it.FilterValue(), "ACME") {
 		t.Error("team name not filterable")
 	}
-	if strings.Contains(stripANSI(item{host: config.Host{Name: "mine"}}.badges()), "⧉") {
+	if strings.Contains(flagsText(item{host: config.Host{Name: "mine"}}.flags()), "⧉") {
 		t.Error("personal host shows a team")
 	}
 }
@@ -310,7 +335,7 @@ func TestPaletteWarnsAboutShellSyntax(t *testing.T) {
 			t.Errorf("shellish(%q) = %v", s, got)
 		}
 	}
-	m := testModel(100, 30)
+	m := testModel(t, 100, 30)
 	m = press(m, ":")
 	m.palette.SetValue("connect web1 -- echo $(whoami)")
 	m = press(m, "enter")
@@ -328,8 +353,8 @@ func TestProductionHostBadgeAndTunnelWarning(t *testing.T) {
 	h := config.Host{Name: "web", Address: "192.0.2.1", Group: "live",
 		Forwards: []config.Forward{{Name: "ui", Type: "L", LocalPort: 8080, RemoteHost: "localhost", RemotePort: 80}}}
 	it := item{host: h, res: cfg.Resolve(h)}
-	if !strings.Contains(stripANSI(it.badges()), "⚑prod") {
-		t.Errorf("no production badge: %q", stripANSI(it.badges()))
+	if it.envLabel() != "⚑prod" {
+		t.Errorf("no production badge: %q", it.envLabel())
 	}
 	if cs := tunnelChoices(h, it.res.IsProduction()); !cs[0].warn {
 		t.Error("a tunnel on a production host should warn")
@@ -350,5 +375,18 @@ func TestExecKeepsTheTypedLine(t *testing.T) {
 		if got := execKeepsLine(line, splitArgs(line)); strings.Join(got, "\x00") != strings.Join(splitArgs(line), "\x00") {
 			t.Errorf("%q changed: %q", line, got)
 		}
+	}
+}
+
+// The row shows a name with a hidden character as the name it looks like;
+// the detail line says so, and spells it out.
+func TestDetailSaysANameHasHiddenCharacters(t *testing.T) {
+	it := item{host: config.Host{Name: "web1\u200b"}}
+	if d := it.detail(layout{}); !strings.HasPrefix(d, `name has hidden characters: "web1\u200b"`) {
+		t.Errorf("detail = %q", d)
+	}
+	plain := item{host: config.Host{Name: "web1"}}
+	if d := plain.detail(layout{}); strings.Contains(d, "hidden") {
+		t.Errorf("plain name: detail = %q", d)
 	}
 }

@@ -2,10 +2,15 @@ package tui
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 
+	"meterm/internal/activity"
 	"meterm/internal/config"
+	"meterm/internal/termsafe"
 )
 
 // Commands is meterm's command tree for the palette's tab completion: each
@@ -120,10 +125,10 @@ func complete(value string, cfg *config.Config) (string, []string) {
 		cands = Commands[fields[0]]
 	case len(fields) >= 2 && fields[0] == "tunnel" && fields[1] == "up":
 		for _, h := range cfg.Hosts {
-			cands = append(cands, h.Name)
+			cands = append(cands, typedName(h.Name))
 			for _, f := range h.Forwards {
 				if f.Name != "" {
-					cands = append(cands, h.Name+"/"+f.Name)
+					cands = append(cands, typedName(h.Name+"/"+f.Name))
 				}
 			}
 		}
@@ -132,18 +137,19 @@ func complete(value string, cfg *config.Config) (string, []string) {
 			return value, nil // a remote path: we don't list remote files
 		}
 		for _, h := range cfg.Hosts {
-			cands = append(cands, h.Name+":")
+			cands = append(cands, typedName(h.Name)+":")
 		}
 		suffix = ""
 	default:
 		for _, h := range cfg.Hosts {
-			cands = append(cands, h.Name)
+			cands = append(cands, typedName(h.Name))
 		}
 	}
 
 	var match []string
 	for _, c := range cands {
-		if strings.HasPrefix(strings.ToLower(c), strings.ToLower(cur)) {
+		low := strings.ToLower(c)
+		if strings.HasPrefix(low, strings.ToLower(cur)) || strings.HasPrefix(low, `"`+strings.ToLower(cur)) {
 			match = append(match, c)
 		}
 	}
@@ -189,7 +195,7 @@ func tunnelChoices(h config.Host, prod bool) []choice {
 			label += "  " + f.Note
 		}
 		out = append(out, choice{
-			label: printable(label),
+			label: termsafe.Label(label),
 			warn:  prod || f.MentionsProduction(),
 			args:  []string{"tunnel", "up", h.Name + "/" + f.Name},
 		})
@@ -213,24 +219,12 @@ func forwardSpec(f config.Forward) string {
 	}
 }
 
-// printable drops control characters, so text that came from a team (a
-// note, a tunnel name) can't move the cursor or recolour the terminal.
-// Team sync already refuses such text; this is the second lock.
-func printable(s string) string {
-	return strings.Map(func(r rune) rune {
-		if r < 0x20 || r == 0x7f || (r >= 0x80 && r < 0xa0) {
-			return -1
-		}
-		return r
-	}, s)
-}
-
 // keyAction is the command a per-host shortcut runs for host.
 func keyAction(k, host string) []string {
 	switch k {
 	case "A":
 		return []string{"audit", host}
-	case "R":
+	case "C":
 		return []string{"route", "check", host}
 	case "w":
 		return []string{"keys", "list", host}
@@ -250,23 +244,59 @@ func execPrefill(marked []string, selected string) string {
 		}
 		hosts = []string{selected}
 	}
-	return "exec " + strings.Join(hosts, " ") + " -- "
+	shown := make([]string, len(hosts))
+	for k, h := range hosts {
+		shown[k] = typedName(h)
+	}
+	return "exec " + strings.Join(shown, " ") + " -- "
+}
+
+// typedName is a host's name as the palette holds it, so that what Enter
+// runs is that host and no other: the name itself when it's plain, otherwise
+// a Go-quoted string ("two words", "zw\u200bsp", "it's") that splitArgs
+// reads back exactly. A name with hidden characters is never shown as the
+// name it looks like: "zwsp" and "zw\u200bsp" are two hosts, and a cleaned
+// name would run on the wrong one (see config.Lookup).
+func typedName(name string) string {
+	if name != "" && termsafe.Label(name) == name && !strings.ContainsAny(name, " '\"\\") {
+		return name
+	}
+	return strconv.Quote(name)
+}
+
+// exactArg is an argument as the picker shows it: as it is when that's
+// what it is, Go-quoted when it holds a character that wouldn't show.
+func exactArg(a string) string {
+	if termsafe.Label(a) == a {
+		return a
+	}
+	return strconv.Quote(a)
+}
+
+// exactLine is args as the picker shows a command it will run.
+func exactLine(args []string) string {
+	out := make([]string, len(args))
+	for i, a := range args {
+		out[i] = exactArg(a)
+	}
+	return strings.Join(out, " ")
 }
 
 // loginChoices is one row per account people log in to h as (its own
-// user first); flags go after the host, e.g. --tmux.
-func loginChoices(h config.Host, flags []string) []choice {
+// user first); flags go after the host, e.g. --tmux. prod marks every row:
+// any login to a production host is one.
+func loginChoices(h config.Host, flags []string, prod bool) []choice {
 	first := h.Name + "  (its default user)"
 	if h.User != "" {
 		first = h.User + "@" + h.Name + "  (default)"
 	}
-	out := []choice{{label: printable(first), args: append([]string{"connect", h.Name}, flags...)}}
+	out := []choice{{label: termsafe.Label(first), warn: prod, args: append([]string{"connect", h.Name}, flags...)}}
 	for _, u := range h.Users {
 		if u == h.User || u == "" {
 			continue
 		}
 		t := u + "@" + h.Name
-		out = append(out, choice{label: printable(t), args: append([]string{"connect", t}, flags...)})
+		out = append(out, choice{label: termsafe.Label(t), warn: prod, args: append([]string{"connect", t}, flags...)})
 	}
 	return out
 }
@@ -276,6 +306,244 @@ func loginChoices(h config.Host, flags []string) []choice {
 // leading ~/ reach meterm (and the host) exactly as typed — and if the host's
 // shell expands them, it does so with the host's values, not this machine's.
 func shellish(s string) bool {
+	head, tail, cut := strings.Cut(s, " -- ")
+	s = withoutGoQuotes(head)
+	if cut {
+		s += " -- " + tail // the host's command: its quotes are the host's
+	}
 	return strings.Contains(s, "$") || strings.Contains(s, "`") || strings.Contains(s, `\`) ||
 		strings.Contains(s, " ~/") || strings.HasPrefix(s, "~/")
+}
+
+// withoutGoQuotes is s with each "..." that splitArgs reads as a Go string
+// left out: a host name the picker quoted (typedName) isn't shell syntax.
+func withoutGoQuotes(s string) string {
+	var b strings.Builder
+	for i := 0; i < len(s); i++ {
+		if s[i] == '"' {
+			if j := goQuoteEnd(s, i); j > 0 {
+				if _, err := strconv.Unquote(s[i : j+1]); err == nil {
+					i = j
+					continue
+				}
+			}
+		}
+		b.WriteByte(s[i])
+	}
+	return b.String()
+}
+
+// goQuoteEnd is the index of the quote that ends the "..." starting at i,
+// stepping over backslash escapes; -1 when there's none.
+func goQuoteEnd(s string, i int) int {
+	for j := i + 1; j < len(s); j++ {
+		switch s[j] {
+		case '\\':
+			j++
+		case '"':
+			return j
+		}
+	}
+	return -1
+}
+
+// localCommands are the commands that stay on this machine: they read or
+// change meterm's own files, or only dial a port, and run nothing on a host.
+// Anything not listed here is taken to run something on the hosts it names.
+var localCommands = map[string]bool{
+	"activity": true, "add": true, "edit": true, "rm": true, "remove": true, "delete": true,
+	"rename": true, "group": true, "import": true, "export": true, "history": true,
+	"list": true, "ls": true, "report": true, "team": true, "keygen": true, "status": true,
+	"help": true, "version": true, "completion": true, "wake": true,
+	"route add": true, "route list": true, "route ls": true, "route rm": true, "route check": true,
+	"tunnel add": true, "tunnel list": true, "tunnel ls": true, "tunnel rm": true,
+	"tunnel disable": true, "audit audits": true,
+	// tunnel enable isn't: it keeps a tunnel open from every login on, so on
+	// a production host it asks, as t (a one-off tunnel up) does.
+}
+
+// productionTargets is the production hosts a command line would reach:
+// hosts it names (as name, user@name, name:path or name/tunnel), and for
+// exec, the ones --all, --tag or --group pick. A command that reaches hosts
+// but names none (audit, keys list) covers every host. Commands that stay
+// on this machine reach none.
+func productionTargets(args []string, cfg *config.Config) []string {
+	if len(args) == 0 || localCommands[args[0]] || (len(args) > 1 && localCommands[args[0]+" "+args[1]]) {
+		return nil
+	}
+	byName := map[string]config.Host{}
+	for _, h := range cfg.Hosts {
+		byName[h.Name] = h
+	}
+	picked := map[string]bool{}
+	named := false
+	for i := 1; i < len(args); i++ {
+		a := args[i]
+		if a == "--" {
+			break
+		}
+		if args[0] == "exec" {
+			flag, val, hasVal := strings.Cut(a, "=")
+			if (flag == "--tag" || flag == "--group") && !hasVal && i+1 < len(args) {
+				i++
+				val, hasVal = args[i], true
+			}
+			switch {
+			case a == "--all":
+				for _, h := range cfg.Hosts {
+					picked[h.Name] = true
+				}
+				named = true
+				continue
+			case flag == "--tag" && hasVal:
+				for _, h := range cfg.Hosts {
+					for _, t := range h.Tags {
+						if t == val {
+							picked[h.Name] = true
+						}
+					}
+				}
+				named = true
+				continue
+			case flag == "--group" && hasVal:
+				for _, h := range cfg.Hosts {
+					if h.Group == val {
+						picked[h.Name] = true
+					}
+				}
+				named = true
+				continue
+			}
+		}
+		name := a
+		if at := strings.LastIndex(name, "@"); at >= 0 {
+			name = name[at+1:]
+		}
+		if c := strings.IndexAny(name, ":/"); c >= 0 {
+			name = name[:c]
+		}
+		if _, ok := byName[name]; ok {
+			picked[name] = true
+			named = true
+		} else if h, i, _ := cfg.Lookup(name); i >= 0 {
+			picked[h.Name] = true // named as shown: a name with control characters
+			named = true
+		}
+	}
+	if !named {
+		for _, h := range cfg.Hosts {
+			picked[h.Name] = true
+		}
+	}
+	var out []string
+	for _, h := range cfg.Hosts {
+		if picked[h.Name] && cfg.IsProduction(h) {
+			out = append(out, h.Name)
+		}
+	}
+	return out
+}
+
+// RemovedDetail is what the activity log says about a host removed from the
+// inventory; `meterm rm` and the picker's delete both write it.
+func RemovedDetail(prod, team bool) string {
+	d := "removed from the host file"
+	switch {
+	case prod && team:
+		d += " (a production host, shared with a team)"
+	case prod:
+		d += " (a production host)"
+	case team:
+		d += " (shared with a team)"
+	}
+	return d
+}
+
+// logRemoved notes in the activity log that h was deleted from the picker.
+func logRemoved(cfg *config.Config, h config.Host) error {
+	r := cfg.Resolve(h)
+	target := r.Address
+	if r.User != "" {
+		target = r.User + "@" + r.Address
+	}
+	if _, err := activity.Record("rm", h.Name, target, RemovedDetail(cfg.IsProduction(h), h.Team != "")); err != nil {
+		return err
+	}
+	activity.SendToSink(cfg.Activity.Sink)
+	return nil
+}
+
+// isSession says args is an interactive ssh session (connect and its
+// aliases), whose exit code is the remote shell's unless it's ssh's 255.
+func isSession(args []string) bool {
+	return len(args) > 1 && (args[0] == "connect" || args[0] == "c" || args[0] == "ssh")
+}
+
+// SessionOutcomeEnv names a file connect writes to once a session it ran
+// has ended (not when meterm or ssh failed first): both exit 1 alike, and
+// only one of them is a failure.
+const SessionOutcomeEnv = "METERM_SESSION_OUTCOME"
+
+// outcomeFile is where a dispatched connect says its session ran: a file in
+// a directory of the picker's own, made on first use; "" when it can't be.
+func (m *model) outcomeFile() string {
+	if m.outcomeDir == "" {
+		d, err := os.MkdirTemp("", "meterm-tui-")
+		if err != nil {
+			return ""
+		}
+		m.outcomeDir = d
+	}
+	return filepath.Join(m.outcomeDir, "session")
+}
+
+// sessionRan reads, and removes, what the last dispatched connect left: true
+// when it says its session ran to an end.
+func (m *model) sessionRan() bool {
+	if m.outcomeDir == "" {
+		return false
+	}
+	p := filepath.Join(m.outcomeDir, "session")
+	b, err := os.ReadFile(p)
+	_ = os.Remove(p)
+	return err == nil && isSession(m.running) && strings.TrimSpace(string(b)) != ""
+}
+
+// JumpBrokenText says what deleting a jump host does to the hosts that go
+// through it (config.JumpedBy): `meterm rm` and the picker both say it.
+func JumpBrokenText(users []string) string {
+	shown := make([]string, len(users))
+	for i, u := range users {
+		shown[i] = exactArg(u)
+	}
+	more := ""
+	if len(shown) > 8 {
+		shown, more = shown[:8], fmt.Sprintf(" and %d more", len(users)-8)
+	}
+	return fmt.Sprintf("%d host(s) jump through it: %s%s. Their jump will be broken: it will name a host meterm no longer has, "+
+		"which ssh looks up by itself (DNS, ~/.ssh/config), maybe a different machine. Edit them first.",
+		len(users), strings.Join(shown, ", "), more)
+}
+
+// tunnelLeadsToProduction says args is tunnel up or enable of a saved tunnel
+// whose name or note says it reaches production, which the tunnel picker
+// (t) asks about whatever the host's env.
+func tunnelLeadsToProduction(args []string, cfg *config.Config) bool {
+	if len(args) < 3 || args[0] != "tunnel" || (args[1] != "up" && args[1] != "enable") {
+		return false
+	}
+	for _, a := range args[2:] {
+		name, tun, ok := strings.Cut(a, "/")
+		if !ok {
+			continue
+		}
+		if h, i, _ := cfg.Lookup(name); i >= 0 {
+			for _, f := range h.Forwards {
+				if f.Name == tun && f.MentionsProduction() {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }

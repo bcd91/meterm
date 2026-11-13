@@ -4,14 +4,17 @@ import (
 	"testing"
 
 	"meterm/internal/config"
+	"meterm/internal/health"
 )
 
-// A host reachable only through a jump host must never show as "down" from
-// a direct dial — that's misleading (it may be perfectly reachable through
-// the jump host) and was reported as a live bug: "jump-host ไม่สามารถดึง
-// สถานะได้หรอครับ พอดีเข้าได้แต่เห็นแดง".
-func TestHealthCmdsSkipHostsBehindProxyJump(t *testing.T) {
-	m := New("/tmp/hosts.yaml", "/usr/local/bin/meterm")
+// A host behind a jump host is checked the way connect goes, through its
+// first hop: the jump host. It never shows down from a direct dial of its own
+// address, which from here would fail even when it's reachable (reported as
+// "jump-host ไม่สามารถดึงสถานะได้หรอครับ พอดีเข้าได้แต่เห็นแดง"), and a jump
+// host that's down makes it down, not "not checked".
+func TestHealthCmdsCheckTheJumpHost(t *testing.T) {
+	m := newModel(t)
+	answering(t, "203.0.113.9:22")
 	m.cfg = &config.Config{
 		Hosts: []config.Host{
 			{Name: "bastion", Address: "203.0.113.9"},
@@ -19,37 +22,32 @@ func TestHealthCmdsSkipHostsBehindProxyJump(t *testing.T) {
 			{Name: "raw-jump", Address: "192.168.1.102", ProxyJump: "user@somewhere.example"},
 		},
 	}
-
 	cmds := m.healthCmds()
 	if len(cmds) != 3 {
 		t.Fatalf("expected 3 health commands, got %d", len(cmds))
 	}
-
-	results := map[string]healthState{}
+	results := map[string]health.Result{}
 	for _, cmd := range cmds {
 		msg := cmd().(healthResultMsg)
-		results[msg.name] = msg.state
+		results[msg.name] = msg.res
 	}
-
-	if results["inner"] != healthSkipped {
-		t.Errorf("inner (behind a resolved proxy_jump) state = %v, want healthSkipped", results["inner"])
+	if r := results["inner"]; r.State != healthUp || r.Via != "bastion" {
+		t.Errorf("inner (bastion answers) = %+v", r)
 	}
-	if results["raw-jump"] != healthSkipped {
-		t.Errorf("raw-jump (behind a raw proxy_jump spec) state = %v, want healthSkipped", results["raw-jump"])
+	if r := results["raw-jump"]; r.State != healthDown || r.Via != "user@somewhere.example" {
+		t.Errorf("raw-jump (its jump host doesn't answer) = %+v", r)
 	}
-	// bastion has no jump host itself, so it should actually be dialed
-	// (and, dialing a bogus TEST-NET-3 address, come back down — not skipped).
-	if results["bastion"] != healthDown {
-		t.Errorf("bastion (no proxy_jump) state = %v, want healthDown (a real dial was attempted)", results["bastion"])
+	if r := results["bastion"]; r.State != healthUp {
+		t.Errorf("bastion = %+v", r)
 	}
 }
 
 func TestHealthResultUpdatesItemStatusInPlace(t *testing.T) {
-	m := New("/tmp/hosts.yaml", "/usr/local/bin/meterm")
+	m := newModel(t)
 	m.cfg = &config.Config{Hosts: []config.Host{{Name: "web1", Address: "10.0.0.1", ProxyJump: "bastion"}}}
 	m.list.SetItems(m.buildItems())
 
-	updated, _ := m.Update(healthResultMsg{name: "web1", state: healthSkipped})
+	updated, _ := m.Update(resultFor(m, "web1", healthSkipped))
 	um := updated.(model)
 
 	it, ok := um.list.Items()[0].(item)

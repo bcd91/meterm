@@ -526,3 +526,36 @@ func TestAdoptWithoutLocalHostsLeavesBaseEmpty(t *testing.T) {
 		t.Errorf("base = %+v, want empty", st.Bases["git:repo"])
 	}
 }
+
+// connect logs a "started" entry and, when ssh ends, an outcome entry; the
+// first is uploaded on its own before the session ends. Both must reach
+// the team, once each, and still verify as a chain.
+func TestUploadStartThenOutcome(t *testing.T) {
+	s := NewMemoryStore()
+	teamID, a, _ := teamOf(t, s, RoleMember)
+	cfg := emptyCfg(t)
+	cfg.Upsert(config.Host{Name: "shared", Address: "1", Team: teamID})
+	l, err := activity.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := l.Append(activity.Event{Action: "connect", Host: "shared", Detail: "started"}); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := UploadActivity(ctx, a, teamID, cfg, l); err != nil || n != 1 {
+		t.Fatalf("start: uploaded %d, %v", n, err)
+	}
+	if _, err := l.Append(activity.Event{Action: "connect", Host: "shared", Detail: "exit 0 after 5s"}); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := UploadActivity(ctx, a, teamID, cfg, l); err != nil || n != 1 {
+		t.Fatalf("outcome: uploaded %d, %v", n, err)
+	}
+	got, _ := a.ListEvents(ctx, teamID, EventFilter{})
+	if len(got) != 2 || got[0].Detail != "started" || got[1].Detail != "exit 0 after 5s" {
+		t.Fatalf("team has %+v", got)
+	}
+	if broken := activity.VerifyShared(eventsOf(got)); broken != nil {
+		t.Errorf("chain: %v", broken)
+	}
+}

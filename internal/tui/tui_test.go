@@ -62,7 +62,7 @@ func TestBuildDispatchCmdDedupesExistingEnv(t *testing.T) {
 // End-to-end through Update(): pressing enter on a selected host must
 // dispatch exactly ["connect", "<name>"] — no --config flag anywhere.
 func TestEnterDispatchesConnectWithCorrectArgs(t *testing.T) {
-	m := New("/tmp/hosts.yaml", "/usr/local/bin/meterm")
+	m := newModel(t)
 	m.cfg = &config.Config{Hosts: []config.Host{{Name: "web1", Address: "10.0.0.1"}}}
 	m.list.SetItems(m.buildItems())
 	m.list.Select(0)
