@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -193,6 +194,12 @@ func (fixedModeFS) CreateTemp(target string, mode fs.FileMode) (io.WriteCloser, 
 // A replacement that can't be given the old file's stricter mode doesn't
 // replace it: a 0600 secret mustn't become 0644.
 func TestStricterModeIsNeverLoosened(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		// A mode there is only the read-only bit: the 0600 written here
+		// reads back 0666, so nothing stricter can be lost, and a read-only
+		// original is the next test's.
+		t.Skip("no mode stricter than 0666 that a file can still be written through")
+	}
 	src, dst := t.TempDir(), t.TempDir()
 	write(t, filepath.Join(src, "secret"), "new", 0o644)
 	write(t, filepath.Join(dst, "secret"), "old", 0o600)
@@ -209,6 +216,36 @@ func TestStricterModeIsNeverLoosened(t *testing.T) {
 	}
 	if res.Copied != 0 || res.Skipped != 1 || len(res.Warnings) != 1 || !strings.Contains(res.Warnings[0], "couldn't keep permissions 0600; left the original") {
 		t.Errorf("result %+v", res)
+	}
+	if names := dirNames(t, dst); len(names) != 1 {
+		t.Errorf("left behind: %v", names)
+	}
+}
+
+// A read-only original is never replaced by a writable file, here or on
+// Windows, where the read-only bit is all the mode there is.
+func TestReadOnlyOriginalIsNotReplaced(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root writes through a read-only file")
+	}
+	src, dst := t.TempDir(), t.TempDir()
+	target := filepath.Join(dst, "ro")
+	write(t, filepath.Join(src, "ro"), "new", 0o644)
+	write(t, target, "old", 0o444)
+	t.Cleanup(func() { os.Chmod(target, 0o644) })
+	plan, err := MakePlan(context.Background(), Local{}, []string{filepath.Join(src, "ro")}, Local{}, dst)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := Run(context.Background(), plan, true, nil)
+	if got, _ := os.ReadFile(target); string(got) != "old" {
+		t.Errorf("ro = %q (result %+v, %v), want the original kept", got, res, err)
+	}
+	if st, _ := os.Stat(target); st.Mode().Perm()&0o222 != 0 {
+		t.Errorf("mode now %v", st.Mode())
+	}
+	if res.Copied != 0 || err == nil && res.Skipped != 1 {
+		t.Errorf("result %+v, %v: want nothing copied", res, err)
 	}
 	if names := dirNames(t, dst); len(names) != 1 {
 		t.Errorf("left behind: %v", names)
@@ -234,7 +271,7 @@ func TestMkdirAndRenameLogWhatHappened(t *testing.T) {
 
 	h.keys("esc", "m", "a.txt", "enter") // a file has the name
 	if !h.model().statusErr || len(h.events) != 2 || h.events[1].kind != "mkdir" || !strings.HasPrefix(h.events[1].detail, "failed") ||
-		!strings.Contains(h.events[1].detail, filepath.Join(right, "a.txt")) {
+		!strings.Contains(h.events[1].detail, rjoin(right, "a.txt")) {
 		t.Errorf("status %q, log %q: want a failed mkdir, logged", h.model().status, h.allEvents())
 	}
 
@@ -243,7 +280,7 @@ func TestMkdirAndRenameLogWhatHappened(t *testing.T) {
 	h.send(tea.KeyMsg{Type: tea.KeyCtrlU})
 	h.keys("b.txt", "enter")
 	if len(h.events) != 2 || h.events[1].kind != "rename" || !strings.HasPrefix(h.events[1].detail, "failed") ||
-		!strings.Contains(h.events[1].detail, filepath.Join(right, "a.txt")+" -> "+filepath.Join(right, "b.txt")) {
+		!strings.Contains(h.events[1].detail, rjoin(right, "a.txt")+" -> "+rjoin(right, "b.txt")) {
 		t.Errorf("log %q: want the refused rename, logged as failed", h.allEvents())
 	}
 }

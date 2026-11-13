@@ -19,7 +19,14 @@ func gitTeam(t *testing.T) (alice, bob *GitStore) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not installed")
 	}
-	root := t.TempDir()
+	// Not t.TempDir: its name is the test's, and the clone's directory
+	// spells the remote's whole path again, which with a long test name
+	// passes the 260 characters git on Windows can open.
+	root, err := os.MkdirTemp("", "team")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(root) })
 	remote := filepath.Join(root, "team.git")
 	if out, err := exec.Command("git", "init", "-q", "--bare", "-b", "main", remote).CombinedOutput(); err != nil {
 		t.Fatalf("%v: %s", err, out)

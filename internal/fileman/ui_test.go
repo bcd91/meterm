@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -809,6 +810,13 @@ func assertSafe(t *testing.T, where, view string, height int) {
 // not be able to set the title, clear the screen, write the clipboard or
 // add a row, wherever it's shown.
 func TestHostileNamesAreShownSafely(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		// It makes these names on both sides, this machine's included, and a
+		// Windows disk refuses control characters in a name. A host's such
+		// names are shown on Windows too: TestHiddenNamesAreSpelledNotCleaned
+		// and TestRenameWithoutAnEditDoesNothing run them from memory there.
+		t.Skip("a Windows filesystem can't hold names with control characters")
+	}
 	left, right := t.TempDir(), t.TempDir()
 	for _, n := range hostileNames {
 		write(t, filepath.Join(right, n), "x", 0o644)

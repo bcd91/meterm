@@ -35,6 +35,23 @@ func newRemote(t *testing.T) Remote {
 	return Remote{Host: "test", Client: c}
 }
 
+// rjoin is a path on newRemote's side, joined as Remote joins it: with "/",
+// as every SFTP server takes. On Windows the in-process server serves C:\…,
+// so a path built there reads C:\…\dir/name; a real server's never does,
+// and this machine's own paths still use filepath.Join.
+func rjoin(elem ...string) string { return Remote{}.Join(elem...) }
+
+// modeOf is p's permissions as this OS keeps them: on Unix what write was
+// given; on Windows only 0666, or 0444 for a read-only file.
+func modeOf(t *testing.T, p string) os.FileMode {
+	t.Helper()
+	st, err := os.Stat(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return st.Mode().Perm()
+}
+
 func write(t *testing.T, p, content string, mode os.FileMode) {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
@@ -223,6 +240,7 @@ func TestFailedOverwriteKeepsTheOriginal(t *testing.T) {
 			src, dst := t.TempDir(), t.TempDir()
 			write(t, filepath.Join(src, "a.txt"), string(bytes.Repeat([]byte("n"), 1<<20)), 0o644)
 			write(t, filepath.Join(dst, "a.txt"), "original", 0o600)
+			kept := modeOf(t, filepath.Join(dst, "a.txt")) // 0600; Windows has no such mode
 
 			// Cancelled before a byte moves.
 			ctx, cancel := context.WithCancel(context.Background())
@@ -254,7 +272,7 @@ func TestFailedOverwriteKeepsTheOriginal(t *testing.T) {
 				t.Fatal(err)
 			}
 			st, _ := os.Stat(filepath.Join(dst, "a.txt"))
-			if st.Size() != 1<<20 || st.Mode().Perm() != 0o600 {
+			if st.Size() != 1<<20 || st.Mode().Perm() != kept {
 				t.Errorf("after overwrite: size %d mode %v", st.Size(), st.Mode())
 			}
 			if names := dirNames(t, dst); len(names) != 1 {
@@ -419,6 +437,7 @@ func TestOverwriteThroughASymlinkKeepsTheLink(t *testing.T) {
 			for _, n := range []string{"x.conf", "abs.conf", "y.conf"} {
 				write(t, filepath.Join(src, n), "new "+n, 0o644)
 			}
+			kept := map[string]os.FileMode{"x.conf": modeOf(t, filepath.Join(avail, "x.conf")), "abs.conf": modeOf(t, filepath.Join(avail, "abs.conf"))}
 			for _, n := range []string{"x.conf", "abs.conf", "y.conf"} {
 				plan, err := MakePlan(context.Background(), Local{}, []string{filepath.Join(src, n)}, dstFS, enabled)
 				if err != nil || plan.Conflicts() != 1 {
@@ -430,7 +449,7 @@ func TestOverwriteThroughASymlinkKeepsTheLink(t *testing.T) {
 			}
 			for l, target := range links {
 				got, err := os.Readlink(filepath.Join(enabled, l))
-				if err != nil || got != target {
+				if err != nil || got != filepath.FromSlash(target) { // Windows stores ..\avail\x.conf
 					t.Errorf("%s: link now %q (%v), want it still -> %q", l, got, err, target)
 				}
 			}
@@ -442,7 +461,7 @@ func TestOverwriteThroughASymlinkKeepsTheLink(t *testing.T) {
 				if string(got) != want {
 					t.Errorf("%s = %q, want %q", f, got, want)
 				}
-				if f == "x.conf" && st.Mode().Perm() != 0o640 || f == "abs.conf" && st.Mode().Perm() != 0o600 {
+				if st.Mode().Perm() != kept[f] {
 					t.Errorf("%s mode %v: the linked file's permissions weren't kept", f, st.Mode())
 				}
 			}
@@ -474,7 +493,7 @@ func TestDanglingSymlinkIsNotReplaced(t *testing.T) {
 			if err == nil || !strings.Contains(err.Error(), "symbolic link") {
 				t.Errorf("err = %v, want a refusal naming the symbolic link", err)
 			}
-			if got, err := os.Readlink(filepath.Join(dir, "gone.conf")); err != nil || got != "../avail/missing.conf" {
+			if got, err := os.Readlink(filepath.Join(dir, "gone.conf")); err != nil || got != filepath.FromSlash("../avail/missing.conf") {
 				t.Errorf("link now %q (%v)", got, err)
 			}
 			if names := dirNames(t, dir); len(names) != 1 {

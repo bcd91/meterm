@@ -180,7 +180,8 @@ func TestPartialDeleteSaysWhatWentFirst(t *testing.T) {
 	h := newFailHarness(t, left, right, "zz-bad")
 	h.keys("d", "y")
 	st := h.model().status
-	for _, want := range []string{"removed 2", "sub/deep/a", "see ? or the log for all", "permission denied"} {
+	rel := filepath.Join("sub", "deep", "a") // shown relative, in this OS's separators
+	for _, want := range []string{"removed 2", rel, "see ? or the log for all", "permission denied"} {
 		if !strings.Contains(st, want) {
 			t.Errorf("status %q doesn't say %q", st, want)
 		}
@@ -193,7 +194,7 @@ func TestPartialDeleteSaysWhatWentFirst(t *testing.T) {
 	}
 	h.keys("?")
 	help := viewText(h.model())
-	if !strings.Contains(help, "sub/deep/a") {
+	if !strings.Contains(help, rel) {
 		h.send(tea.KeyMsg{Type: tea.KeyEnd})
 		help = viewText(h.model())
 	}
@@ -231,7 +232,7 @@ func TestOverwriteNamesTheFiles(t *testing.T) {
 		}
 	}
 	h.keys("o")
-	if e := h.lastEvent(); !strings.Contains(e.detail, filepath.Join(right, "e.txt")) || !strings.Contains(e.detail, "replaced 5") {
+	if e := h.lastEvent(); !strings.Contains(e.detail, rjoin(right, "e.txt")) || !strings.Contains(e.detail, "replaced 5") {
 		t.Errorf("log %q doesn't name what it replaced", e.detail)
 	}
 
@@ -243,7 +244,7 @@ func TestOverwriteNamesTheFiles(t *testing.T) {
 	write(t, filepath.Join(l2, "linkfile"), "new", 0o644)
 	s := newHarness(t, l2, r2)
 	s.keys("c", "o")
-	want := filepath.Join(r2, "linkfile") + " (-> " + filepath.Join(r2, "hello.txt") + ")"
+	want := rjoin(r2, "linkfile") + " (-> " + rjoin(r2, "hello.txt") + ")"
 	if e := s.lastEvent(); !strings.Contains(e.detail, want) {
 		t.Errorf("log %q, want it to say %q", e.detail, want)
 	}

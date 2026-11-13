@@ -163,8 +163,11 @@ func TestOverwriteQuestionCancelledWhenADirectoryChanges(t *testing.T) {
 	if m.mode != modeConfirm || m.confirmKind != confirmOverwrite {
 		t.Fatalf("mode %v, want the overwrite question", m.mode)
 	}
-	if !strings.Contains(m.confirmText, "web1:"+right) {
-		t.Errorf("mode %v, question %q: want an overwrite question naming web1:%s", m.mode, m.confirmText, right)
+	// A long directory is cut from the left to fit (macOS and Windows temp
+	// directories are), so look for the host and the end of the path.
+	tail := right[max(0, len(right)-40):]
+	if !strings.Contains(m.confirmText, "web1:") || !strings.Contains(m.confirmText, tail+": a.txt") {
+		t.Errorf("mode %v, question %q: want an overwrite question naming web1:…%s", m.mode, m.confirmText, tail)
 	}
 	close(gate)
 	m, _ = update(t, m, dirLoadedMsg{pane: 1, dir: other})
@@ -296,12 +299,12 @@ func TestLogLeadsWithTheOutcome(t *testing.T) {
 	h.keys("b.txt", "enter")
 	h.keys("m", "d1", "enter")
 	h.keys("G", "d", "y")
-	for i, w := range []string{"started: rename " + filepath.Join(right, "a.txt") + " -> " + filepath.Join(right, "b.txt"),
-		"ok: rename " + filepath.Join(right, "a.txt") + " -> " + filepath.Join(right, "b.txt"),
-		"started: mkdir " + filepath.Join(right, "d1"),
-		"ok: mkdir " + filepath.Join(right, "d1"),
-		"started: delete " + filepath.Join(right, "b.txt"),
-		"ok: delete " + filepath.Join(right, "b.txt")} {
+	for i, w := range []string{"started: rename " + rjoin(right, "a.txt") + " -> " + rjoin(right, "b.txt"),
+		"ok: rename " + rjoin(right, "a.txt") + " -> " + rjoin(right, "b.txt"),
+		"started: mkdir " + rjoin(right, "d1"),
+		"ok: mkdir " + rjoin(right, "d1"),
+		"started: delete " + rjoin(right, "b.txt"),
+		"ok: delete " + rjoin(right, "b.txt")} {
 		if i >= len(h.events) || h.events[i].detail != w {
 			t.Errorf("event %d: want %q, log is\n%s", i, w, h.allEvents())
 		}
@@ -340,14 +343,14 @@ func TestDeleteOfSomethingGoneSaysSo(t *testing.T) {
 	if st := h.model().status; !strings.Contains(st, "deleted 1 item(s)") || !strings.Contains(st, "1 already gone") {
 		t.Errorf("status %q", st)
 	}
-	if last := h.lastEvent(); last.detail != "ok: delete "+filepath.Join(right, "a.txt")+"; already gone: "+filepath.Join(right, "b.txt") {
+	if last := h.lastEvent(); last.detail != "ok: delete "+rjoin(right, "a.txt")+"; already gone: "+rjoin(right, "b.txt") {
 		t.Errorf("logged %q", last.detail)
 	}
 	write(t, filepath.Join(right, "c.txt"), "c", 0o644)
 	h.keys("r", "*", "d")
 	_ = os.Remove(filepath.Join(right, "c.txt"))
 	h.keys("y")
-	if last := h.lastEvent(); last.detail != "already gone: delete "+filepath.Join(right, "c.txt") || !strings.Contains(h.model().status, "already gone") {
+	if last := h.lastEvent(); last.detail != "already gone: delete "+rjoin(right, "c.txt") || !strings.Contains(h.model().status, "already gone") {
 		t.Errorf("logged %q, status %q", last.detail, h.model().status)
 	}
 }
@@ -356,40 +359,44 @@ func TestDeleteOfSomethingGoneSaysSo(t *testing.T) {
 // can't show starts the box empty, saying why, rather than with a cleaned
 // copy that enter would rename it to.
 func TestRenameWithoutAnEditDoesNothing(t *testing.T) {
-	left, right := t.TempDir(), t.TempDir()
-	for _, n := range []string{" sp", "tab\tx", "plain"} {
-		write(t, filepath.Join(right, n), "x", 0o644)
-	}
-	h := newHarness(t, left, right)
-	h.keys("tab")
-	for i, n := range []string{" sp", "plain", "tab\tx"} {
-		h.keys("g")
-		for k := 0; k < i; k++ {
-			h.keys("j")
-		}
-		if h.cursorName(1) != n {
-			t.Fatalf("cursor on %q, want %q", h.cursorName(1), n)
-		}
-		h.keys("R")
-		m := h.model()
-		hidden := n != "plain"
-		if hidden && (m.input.Value() != "" || !strings.Contains(m.input.Prompt, "this name has hidden characters; type the new name")) {
-			t.Errorf("%q: box %q with prompt %q, want it empty, saying why", n, m.input.Value(), m.input.Prompt)
-		}
-		h.keys("enter")
-		if st := h.model().status; !strings.Contains(st, "unchanged") {
-			t.Errorf("%q: status %q, want unchanged", n, st)
-		}
-	}
-	if got := dirNames(t, right); strings.Join(got, "|") != " sp|plain|tab\tx" {
-		t.Errorf("names now %q", got)
-	}
-	if len(h.events) != 0 {
-		t.Errorf("logged %v", h.events)
-	}
-	h.keys("g", "R", "sp", "enter")
-	if _, err := os.Stat(filepath.Join(right, "sp")); err != nil {
-		t.Errorf("typed name not used: %v", err)
+	for side, mk := range hostSides() {
+		t.Run(side, func(t *testing.T) {
+			r := mk(t)
+			for _, n := range []string{" sp", "tab\tx", "plain"} {
+				r.write(t, n)
+			}
+			h := newHarnessOn(t, t.TempDir(), r)
+			h.keys("tab")
+			for i, n := range []string{" sp", "plain", "tab\tx"} {
+				h.keys("g")
+				for k := 0; k < i; k++ {
+					h.keys("j")
+				}
+				if h.cursorName(1) != n {
+					t.Fatalf("cursor on %q, want %q", h.cursorName(1), n)
+				}
+				h.keys("R")
+				m := h.model()
+				hidden := n != "plain"
+				if hidden && (m.input.Value() != "" || !strings.Contains(m.input.Prompt, "this name has hidden characters; type the new name")) {
+					t.Errorf("%q: box %q with prompt %q, want it empty, saying why", n, m.input.Value(), m.input.Prompt)
+				}
+				h.keys("enter")
+				if st := h.model().status; !strings.Contains(st, "unchanged") {
+					t.Errorf("%q: status %q, want unchanged", n, st)
+				}
+			}
+			if got := r.names(t); strings.Join(got, "|") != " sp|plain|tab\tx" {
+				t.Errorf("names now %q", got)
+			}
+			if len(h.events) != 0 {
+				t.Errorf("logged %v", h.events)
+			}
+			h.keys("g", "R", "sp", "enter")
+			if got := strings.Join(r.names(t), "|"); got != "plain|sp|tab\tx" {
+				t.Errorf("names now %q, want sp as typed", got)
+			}
+		})
 	}
 }
 

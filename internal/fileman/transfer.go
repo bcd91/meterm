@@ -716,7 +716,11 @@ func copyFile(now, after context.Context, src, dst FS, f FileOp, replace bool, o
 		}
 		// The mode after the owner: a chown by anyone but root clears
 		// setuid and setgid, and a CreateTemp mode may not have been set at
-		// all. Permissions only, for now.
+		// all. Permissions only, for now. On Windows a file's mode is only
+		// its read-only bit (0666 or 0444): a read-only original never gets
+		// here, as mayWrite can't say it's ours to write, so it's written in
+		// place, which Windows refuses. ACLs aren't compared or carried
+		// over anywhere: a replacement has the ACL its directory gives.
 		want := old.Mode.Perm()
 		if c, ok := out.(interface{ Chmod(fs.FileMode) error }); ok {
 			if cerr := c.Chmod(want); cerr != nil {

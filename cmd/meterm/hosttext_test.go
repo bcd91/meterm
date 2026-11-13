@@ -17,6 +17,9 @@ func cliSandbox(t *testing.T) string {
 	dir := t.TempDir()
 	t.Setenv("HOME", dir)
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(dir, "config"))
+	t.Setenv("APPDATA", filepath.Join(dir, "config")) // Windows's config dir
+	t.Setenv("LOCALAPPDATA", filepath.Join(dir, "cache"))
+	t.Setenv("USERPROFILE", dir)
 	t.Setenv("XDG_STATE_HOME", filepath.Join(dir, "state"))
 	t.Setenv("XDG_CACHE_HOME", filepath.Join(dir, "cache"))
 	t.Setenv("METERM_HISTORY", filepath.Join(dir, "history.json"))

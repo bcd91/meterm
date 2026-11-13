@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"meterm/internal/config"
+	"meterm/internal/sshconfig"
 )
 
 // export writes ssh_config lines. A name with a line break in it added a
@@ -42,7 +43,16 @@ func TestExportLeavesOutWhatSSHConfigWouldSplit(t *testing.T) {
 			}
 		})
 	})
-	b, err := os.ReadFile(filepath.Join(dir, "config", "meterm", "ssh_config"))
+	// Where the config dir is depends on the OS (~/Library/Application
+	// Support on macOS, %AppData% on Windows): ask, and make sure it's ours.
+	p, err := sshconfig.GeneratedPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(p, dir+string(filepath.Separator)) {
+		t.Fatalf("export went to %s, outside the test's %s", p, dir)
+	}
+	b, err := os.ReadFile(p)
 	if err != nil {
 		t.Fatal(err)
 	}

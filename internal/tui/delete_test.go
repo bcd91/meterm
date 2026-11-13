@@ -3,6 +3,7 @@ package tui
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -65,6 +66,11 @@ func TestDeleteOnlyOnYes(t *testing.T) {
 
 // A delete that can't be saved says so and keeps the host.
 func TestDeleteFailureIsShown(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		// The failure is made with the directory's mode, and on Windows a
+		// directory's read-only bit doesn't stop files being made in it.
+		t.Skip("a directory's mode can't refuse writes on Windows")
+	}
 	if os.Geteuid() == 0 {
 		t.Skip("root writes through a read-only directory")
 	}

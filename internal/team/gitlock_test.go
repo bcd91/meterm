@@ -31,6 +31,10 @@ func twoProcesses(t *testing.T) (a, b *GitStore) {
 // Git work on a clone is one at a time across processes.
 func TestGitWorkOnOneCloneIsSerialised(t *testing.T) {
 	a, b := twoProcesses(t)
+	// What's tested is that they take turns, not how long a turn waits: the
+	// lock is polled, so one side can hold it for most of a run, and git on
+	// Windows is slow enough that a wait passed ten seconds there.
+	defer SetRepoLockWait(5 * time.Minute)()
 	var wg sync.WaitGroup
 	errs := make(chan error, 200)
 	for w, g := range []*GitStore{a, b} {

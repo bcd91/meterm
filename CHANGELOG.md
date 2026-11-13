@@ -254,7 +254,9 @@ v0.23.1 an overwrite truncated the target and wrote into it.
   host won't set permissions, the old file is left. A file we may not write
   is never renamed over: it's written in place, which a read-only file
   refuses, changing nothing. On a host uid 0 isn't taken for root, since a
-  server that sends no owners shows 0 for everyone. It's a new file, so ACLs and extended
+  server that sends no owners shows 0 for everyone. On Windows a file's mode
+  is only its read-only bit, so that's all that's kept or compared there; a
+  file a Windows ACL guards gets its directory's ACL. It's a new file, so ACLs and extended
   attributes are not kept, and other hard links keep the old content. Hard
   links are only seen on this machine; SFTP doesn't report them, so on a
   host they split unasked.

@@ -33,6 +33,9 @@ func sandbox(t *testing.T) string {
 	t.Setenv("HOME", dir)
 	t.Setenv("TMPDIR", dir) // the picker's own temp files go with the test
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(dir, "config"))
+	t.Setenv("APPDATA", filepath.Join(dir, "config")) // Windows's config dir: the activity log goes there
+	t.Setenv("LOCALAPPDATA", filepath.Join(dir, "cache"))
+	t.Setenv("USERPROFILE", dir)
 	t.Setenv("XDG_STATE_HOME", filepath.Join(dir, "state"))
 	t.Setenv("XDG_CACHE_HOME", filepath.Join(dir, "cache"))
 	t.Setenv("METERM_HISTORY", "")
