@@ -19,16 +19,18 @@ func newSftpCmd() *cobra.Command {
 		Hidden:     true,
 		Deprecated: "use `meterm files <name>` (or `meterm files --shell <name>` for the sftp prompt)",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runSftpShell(args)
+			return runSftpShell(args, "")
 		},
 	}
 	return cmd
 }
 
 // runSftpShell opens OpenSSH's interactive sftp prompt on a saved host.
-func runSftpShell(args []string) error {
+// note is how a production question before it went (files --shell); ""
+// leaves it to namedNote.
+func runSftpShell(args []string, note string) error {
 	quietOnSuccess = true
-	code, err := sftpShell(args)
+	code, err := sftpShellNoted(args, note)
 	if err != nil {
 		return err
 	}
@@ -42,7 +44,9 @@ func runSftpShell(args []string) error {
 // log gets a start before sftp runs and an outcome after; last-connected
 // is written only when sftp exits 0, since it reports a connection it
 // couldn't make as a plain failure.
-func sftpShell(args []string) (int, error) {
+func sftpShell(args []string) (int, error) { return sftpShellNoted(args, "") }
+
+func sftpShellNoted(args []string, note string) (int, error) {
 	cfg, err := loadConfig()
 	if err != nil {
 		return 0, err
@@ -58,7 +62,10 @@ func sftpShell(args []string) (int, error) {
 	if len(args) == 2 {
 		startDir = args[1]
 	}
-	run := beginActivity(cfg, *h, "sftp", noteDetail(namedNote(cfg, *h, false), startDir))
+	if note == "" {
+		note = namedNote(cfg, *h, false)
+	}
+	run := beginActivity(cfg, *h, "sftp", noteDetail(note, startDir))
 	kickAutosync(false, true)
 	started, runErr := runOutliving(sshrun.SftpCommand(cfg.Resolve(*h), startDir))
 	if !started {

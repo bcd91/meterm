@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"io"
 	"os"
 	"strings"
@@ -127,4 +128,21 @@ func TestAuditTextIsSafe(t *testing.T) {
 
 func TestOneLineIsSafe(t *testing.T) {
 	raw(t, "oneLine", oneLine(evilText+strings.Repeat("x", 80), 20))
+}
+
+// JSON's \\u escape is UTF-16: a character past U+FFFF that's escaped (a
+// tag character) is written as a surrogate pair, and decodes as itself.
+func TestEncodeJSONEscapesAstralAsAPair(t *testing.T) {
+	in := map[string]string{"name": "tag\U000e0041x"}
+	var b bytes.Buffer
+	if err := encodeJSON(&b, in); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(b.String(), `\udb40\udc41`) {
+		t.Errorf("not a surrogate pair: %s", b.String())
+	}
+	var out map[string]string
+	if err := json.Unmarshal(b.Bytes(), &out); err != nil || out["name"] != in["name"] {
+		t.Errorf("decodes as %q (%v), want %q", out["name"], err, in["name"])
+	}
 }

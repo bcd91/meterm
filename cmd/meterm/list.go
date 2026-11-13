@@ -8,6 +8,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"unicode/utf16"
 
 	"github.com/spf13/cobra"
 
@@ -252,7 +253,12 @@ func encodeJSON(out io.Writer, v any) error {
 	var esc strings.Builder
 	for _, r := range b.String() {
 		if jsonEscaped(r) {
-			fmt.Fprintf(&esc, "\\u%04x", r)
+			if r > 0xffff { // JSON's \u is UTF-16: a pair for anything past U+FFFF
+				hi, lo := utf16.EncodeRune(r)
+				fmt.Fprintf(&esc, "\\u%04x\\u%04x", hi, lo)
+			} else {
+				fmt.Fprintf(&esc, "\\u%04x", r)
+			}
 			continue
 		}
 		esc.WriteRune(r)

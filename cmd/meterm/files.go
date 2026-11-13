@@ -78,7 +78,7 @@ func newFilesCmd() *cobra.Command {
 				}
 			}
 			if shell {
-				return runSftpShell(args)
+				return runSftpShell(args, note)
 			}
 			cfg, err := loadConfig()
 			if err != nil {

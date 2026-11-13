@@ -175,3 +175,23 @@ func TestFilesCancelAndDropAreNotFailures(t *testing.T) {
 		t.Errorf("a real failure's outcome: %+v", o)
 	}
 }
+
+// files --shell logs how its production question went, not "named on the
+// command line": the person was asked.
+func TestFilesShellLogsTheQuestion(t *testing.T) {
+	dir := cliSandbox(t)
+	fakeHostileSSH(t)
+	// An sftp that ends at once, exit 0 (a non-zero one ends the process).
+	bin := t.TempDir()
+	if err := os.WriteFile(filepath.Join(bin, "sftp"), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	saveHosts(t, config.Host{Name: "web1", Address: "192.0.2.60", Env: config.EnvProduction})
+	asTerminal(t, true)
+	withStdin(t, "y\n", func() { stdout(t, func() { _ = runRoot(t, "files", "web1", "--shell") }) })
+	b, _ := os.ReadFile(filepath.Join(dir, "activity", "events.jsonl"))
+	if !strings.Contains(string(b), "(production, asked)") || strings.Contains(string(b), "named on the command line") {
+		t.Errorf("log:\n%s", b)
+	}
+}
