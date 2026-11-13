@@ -35,9 +35,9 @@ shape is the one below.
 | `device`, `seq` | string, number | Together, unique everywhere. `seq` goes up by one in a device's log. |
 | `time` | RFC 3339, UTC | When it was logged. |
 | `user` | string | The local account and machine. |
-| `action` | string | `connect`, `exec`, `cp`, `sync`, `sftp`, `logs`, `tunnel`, `outcome`, `log-repair` and others. Show one you don't know. |
+| `action` | string | `connect`, `exec`, `cp`, `sync`, `sftp`, `logs`, `tunnel`, `tunnel-enable`, `tunnel-disable`, `edit`, `rename`, `rm`, `outcome`, `log-repair` and others. Show one you don't know. |
 | `host`, `target` | string | The saved name, and the `user@address` it resolved to. |
-| `detail` | string, optional | The program and argument count, or paths. No command text unless `--log-args` was used, and that's redacted. Cut at 4096 characters. |
+| `detail` | string, optional | The program and argument count, or paths. No command text unless `--log-args` was used, and that's redacted. On production, how it went ahead comes first: `(production, asked)`, `(production, picker asked)`, `(production, --yes)` or `(production, no prompt: not a terminal)`. Cut at 4096 characters. |
 | `prev_hash`, `hash` | string | The chain every version checks. |
 | `ref_seq` | number, optional | On an `outcome`: the `seq` it reports on. |
 | `exit_code` | number, optional | On an `outcome`. 255 can be ssh's own failure. **Missing isn't 0**: it timed out, was killed, or failed in a way with no code. |
@@ -49,7 +49,7 @@ shape is the one below.
 | `prev_ext`, `ext_hash` | string, optional | The chain over the newer fields. |
 
 A start with no `outcome` means nobody can say how it ended: it's still running, or it was killed
-or the machine stopped. `dev`, `tunnel` and `files` sessions never have one. Don't show that as a
+or the machine stopped. A tunnel held by `tunnel up` never has one. Don't show that as a
 success or a failure.
 
 Hashes are as stored, but strings have been cleaned, so a line with anything to clean won't match

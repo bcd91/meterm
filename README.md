@@ -46,7 +46,7 @@ meterm add db1  --address 10.0.1.20 --group prod --tags db --port 2222
 meterm edit web1 --env production
 
 # browse and connect
-meterm                 # interactive picker: type to fuzzy-filter, enter to connect
+meterm                 # interactive picker: / to filter, enter to connect
 meterm connect web1    # or connect directly by name
 ```
 
@@ -57,44 +57,95 @@ override what's different per host.
 
 ## Interactive picker
 
-Running `meterm` with no arguments opens a searchable list of every saved
-host, sorted by most-recently-connected, framed in a bordered box with a
-legend underneath it. Each row shows a live status dot (● green = port
-open, ● red = unreachable, ○ = still checking, ◌ = behind a `proxy_jump`
-so a direct check would be meaningless — not dialed) plus a ⚷ once
-`copy-id` has installed a key on that host. After the name, `⇄2` means two
-other routes, `⚑prod` a production host, `⇶1` one saved tunnel (red when it
-reaches production), `⧉ACME`
-the team it's shared with (type `acme` to filter to it), `↑` a
-team change not pushed yet and `✗` a team conflict:
+Running `meterm` with no arguments opens a table of every saved host, one
+line each, filling the terminal:
 
-| Key     | Action                       |
-|---------|------------------------------|
-| type    | fuzzy-filter the list        |
-| enter   | connect (asks which account when the host has `users`) |
-| `a`     | add a new host                |
-| `e`     | edit the selected host        |
-| `f`     | two-pane file manager on the selected host |
-| `S`     | CPU/memory/disk/network snapshot of the selected host |
-| `i`     | install your public key on the selected host (copy-id) |
-| `K`     | generate a new key and set it as the selected host's identity |
-| `d`     | delete the selected host (asks to confirm) |
-| `r`     | refresh (reload hosts + re-check status) |
-| `m`     | connect inside tmux (`connect --tmux`): resume a session or start one |
-| `t`     | open one of the host's tunnels (a picker when it has several; production ones are flagged) |
-| `space` | mark hosts, then `x` |
-| `x`     | exec on the marked hosts (or the selected one): opens the palette with `exec <hosts> -- ` |
-| `A`     | audit the selected host |
-| `L`     | list the host's `/var/log`, then a palette ready for the file to tail |
-| `R`     | check which route to the host answers right now |
-| `w`     | who can log in: the host's authorized keys (`keys list`) |
-| `T`     | team status |
-| `:`     | command palette — see below   |
-| `esc`   | drop the marks (when any), otherwise quit |
-| `q`     | quit                          |
+```
+╭─ meterm dev · 48 hosts ─────────────────────────────────── sort: recent (s) ─╮
+│     NAME                  ENV       ADDRESS              GROUP   TAGS        │
+│ › ● web1                  ⚑prod     deploy@192.0.2.1 ⚷   live    #web #nginx │
+│   ✕ db-primary                      deploy@192.0.2.5 ⇶1  lab                 │
+│   ● web2                  ⚑staging  root@192.0.2.2       stage               │
+│ 2m ago  ·  Primary box for web1; ask ops before reboot                       │
+╰─────────────────────────────────────────────────────────────────────── 1/48 ─╯
+ enter connect  / filter  space mark  x exec  f files  s sort  ? help  q quit
+```
 
-`?` shows every key. The newer ones are capitals where the lowercase letter
-already moves the list (`l`, `k`, `u`, ...).
+The first mark is the live status, checked the way `connect` goes: each
+route's first hop, which for a host behind a `proxy_jump` is the jump host,
+wanting an SSH greeting. `●` up, `✕` down (behind a jump host: the jump host
+didn't answer), `?` still checking or unsure (the port took the connection
+but no SSH greeting came within 2s: a multiplexer such as sslh that waits for
+the client, or a slow server), `◌` not checked (a host meterm won't
+connect to as it stands). The line under the table says which way and when:
+"up via vpn", "via bastion: down: connection refused, 30s ago". Past the
+first hop nothing can be checked without logging in. After the address: `⚷` a key installed by
+`copy-id`, `⇄2` two other routes, `⇶1` a saved tunnel (red when it reaches
+production), `⧉` shared with a team, `↑` a team change not pushed yet and
+`‼` a team conflict. The columns that don't fit a narrow terminal are left
+out, lowest priority first (last connected, tags, group, then the
+address); the line under the table shows the selected host's notes, jump
+hosts, logins and team, plus whatever its row had no room for. Under
+40×10 the picker says the terminal is too small. `?` shows every key and
+the marks.
+
+`/` filters: each of name, group, tags, env, notes, user and team is
+matched fuzzily on its own, and the address only as a plain substring, so
+`/web1` finds web1 but not every `192.0.2.1x`, and `/192.0.2.1` still finds
+the address. `s` cycles the order: most recently connected (the default),
+name, group, env.
+
+### Keys
+
+The picker and the file manager (`meterm files`) share one key map: where
+both screens have the idea, the key is the same. Some keys moved for that
+since v0.20.0; [CHANGELOG.md](CHANGELOG.md) lists them.
+
+| Key | Picker (`meterm`) | File manager (`meterm files`) |
+|---|---|---|
+| `?` | every key (keys that changed first), the marks, the last message in full | every key, the last operation in full |
+| `q`, `ctrl+c` | quit | quit |
+| `/` | filter the hosts | find by name (`n` next match) |
+| `esc` | clear the filter, then the marks; never quits | dismiss a message, then clear the selection; cancel a running copy or delete |
+| `enter` | connect (asks which account when the host has `users`) | open a directory |
+| `j` `k` / `↑` `↓` | move | move |
+| `g` `G` / `home` `end` | top, bottom | top, bottom |
+| `pgup` `pgdn` | a page | a page |
+| `ctrl+u` `ctrl+d` | half a page | half a page |
+| `space` | mark (for `x`) | select |
+| `r` | refresh: re-read the hosts, check them all again | reload both sides (also `ctrl+r`) |
+| `R` | rename the host (opens `: rename <host> `) | rename (also `F6`) |
+| `d` | delete the host (asks first) | delete (asks first; also `F8`) |
+| `a` | add a host | – |
+| `*` | – | select all / none |
+| `m` | – | new directory (also `F7`) |
+| `h` `l` / `←` `→` | – | up a directory, open one |
+| `tab` | – | switch side |
+| `c`, `y` | – | copy to the other side (also `F5`) |
+| `.`, `~` | – | hidden files, home |
+| `s` | sort: recent, name, group, env | – |
+| `e` | edit the host | – |
+| `f` | file manager on the host | – |
+| `M` | connect inside tmux (`connect --tmux`): resume a session or start one | – |
+| `t` | open one of the host's tunnels (a picker when it has several; production ones are flagged) | – |
+| `x` | exec on the marked hosts (or the selected one): opens the palette with `exec <hosts> -- ` | – |
+| `S` | CPU/memory/disk/network snapshot | – |
+| `i` | install your public key (copy-id) | – |
+| `K` | generate a key and make it the host's identity | – |
+| `A` | audit | – |
+| `L` | list the host's `/var/log`, then a palette ready for the file to tail | – |
+| `C` | check which route to the host answers right now | – |
+| `w` | who can log in: the host's authorized keys (`keys list`) | – |
+| `T` | team status | – |
+| `:` | command palette, below | – |
+
+Anything that would run on a production host asks first, and so does a
+delete. Only `y` answers yes (`enter` cancels, like any other key), and only
+once the question has been on screen for 150ms: a key typed before it could
+be read, such as a double `enter`, is ignored and the question stays. A key pressed
+straight after `esc` can reach meterm in the same read and look like
+`alt`+key; neither screen binds `alt`, so it's taken as `esc` and then the
+key.
 
 ### Command palette
 
@@ -119,9 +170,13 @@ keep their CLI meaning, every host, and nothing destructive is ever aimed at
 the selection for you.
 
 It hands the command the real terminal (so wizards, ssh/sftp sessions, and
-exec's live output all work exactly as they would standalone), pauses for a
-keypress when it's done, then returns you to the list — which reloads in
-case what you ran changed the inventory.
+exec's live output all work exactly as they would standalone), then returns
+you to the list, which reloads in case what you ran changed the inventory.
+A session or wizard (`connect`, `dev`, `files`, `add`, `edit`) that ends
+cleanly comes straight back; one that fails waits for enter and says its
+exit status. Commands whose output you came for (`audit`, `logs`,
+`route check`, `exec`, ...) wait for enter either way, so the list doesn't
+redraw over what they printed.
 
 ## Commands
 
@@ -151,7 +206,9 @@ meterm import ansible <file>    an Ansible inventory, INI or YAML (vars and grou
 meterm export [--write-include] render meterm's hosts as a plain ssh_config
 meterm export --format ansible [-o file]   ...or as an Ansible YAML inventory (groups from groups and tags)
                                  fragment, so scp/rsync/git/VS Code Remote-SSH
-                                 can use the same names
+                                 can use the same names (a host whose name or
+                                 address ssh_config would split, or read as a
+                                 pattern like *, is left out and named)
 
 meterm cp <src> <dst> [-r]      upload/download a file or dir over scp
 meterm cp --sync <src> <dst> [-- rsync-flags]   same, but incremental/resumable via rsync
@@ -162,7 +219,7 @@ meterm relay init|enroll|invite|accept|status|remove   reach a machine behind NA
 meterm route add|list|rm|check  other ways to reach a host (public forward, LAN, another jump), used when its own address doesn't answer
 
 meterm history                  show recently connected hosts, most recent first
-meterm activity [--host H] [--verify] [--format text|json]   what meterm was used to do: a record of use, with a hash chain
+meterm activity [--host H] [--full] [--verify] [--format text|json]   what meterm was used to do: a record of use, with a hash chain
 meterm facts [--format json]    history, routes and what's known of each server (local, read-only)
 meterm auth-methods [host...] [--tag t] [--group g] [--format text|json]   which login methods a host accepts, without logging in
 meterm logins [host...] [--tag t] [--group g] [--format text|json]   who logged in, by the host's wtmp, beside meterm's log; read-only, not logged
@@ -254,30 +311,39 @@ meterm files WEB                         # starts in your home on WEB, and the c
 meterm files WEB /var/www --local ~/site
 ```
 
-| Key | Does |
-|---|---|
-| `tab` | switch side |
-| `h j k l` / arrows, `enter`, `backspace` | move, open a directory, go up |
-| `/` (then `n`) | find by name as you type (next match) |
-| `space`, `a` | select / unselect, select all / none |
-| `c` / `F5` | copy the selection (or the file under the cursor) to the other side |
-| `d` / `F8` | delete, recursively, after a `y` |
-| `r` / `F6`, `m` / `F7` | rename, new directory |
-| `.`, `~`, `R`, `q` | hidden files, home, reload, quit |
-| `esc` | stop a running copy (see below); `esc` again stops at once |
+The keys are in the table under [Keys](#keys), next to the picker's: `tab`
+switches side, `space` selects (`*` all), `c` copies the selection (or the
+file under the cursor) to the other side, `d` deletes after a `y`, `R`
+renames, `m` makes a directory, `r` reloads, `?` shows the rest.
 
 - **Copying over existing files asks first:** overwrite them, or skip them.
+- **Overwriting is atomic:** the copy goes to a temporary file next to the
+  target and is renamed over it only when complete, so a cancelled or failed
+  copy leaves the target as it was.
+- **What an overwrite keeps:** the replaced file's permission bits, and its
+  owner and group where they can be given (as root, or a group you're in).
+  It's a new file (a new inode), so it does **not** keep ACLs or extended
+  attributes, and other hard links to the old file keep the old content.
+  When the owner or group can't be kept, or the file has other hard links,
+  you're asked once per copy: `i` writes in place (the same file, so owner,
+  group, hard links and ACLs stay; not atomic, and as for any write, the
+  kernel may clear setuid bits and file capabilities), `r` replaces anyway, `s` skips.
+  Hard links are only seen on this machine: SFTP doesn't report link counts,
+  so on a host a hard-linked file is replaced, and its links split, without
+  asking. If the host won't set permissions and the new file would be more
+  open than the old one (a `0600` file replaced by a `0644` one), the old
+  file is left as it was and the copy says so.
+- **Read-only directories:** where no temporary file can be made next to
+  the target, you're asked before it's written in place.
 - **Progress:** a running copy shows a progress bar and its speed.
-- **Overwriting:** a file is overwritten in place, as it always was (no
-  temp file), and meterm never removes an existing file it is
-  overwriting. `esc` during an overwrite lets that file finish, then
-  stops; `esc` again stops at once and leaves it partly written. A dropped
-  connection or another failure can also leave it partly written. Either
-  way meterm says "`<side>:<path>` may be partly written", on screen and in
-  the activity log, which also lists the files copied before the stop.
-- **Cancelling a new file:** `esc` stops at once and removes the
-  half-written new file, which this copy created, and says so; if it
-  can't be removed (the connection dropped), it says that instead.
+- **Stopping:** `esc` stops a copy at once: the file being written goes to
+  a temporary name, so the target is left as it was and nothing half-written
+  stays behind. meterm never removes an existing file it is overwriting.
+  A file you agreed to have written in place (above) is the exception: the
+  first `esc` lets it finish, then stops; `esc` again stops at once and
+  leaves it partly written, and meterm says "may be partly written", on
+  screen and in the activity log. If the host has stopped answering, `esc`
+  once more drops the connection and quits.
 - **Permissions:** permission bits are kept, so scripts stay executable.
 - **Symlinks:** a symlink to a file is copied as the file; a symlink to a
   directory is skipped, to avoid loops.
@@ -300,6 +366,25 @@ meterm exec web1 web2 -- df -h
 meterm exec --all -j 20 -- uptime   # cap concurrency at 20
 meterm exec --all --timeout 30s --format json -- uptime   # for scripts and CI
 ```
+
+Production hosts that `--all`, `--tag` or `--group` sweep in are listed and asked
+about first (only `y` goes); `--yes` doesn't ask. With stdin not a terminal (a
+script, CI) it doesn't wait: it warns on stderr and the activity log says
+"production, no prompt: not a terminal". The same goes for `cp --sync` with
+`--delete` on a production host. Each host gets two lines in the activity log: one
+when it starts there, one with how it ended (exit code and how long). The log
+note says how it went ahead: "production, asked" (you said `y` here),
+"production, picker asked" (you said `y` in the picker), "production, --yes",
+or "production, no prompt: not a terminal".
+
+A command the picker starts after its own production question doesn't ask
+again: the picker hands it a one-use token, a random value in a 0600 file in
+the picker's private temp directory, which the command checks and deletes.
+`METERM_FROM_TUI=1` on its own skips nothing, and a token that's missing, used
+or wrong means the command asks (or, with no terminal, says nobody was asked).
+On Windows the file's owner and mode aren't checked. This keeps a script or a
+shell started from the picker from passing for a person's answer by accident;
+it isn't a lock, and any process running as you can forge it.
 
 On a terminal, escape sequences other than colours are dropped from what hosts send,
 in `exec`, `logs` and `stats` alike, so a line of output can't set your clipboard or
@@ -410,8 +495,10 @@ stopped, and `systemctl --user status` shows why. Anything else is retried: a ho
 can't be parsed or has no hosts in it, anything ssh said (a server can say what it likes
 before login), and a SIGTERM from outside. Being stopped with `systemctl --user stop` isn't
 restarted, though it shows as failed. The tunnel's start
-is one entry in the activity log, however long that takes. A tunnel on a production host,
-or whose name or note mentions production, warns you when enabled.
+is one entry in the activity log, however long that takes, and `enable` and `disable`
+each log a start and how it ended. A tunnel on a production host,
+or whose name or note mentions production, asks before it's enabled (only `y`;
+`--yes` skips it; with stdin not a terminal it warns and goes on).
 
 **On macOS** the job is `~/Library/LaunchAgents/com.github.bcd91.meterm.tunnel.<name>-<hash>.plist`,
 loaded with `launchctl bootstrap gui/<uid>`, and its output goes to
@@ -953,16 +1040,27 @@ redacted, for when you need the record to say exactly what ran.
 ```sh
 meterm activity                     # most recent 50
 meterm activity --host WEB -n 0      # everything on one host
+meterm activity --full              # each detail whole, wrapped (piped output is never cut)
 meterm activity --verify            # check the chain, and any copy
 ```
 
-**How it ended.** `connect`, `exec`, `cp`, `sync`, `sftp` and `logs` write a second event when
-they end, `outcome`, with `ref_seq` pointing at the first, `exit_code` and `duration_ms`. The
-first one is written before the host is touched and is never changed. So a machine losing power,
-or a kill, leaves a start with no outcome, which means nobody can say how it ended, and a
-long `connect` is in the log from its first moment. `exec` writes an outcome per host, as each
-finishes. There's no `exit_code` for a timeout or something killed: no exit code isn't a
-success. `dev`, tunnels and `files` sessions have no outcome.
+On a terminal a detail too long for its line loses its middle but keeps how it
+starts (an outcome written first, such as `failed:`, up to the first `:` or `;`)
+and its end, and a production note is shortened to `⚑asked`, `⚑picker`, `⚑--yes`
+or `⚑no prompt`. When the columns before it leave the detail under 24 cells (a
+60-column terminal), it goes on its own line under its row. Under 120 columns,
+ACTOR and EXIT/TOOK are left out when no row shown has anything in them.
+
+**How it ended.** `connect`, `exec`, `cp`, `sync`, `sftp`, `logs`, `dev`, a `files` session,
+and `tunnel enable` and `disable` write a second event when they end, `outcome`, with `ref_seq`
+pointing at the first, `exit_code` and `duration_ms`. The first one is written before the host
+is touched and is never changed. So a machine losing power, or a kill, leaves a start with no
+outcome, which means nobody can say how it ended, and a long `connect` is in the log from its
+first moment. `exec` writes an outcome per host, as each finishes. There's no `exit_code` for a
+timeout or something killed: no exit code isn't a success. Tunnels held by `tunnel up` have no
+outcome. A start on production carries how it went ahead first in its detail:
+`(production, asked)`, `(production, picker asked)`, `(production, --yes)` or
+`(production, no prompt: not a terminal)`.
 
 **Who.** Each event has `actor_type`, and `attribution_source: declared`, because it's only ever
 what the environment claims. A process with `CLAUDECODE=1` or an `AI_AGENT` marker reads as
@@ -981,7 +1079,8 @@ a gap, `ext_gaps`, and nothing is vouched for across one.
 
 A line can't be removed later without breaking the chain, and shared hosts'
 lines go to the team, so what looks like a credential is masked as
-`[REDACTED]` before it's written: `-pSECRET` after mysql and sshpass,
+`[REDACTED]` before it's written: `-pSECRET` after mysql and sshpass, `-k`
+and `-K` after openssl,
 `--password x`, `TOKEN=x`, `Authorization:` and `Cookie:` headers, passwords and
 tokens in URLs, private key blocks, and well-known token formats. It's pattern
 matching, so it leans towards masking too much and still can't catch everything:
