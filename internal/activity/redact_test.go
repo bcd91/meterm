@@ -202,3 +202,22 @@ func TestRedactOpenssl(t *testing.T) {
 		}
 	}
 }
+
+// vault login takes its token as a bare word, after any flags.
+func TestRedactVaultLogin(t *testing.T) {
+	for in, want := range map[string]string{
+		"vault login s.AbCdEf1234567890":                             "vault login [REDACTED]",
+		"vault login -no-print hvs.EXAMPLE_not_a_real_token":         "vault login -no-print [REDACTED]",
+		"sudo vault login -address=https://vault.example.com tok123": "sudo vault login -address=https://vault.example.com [REDACTED]",
+		"vault login -method=token token=s.abc123def":                "vault login -method=token token=[REDACTED]",
+		"vault login -method=userpass username=bob password=hunter2": "vault login -method=userpass username=bob password=[REDACTED]",
+		"vault login -method=oidc":                                   "vault login -method=oidc",
+		"vault login -":                                              "vault login -",
+		"echo hvs.EXAMPLE_not_a_real_token":                          "echo [REDACTED]",
+		"vault status":                                               "vault status",
+	} {
+		if got := Redact(in); got != want {
+			t.Errorf("Redact(%q) = %q, want %q", in, got, want)
+		}
+	}
+}

@@ -10,8 +10,8 @@ func TestCommandDetail(t *testing.T) {
 	}{
 		{[]string{"mysql", "-pHUNTER2", "-e", "select 1"}, false, "mysql (+3 args)"},
 		{[]string{"uptime"}, false, "uptime"},
-		{[]string{"df -h | grep /srv"}, false, "df (+4 args)"},
-		{[]string{"MYSQL_PWD=HUNTER2 mysql -e 'select 1'"}, false, "mysql (+3 args)"},
+		{[]string{"df -h | grep /srv"}, false, "df (shell line)"},
+		{[]string{"MYSQL_PWD=HUNTER2 mysql -e 'select 1'"}, false, "mysql (shell line)"},
 		{[]string{"TOKEN=HUNTER2"}, false, ""},
 		{[]string{"TOKEN=HUNTER2", "curl", "x"}, false, "curl (+1 args)"},
 		{[]string{"mysql", "-pHUNTER2"}, true, "mysql -pHUNTER2"}, // Record redacts this

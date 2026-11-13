@@ -1069,7 +1069,8 @@ resolved to, and the program or paths involved. `logs` is in there too. `meterm 
 and `meterm logins` aren't: see [Claude Code sessions on your hosts](#claude-code-sessions-on-your-hosts).
 
 The log can't forget, and it goes to the team for shared hosts, so a command's
-arguments stay out of it by default: `exec` records `mysql (+3 args)`, and
+arguments stay out of it by default: `exec` records `mysql (+3 args)` for
+several arguments and `df (shell line)` for one command line, and
 `connect -- -t cmd` records `(+2 args)`. `--log-args` on either puts the arguments in,
 redacted, for when you need the record to say exactly what ran.
 

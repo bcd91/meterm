@@ -119,8 +119,11 @@ func commandDetail(command []string, logArgs bool) string {
 	if logArgs {
 		return strings.Join(command, " ")
 	}
+	// One argument is a line for the host's shell: its program is the first
+	// word, and the rest is one argument however many words it has.
+	line := len(command) == 1
 	words := command
-	if len(words) == 1 {
+	if line {
 		words = strings.Fields(words[0])
 	}
 	for len(words) > 0 && envWordRE.MatchString(words[0]) {
@@ -133,7 +136,10 @@ func commandDetail(command []string, logArgs bool) string {
 	if r := []rune(prog); len(r) > 64 {
 		prog = string(r[:64]) + "…"
 	}
-	if n := len(words) - 1; n > 0 {
+	switch n := len(words) - 1; {
+	case line && n > 0:
+		return prog + " (shell line)"
+	case !line && n > 0:
 		return fmt.Sprintf("%s (+%d args)", prog, n)
 	}
 	return prog
@@ -663,7 +669,8 @@ func cutMiddle(s string, w int) string {
 		case room < 4:
 			return cellwidth.Fit(s, w)
 		case room < 8:
-			return lead + "…" + strings.TrimPrefix(cellwidth.TruncLeft(rest, room-1), "…")
+			tail := strings.TrimPrefix(cellwidth.TruncLeft(rest, room-1), "…")
+			return lead + "…" + rest[wholeMarkers(rest, len(rest)-len(tail), false):]
 		default:
 			return lead + cutEnds(rest, room)
 		}
@@ -682,6 +689,7 @@ func cutEnds(s string, w int) string {
 	if tail == "" {
 		tail = strings.TrimPrefix(cellwidth.TruncLeft(s, w/2), "…")
 	}
+	tail = s[wholeMarkers(s, len(s)-len(tail), false):]
 	head := cellwidth.Fit(s[:len(s)-len(tail)], w-cellwidth.Width(tail))
 	if !strings.HasSuffix(head, "…") {
 		head += "…"
@@ -689,7 +697,30 @@ func cutEnds(s string, w int) string {
 			head = cellwidth.Fit(strings.TrimSuffix(head, "…"), cellwidth.Width(head)-1)
 		}
 	}
-	return head + tail
+	kept := strings.TrimSuffix(head, "…")
+	return s[:wholeMarkers(s, len(kept), true)] + "…" + tail
+}
+
+// wholeMarkers moves a cut at byte i of s out of any [REDACTED] it falls
+// in: back to its start when the text before the cut is kept (left), on
+// past its end when the text after it is. Half a marker reads as a value
+// cut short, or as one that was never masked.
+func wholeMarkers(s string, i int, left bool) int {
+	const marker = "[REDACTED]"
+	for at := 0; ; {
+		j := strings.Index(s[at:], marker)
+		if j < 0 {
+			return i
+		}
+		a, b := at+j, at+j+len(marker)
+		if a < i && i < b {
+			if left {
+				return a
+			}
+			return b
+		}
+		at = b
+	}
 }
 
 // terminalWidth is f's width in columns when it's a terminal, 0 when it
