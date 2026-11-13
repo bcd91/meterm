@@ -233,9 +233,7 @@ func TestAuthProbeArgsAsSSHReadsThem(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("refused on Windows")
 	}
-	if _, err := exec.LookPath("ssh"); err != nil {
-		t.Skip("no ssh")
-	}
+	realSSHForG(t)
 	sshConfig, remove, err := writeAgentSSHConfig()
 	if err != nil {
 		t.Fatal(err)

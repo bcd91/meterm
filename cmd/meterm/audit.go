@@ -70,7 +70,7 @@ func newAuditCmd() *cobra.Command {
 			if format == "json" {
 				return audit.WriteJSON(os.Stdout, rep)
 			}
-			fmt.Print(audit.RenderText(rep))
+			fmt.Print(lblLines(audit.RenderText(rep)))
 			return nil
 		},
 	}

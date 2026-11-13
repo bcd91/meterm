@@ -105,9 +105,13 @@ func newGroupListCmd() *cobra.Command {
 				if g.Port != 0 {
 					port = strconv.Itoa(g.Port)
 				}
-				line := fmt.Sprintf("%s\t%s\t%s\t%s\t%s", name, g.User, port, g.IdentityFile, g.ProxyJump)
+				line := fmt.Sprintf("%s\t%s\t%s\t%s\t%s", exactName(name), lbl(g.User), port, lbl(g.IdentityFile), lbl(g.ProxyJump))
 				if showEnv {
-					line += "\t" + cfg.Env(config.Host{Group: name})
+					env := cfg.Env(config.Host{Group: name})
+					if raw := cfg.EnvUnrecognised(config.Host{Group: name}); raw != "" {
+						env += " (" + lbl(raw) + "?)" // a typo: taken as production, as list says
+					}
+					line += "\t" + env
 				}
 				fmt.Fprintln(w, line)
 			}

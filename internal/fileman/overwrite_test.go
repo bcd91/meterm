@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/pkg/sftp"
@@ -74,8 +75,9 @@ func (f *failAfterFirstRead) Read(p []byte) (int, error) {
 
 const big = 8 << 20
 
-// A copy over an existing file that's stopped at once (the second esc) or
-// fails leaves the file where it is, and says it may be partly written.
+// v0.23.1's promises, kept with atomic replace: an existing file being
+// overwritten is never removed. A copy stopped at once or failing part way
+// leaves it exactly as it was (the new bytes went to a temporary file).
 func TestStoppedOverwriteKeepsTheFile(t *testing.T) {
 	for name, dstFS := range destinations(t) {
 		for _, how := range []string{"stopped", "failed"} {
@@ -85,68 +87,33 @@ func TestStoppedOverwriteKeepsTheFile(t *testing.T) {
 				target := filepath.Join(dst, "big.bin")
 				write(t, target, "the original", 0o644)
 				now, stop := context.WithCancel(context.Background())
+				defer stop()
 				var from FS = cancellingFS{cancel: stop}
 				if how == "failed" {
 					from = failingFS{}
 				}
 				plan, _ := MakePlan(context.Background(), from, []string{filepath.Join(src, "big.bin")}, dstFS, dst)
-				_, err := runPlan(now, now, plan, true, nil)
-				var pw *PartlyWrittenError
-				if !errors.As(err, &pw) || pw.Path != target {
-					t.Errorf("err = %v, want a PartlyWrittenError for %s", err, target)
+				_, err := RunWith(now, plan, RunOptions{Overwrite: true}, nil)
+				if err == nil {
+					t.Fatal("no error")
 				}
 				if how == "stopped" && !errors.Is(err, context.Canceled) {
 					t.Errorf("err = %v, want it to be a cancel", err)
 				}
-				if _, err := os.Stat(target); err != nil {
-					t.Errorf("the file was removed: %v", err)
+				if got, err := os.ReadFile(target); err != nil || string(got) != "the original" {
+					t.Errorf("the file holds %d bytes (%v), want the original", len(got), err)
+				}
+				if names := dirNames(t, dst); len(names) != 1 {
+					t.Errorf("dst holds %v, want only big.bin", names)
 				}
 			})
 		}
 	}
 }
 
-// The first esc during an overwrite lets that file finish, then stops.
-func TestFirstStopFinishesTheFileBeingOverwritten(t *testing.T) {
-	for name, dstFS := range destinations(t) {
-		t.Run(name, func(t *testing.T) {
-			src, dst := t.TempDir(), t.TempDir()
-			content := string(bytes.Repeat([]byte("n"), big))
-			write(t, filepath.Join(src, "a.bin"), content, 0o644)
-			write(t, filepath.Join(src, "b.bin"), "b", 0o644)
-			write(t, filepath.Join(dst, "a.bin"), "the original", 0o644)
-			now, cancelNow := context.WithCancel(context.Background())
-			defer cancelNow()
-			after, stop := context.WithCancel(now)
-			plan, _ := MakePlan(context.Background(), cancellingFS{cancel: stop}, []string{filepath.Join(src, "a.bin"), filepath.Join(src, "b.bin")}, dstFS, dst)
-			var seen Progress
-			res, err := runPlan(now, after, plan, true, func(p Progress) {
-				if p.File != "" {
-					seen = p
-				}
-			})
-			if !errors.Is(err, context.Canceled) {
-				t.Errorf("err = %v, want a cancel", err)
-			}
-			if got, _ := os.ReadFile(filepath.Join(dst, "a.bin")); string(got) != content {
-				t.Errorf("a.bin holds %d bytes, want it finished (%d)", len(got), len(content))
-			}
-			if _, err := os.Stat(filepath.Join(dst, "b.bin")); err == nil {
-				t.Error("b.bin was copied after the stop")
-			}
-			if len(res.Files) != 1 || res.Files[0] != filepath.Join(dst, "a.bin") {
-				t.Errorf("Files = %q, want just a.bin", res.Files)
-			}
-			if res.Copied != 1 || !seen.Overwriting || seen.Dst != filepath.Join(dst, "a.bin") {
-				t.Errorf("res = %+v, progress = %+v", res, seen)
-			}
-		})
-	}
-}
-
-// A new file stops at once on the first esc, and the partial file (ours)
-// is removed and named.
-func TestFirstStopRemovesAPartialNewFile(t *testing.T) {
+// The first esc (After) stops a file going to a temporary name at once:
+// nothing new appears, and nothing is left behind.
+func TestFirstStopDiscardsANewFileAtOnce(t *testing.T) {
 	for name, dstFS := range destinations(t) {
 		t.Run(name, func(t *testing.T) {
 			src, dst := t.TempDir(), t.TempDir()
@@ -155,33 +122,76 @@ func TestFirstStopRemovesAPartialNewFile(t *testing.T) {
 			defer cancelNow()
 			after, stop := context.WithCancel(now)
 			plan, _ := MakePlan(context.Background(), cancellingFS{cancel: stop}, []string{filepath.Join(src, "new.bin")}, dstFS, dst)
-			res, err := runPlan(now, after, plan, true, nil)
+			_, err := RunWith(now, plan, RunOptions{Overwrite: true, After: after}, nil)
 			if !errors.Is(err, context.Canceled) {
 				t.Errorf("err = %v, want a cancel", err)
 			}
-			if _, err := os.Stat(filepath.Join(dst, "new.bin")); !os.IsNotExist(err) {
-				t.Errorf("partial new file left behind (%v)", err)
-			}
-			if res.Partial != filepath.Join(dst, "new.bin") || res.PartialErr != nil {
-				t.Errorf("Partial = %q, PartialErr = %v", res.Partial, res.PartialErr)
+			if names := dirNames(t, dst); len(names) != 0 {
+				t.Errorf("dst holds %v, want nothing", names)
 			}
 		})
 	}
 }
 
-// cantRemove has lost the connection by the time the partial file is to go.
-type cantRemove struct{ Local }
+// A file being written in place (agreed to, as its directory can't take a
+// temporary file) is let finish by the first esc, and the copy stops
+// before the next; the second esc (now) stops it at once, and it is left
+// in place, said to be partly written.
+func TestFirstStopFinishesAFileWrittenInPlace(t *testing.T) {
+	for name, mk := range transferSides() {
+		t.Run(name, func(t *testing.T) {
+			dstFS := mk(t)
+			ro := readOnlyDir(t, map[string]os.FileMode{"a.bin": 0o666, "b.bin": 0o666})
+			src := t.TempDir()
+			content := string(bytes.Repeat([]byte("n"), big))
+			write(t, filepath.Join(src, "a.bin"), content, 0o644)
+			write(t, filepath.Join(src, "b.bin"), "new b", 0o644)
+			now, cancelNow := context.WithCancel(context.Background())
+			defer cancelNow()
+			after, stop := context.WithCancel(now)
+			plan, err := MakePlan(context.Background(), cancellingFS{cancel: stop}, []string{filepath.Join(src, "a.bin"), filepath.Join(src, "b.bin")}, dstFS, ro)
+			if err != nil {
+				t.Fatal(err)
+			}
+			in := map[string]bool{filepath.Join(ro, "a.bin"): true, filepath.Join(ro, "b.bin"): true}
+			res, err := RunWith(now, plan, RunOptions{Overwrite: true, InPlace: in, After: after}, nil)
+			if !errors.Is(err, context.Canceled) {
+				t.Errorf("err = %v, want a cancel", err)
+			}
+			if got, _ := os.ReadFile(filepath.Join(ro, "a.bin")); string(got) != content {
+				t.Errorf("a.bin holds %d bytes, want it finished (%d)", len(got), len(content))
+			}
+			if got, _ := os.ReadFile(filepath.Join(ro, "b.bin")); string(got) != "old b.bin" {
+				t.Errorf("b.bin = %q, want it untouched after the stop", got)
+			}
+			if res.Copied != 1 || len(res.InPlace) != 1 {
+				t.Errorf("res = %+v, want a.bin alone, in place", res)
+			}
+		})
+	}
+}
 
-func (cantRemove) Remove(string) error { return errors.New("connection lost") }
-
-func TestAPartialNewFileThatCantBeRemovedIsNamed(t *testing.T) {
-	src, dst := t.TempDir(), t.TempDir()
-	write(t, filepath.Join(src, "new.bin"), string(bytes.Repeat([]byte("n"), big)), 0o644)
-	now, cancelNow := context.WithCancel(context.Background())
-	defer cancelNow()
-	plan, _ := MakePlan(context.Background(), cancellingFS{cancel: cancelNow}, []string{filepath.Join(src, "new.bin")}, cantRemove{}, dst)
-	res, _ := runPlan(now, now, plan, true, nil)
-	if res.Partial != filepath.Join(dst, "new.bin") || res.PartialErr == nil {
-		t.Errorf("Partial = %q, PartialErr = %v; want the file and why it's still there", res.Partial, res.PartialErr)
+func TestSecondStopLeavesAFileWrittenInPlacePartlyWritten(t *testing.T) {
+	for name, mk := range transferSides() {
+		t.Run(name, func(t *testing.T) {
+			dstFS := mk(t)
+			ro := readOnlyDir(t, map[string]os.FileMode{"a.bin": 0o666})
+			src := t.TempDir()
+			write(t, filepath.Join(src, "a.bin"), string(bytes.Repeat([]byte("n"), big)), 0o644)
+			now, cancelNow := context.WithCancel(context.Background())
+			defer cancelNow()
+			plan, err := MakePlan(context.Background(), cancellingFS{cancel: cancelNow}, []string{filepath.Join(src, "a.bin")}, dstFS, ro)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = RunWith(now, plan, RunOptions{Overwrite: true, InPlace: map[string]bool{filepath.Join(ro, "a.bin"): true}}, nil)
+			var pw *PartialWrite
+			if !errors.As(err, &pw) || !strings.Contains(err.Error(), "partly written") {
+				t.Errorf("err = %v, want it to say a.bin may be partly written", err)
+			}
+			if _, err := os.Stat(filepath.Join(ro, "a.bin")); err != nil {
+				t.Errorf("the file was removed: %v", err)
+			}
+		})
 	}
 }

@@ -13,6 +13,7 @@ import (
 	"unicode/utf8"
 
 	"meterm/internal/config"
+	"meterm/internal/termsafe"
 )
 
 const (
@@ -177,6 +178,7 @@ func unsafeRune(s string, name bool) (rune, bool) {
 		case c == utf8.RuneError, unicode.IsSpace(c), unicode.IsControl(c), // C0, DEL, C1
 			unicode.Is(unicode.Cf, c), // U+00AD, U+200B-U+200F, U+202A-U+202E, U+2060-U+2064, U+2066-U+2069, U+FEFF
 			c == '\u2028', c == '\u2029',
+			termsafe.Invisible(c),                                // and the rest that draws as nothing (Hangul fillers, CGJ...): a name would pass for another
 			strings.ContainsRune("\"'\\=", c), c == '#' && !name, // ssh accepts "Host web#2"
 			name && strings.ContainsRune("*?!,", c):
 			return c, true

@@ -3,7 +3,6 @@ package main
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -32,7 +31,7 @@ func newExecCmd() *cobra.Command {
 	var parallel int
 	var timeout time.Duration
 	var format string
-	var logArgs, raw bool
+	var logArgs, raw, yes bool
 	cmd := &cobra.Command{
 		Use:   "exec [host...] -- <command...>",
 		Short: "Run a command on several saved hosts in parallel",
@@ -53,6 +52,11 @@ func newExecCmd() *cobra.Command {
 			"  meterm exec web1 -- 'df -h | grep /srv'\n" +
 			"On a Windows server arguments are joined with spaces, whatever their number,\n" +
 			"so don't pass it text you don't trust.\n\n" +
+			"Hosts that --all, --tag or --group pick and that are production are listed\n" +
+			"and asked about first (y only); --yes doesn't ask. When stdin isn't a\n" +
+			"terminal it doesn't wait: it warns on stderr and the activity log says so.\n\n" +
+			"Each host gets two lines in the activity log: when it started there, and\n" +
+			"how it ended (exit code, how long).\n\n" +
 			"Exits nonzero when any host fails, so it can gate a CI step.",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			dash := cmd.ArgsLenAtDash()
@@ -78,14 +82,48 @@ func newExecCmd() *cobra.Command {
 			if format != "text" && format != "json" {
 				return fmt.Errorf("--format must be text or json")
 			}
+			// Production hosts picked by name were asked for; those --all, --tag
+			// or --group swept in may not have been meant.
+			named, _ := selectHosts(cfg, hostArgs, nil, nil, false)
+			swept := map[string]bool{}
+			for _, h := range productionOf(cfg, hosts) {
+				swept[h.User+"@"+h.Name] = true
+			}
+			for _, h := range named {
+				delete(swept, h.User+"@"+h.Name)
+			}
+			var ask []config.Host
+			for _, h := range hosts {
+				if swept[h.User+"@"+h.Name] {
+					ask = append(ask, h)
+				}
+			}
+			note, ok := productionGate(ask, "exec "+commandDetail(command, false), yes)
+			if !ok {
+				return nil
+			}
+			detail := commandDetail(command, logArgs)
+			noteFor := func(h config.Host) string {
+				if cfg.IsProduction(h) {
+					return note
+				}
+				return ""
+			}
+			// A start per host before it runs, so a crash or a kill still leaves
+			// evidence it started, and an outcome as each one ends.
 			runs := make([]*activityRun, len(hosts))
 			for i, h := range hosts {
-				runs[i] = beginActivity(cfg, h, "exec", commandDetail(command, logArgs))
+				runs[i] = beginActivity(cfg, h, "exec", noteDetail(noteFor(h), detail))
 			}
 			kickAutosync(false, true)
+			var logMu sync.Mutex
 			err = runExec(hosts, command, sshRunner(cfg), execOptions{parallel: parallel, timeout: timeout, format: format,
 				safeOut: !raw && isTerminal(os.Stdout), safeErr: !raw && isTerminal(os.Stderr),
-				done: func(i int, r execResult, timedOut bool) { runs[i].outcome(execOutcome(r, timedOut)) }})
+				done: func(i int, r execResult, timedOut bool) {
+					logMu.Lock()
+					defer logMu.Unlock()
+					runs[i].outcome(execOutcome(r, timedOut))
+				}})
 			kickAutosync(false, true)
 			return err
 		},
@@ -96,6 +134,7 @@ func newExecCmd() *cobra.Command {
 	cmd.Flags().IntVarP(&parallel, "parallel", "j", 10, "maximum concurrent connections")
 	cmd.Flags().DurationVar(&timeout, "timeout", 0, "give up on a host after this long, e.g. 30s (default: no limit)")
 	cmd.Flags().BoolVar(&raw, "raw", false, "show the hosts' output as it is, escape sequences included")
+	cmd.Flags().BoolVarP(&yes, "yes", "y", false, "don't ask before production hosts that --all, --tag or --group pick")
 	cmd.Flags().BoolVar(&logArgs, "log-args", false, "put the command's arguments in the activity log, redacted (default: just the program)")
 	cmd.Flags().StringVar(&format, "format", "text", "text (live output + summary) or json (captured output per host, for scripts and CI)")
 	return cmd
@@ -266,7 +305,7 @@ func runExec(hosts []config.Host, command []string, run execRunner, o execOption
 			if !jsonOut {
 				label := lipgloss.NewStyle().Bold(true).
 					Foreground(execLabelColors[i%len(execLabelColors)]).
-					Render(fmt.Sprintf("[%s]", h.Name))
+					Render(fmt.Sprintf("[%s]", exactName(h.Name)))
 				pw := &prefixWriter{mu: &stdoutMu, out: o.out, prefix: label}
 				pe := &prefixWriter{mu: &stdoutMu, out: os.Stderr, prefix: label}
 				outW, errW = pw, pe
@@ -311,9 +350,7 @@ func runExec(hosts []config.Host, command []string, run execRunner, o execOption
 		}
 	}
 	if jsonOut {
-		enc := json.NewEncoder(o.out)
-		enc.SetIndent("", "  ")
-		if err := enc.Encode(results); err != nil {
+		if err := encodeJSON(o.out, results); err != nil {
 			return err
 		}
 	} else {
@@ -340,7 +377,7 @@ func printExecSummary(w io.Writer, results []execResult, failed int) {
 		} else if r.failed {
 			note = "FAILED"
 		}
-		fmt.Fprintf(tw, "  %s\t%s\t%.1fs\t%s\n", r.Host, exit, r.Seconds, note)
+		fmt.Fprintf(tw, "  %s\t%s\t%.1fs\t%s\n", exactName(r.Host), exit, r.Seconds, lbl(note))
 	}
 	tw.Flush()
 }

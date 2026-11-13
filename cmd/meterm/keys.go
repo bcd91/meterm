@@ -3,7 +3,6 @@ package main
 import (
 	"bufio"
 	"context"
-	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -146,9 +145,7 @@ func newKeysListCmd() *cobra.Command {
 			}
 			res := scanKeys(cfg, hosts)
 			if format == "json" {
-				enc := json.NewEncoder(os.Stdout)
-				enc.SetIndent("", "  ")
-				return enc.Encode(res)
+				return encodeJSON(os.Stdout, res)
 			}
 			mine := localKeys()
 			tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
@@ -158,11 +155,11 @@ func newKeysListCmd() *cobra.Command {
 				fmt.Fprintln(tw, "HOST\tLOGIN AS\tTYPE\tFINGERPRINT\tCOMMENT\t")
 				for _, hk := range res {
 					if hk.Error != "" {
-						fmt.Fprintf(tw, "%s\t-\t-\t-\terror: %s\t\n", hk.Host, hk.Error)
+						fmt.Fprintf(tw, "%s\t-\t-\t-\terror: %s\t\n", lbl(hk.Host), lbl(hk.Error))
 						continue
 					}
 					for _, e := range hk.Entries {
-						fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t\n", hk.Host, e.Owner, shortType(e.Type), e.Fingerprint, keyLabel(e, mine))
+						fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t\n", lbl(hk.Host), lbl(e.Owner), lbl(shortType(e.Type)), lbl(e.Fingerprint), lbl(keyLabel(e, mine)))
 					}
 				}
 			}
@@ -174,7 +171,7 @@ func newKeysListCmd() *cobra.Command {
 				}
 			}
 			if len(noSudo) > 0 {
-				fmt.Printf("\nOnly the login user's keys were readable on %s (no passwordless sudo): root's and other users' keys aren't shown.\n", strings.Join(noSudo, ", "))
+				fmt.Printf("\nOnly the login user's keys were readable on %s (no passwordless sudo): root's and other users' keys aren't shown.\n", lbl(strings.Join(noSudo, ", ")))
 			}
 			return nil
 		},
@@ -251,7 +248,7 @@ func printKeysByKey(tw *tabwriter.Writer, res []authkeys.HostKeys, mine map[stri
 	})
 	fmt.Fprintln(tw, "KEY\tFINGERPRINT\tHOSTS\t")
 	for _, a := range list {
-		fmt.Fprintf(tw, "%s\t%s\t%d: %s\t\n", keyLabel(a.e, mine), a.e.Fingerprint, len(a.hosts), strings.Join(a.hosts, ", "))
+		fmt.Fprintf(tw, "%s\t%s\t%d: %s\t\n", lbl(keyLabel(a.e, mine)), lbl(a.e.Fingerprint), len(a.hosts), lbl(strings.Join(a.hosts, ", ")))
 	}
 }
 
@@ -336,7 +333,7 @@ func revokeKeys(cfg *config.Config, hosts []config.Host, m authkeys.Matcher, yes
 	n := 0
 	for _, f := range plan {
 		for _, e := range f.Entries {
-			fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t\n", f.Host, f.File, e.Fingerprint, e.Comment)
+			fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t\n", lbl(f.Host), lbl(f.File), lbl(e.Fingerprint), lbl(e.Comment))
 			n++
 		}
 	}
@@ -356,10 +353,10 @@ func revokeKeys(cfg *config.Config, hosts []config.Host, m authkeys.Matcher, yes
 	for _, r := range authkeys.Apply(context.Background(), plan, timeoutRunner(hostRunner(cfg), 30*time.Second), time.Now().Format("20060102-150405")) {
 		if r.Err != nil {
 			failed++
-			fmt.Printf("FAILED %s %s: %v\n", r.Host, r.File, r.Err)
+			fmt.Printf("FAILED %s %s: %s\n", lbl(r.Host), lbl(r.File), lbl(fmt.Sprint(r.Err)))
 			continue
 		}
-		fmt.Printf("revoked on %s (%s), backup %s\n", r.Host, r.File, r.Backup)
+		fmt.Printf("revoked on %s (%s), backup %s\n", lbl(r.Host), lbl(r.File), lbl(r.Backup))
 		if h, idx := cfg.Find(r.Host); idx >= 0 {
 			recordActivity(cfg, *h, "keys-revoke", fmt.Sprintf("%s: %d key(s)", r.File, len(r.Entries)))
 		}

@@ -180,3 +180,72 @@ func TestEditWizardDoesNotBringBackARemovedHost(t *testing.T) {
 		t.Error("the removed host came back")
 	}
 }
+
+// add and edit took --address=-oProxyCommand=… and --user=-o… and saved
+// them; only connect refused them. They're refused when given, naming the
+// flag, and nothing is saved.
+func TestAddAndEditRefuseOptionLookingValues(t *testing.T) {
+	cliSandbox(t)
+	saveHosts(t, config.Host{Name: "web1", Address: "192.0.2.1"})
+	for _, c := range []struct{ flag, value string }{
+		{"address", "-oProxyCommand=touch /tmp/x"},
+		{"address", "192.0.2.5 -oProxyCommand=x"},
+		{"user", "-oProxyCommand=x"},
+		{"proxy-jump", "-oProxyCommand=x"},
+		{"proxy-jump", "ok,-J"},
+		{"identity", "-oProxyCommand=x"},
+		{"identity", "-i"},
+	} {
+		for _, cmd := range []string{"add", "edit"} {
+			var err error
+			_ = stdout(t, func() {
+				_ = stderrOf(t, func() {
+					c2 := newAddCmd()
+					args := []string{"new1", "--address", "192.0.2.9", "--" + c.flag + "=" + c.value}
+					if cmd == "edit" {
+						c2 = newEditCmd()
+						args = []string{"web1", "--" + c.flag + "=" + c.value}
+					}
+					c2.SetArgs(args)
+					c2.SilenceUsage, c2.SilenceErrors = true, true
+					err = c2.Execute()
+				})
+			})
+			if err == nil || !strings.Contains(err.Error(), "--"+c.flag) {
+				t.Errorf("%s --%s=%q: err = %v", cmd, c.flag, c.value, err)
+			}
+		}
+	}
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Hosts) != 1 || cfg.Hosts[0].Address != "192.0.2.1" || cfg.Hosts[0].User != "" || cfg.Hosts[0].IdentityFile != "" || cfg.Hosts[0].ProxyJump != "" {
+		t.Errorf("saved: %+v", cfg.Hosts)
+	}
+	// Plain values still go in.
+	_ = stdout(t, func() {
+		c := newEditCmd()
+		c.SetArgs([]string{"web1", "--user", "deploy", "--identity", "~/.ssh/id_ed25519", "--proxy-jump", "bastion"})
+		if err := c.Execute(); err != nil {
+			t.Fatal(err)
+		}
+	})
+}
+
+// The wizard refuses an identity file that starts with '-' too.
+func TestWizardRefusesAnOptionLookingIdentity(t *testing.T) {
+	cliSandbox(t)
+	saveHosts(t, config.Host{Name: "web1", Address: "192.0.2.1"})
+	cfg, _ := config.Load(cfgPath)
+	h, _ := cfg.Find("web1")
+	var err error
+	_ = stdout(t, func() { err = addWizard(cfg, h, strings.NewReader("\n\n\n\n\n-oProxyCommand=x\n\n\n\n\n\n\n\n")) })
+	if err == nil || !strings.Contains(err.Error(), "identity file") {
+		t.Errorf("err = %v", err)
+	}
+	cfg, _ = config.Load(cfgPath)
+	if got, _ := cfg.Find("web1"); got.IdentityFile != "" {
+		t.Errorf("saved identity %q", got.IdentityFile)
+	}
+}

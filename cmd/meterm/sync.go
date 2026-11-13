@@ -18,7 +18,7 @@ func newSyncCmd() *cobra.Command {
 			if len(flags) > 0 && flags[0] == "--" {
 				flags = flags[1:]
 			}
-			return runCopy(args[0], args[1], false, true, flags)
+			return runCopy(args[0], args[1], false, true, flags, false)
 		},
 	}
 	return cmd

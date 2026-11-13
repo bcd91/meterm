@@ -55,7 +55,7 @@ func teamProposalsCmd(teamFlag *string) *cobra.Command {
 				if rv.Invalid != nil {
 					warn = "invalid"
 				}
-				fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n", p.Host.Name, what, oneLine(p.By, 40), p.At.Local().Format("2006-01-02 15:04"), warn)
+				fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n", lbl(p.Host.Name), what, oneLine(p.By, 40), p.At.Local().Format("2006-01-02 15:04"), warn)
 			}
 			if err := w.Flush(); err != nil {
 				return err
@@ -77,26 +77,26 @@ func teamFor(cmd *cobra.Command, flag string) (*teamCtx, team.Team, error) {
 
 func printReview(rv team.Review) {
 	p := rv.Proposal
-	fmt.Printf("Proposed by %s on %s:\n", p.By, p.At.Local().Format("2006-01-02 15:04"))
+	fmt.Printf("Proposed by %s on %s:\n", lbl(p.By), p.At.Local().Format("2006-01-02 15:04"))
 	switch {
 	case p.Remove:
-		fmt.Printf("  - remove %s (%s) from the team\n", p.Host.Name, p.Host.Describe())
+		fmt.Printf("  - remove %s (%s) from the team\n", lbl(p.Host.Name), lbl(p.Host.Describe()))
 	case rv.Current == nil:
-		fmt.Printf("  + add %s\n", p.Host.Name)
+		fmt.Printf("  + add %s\n", lbl(p.Host.Name))
 		for _, d := range team.Diff(team.SharedHost{}, p.Host) {
-			fmt.Printf("      %s\n", d)
+			fmt.Printf("      %s\n", lbl(d))
 		}
 	default:
-		fmt.Printf("  ~ update %s\n", p.Host.Name)
+		fmt.Printf("  ~ update %s\n", lbl(p.Host.Name))
 		for _, d := range rv.Diff {
-			fmt.Printf("      %s\n", d)
+			fmt.Printf("      %s\n", lbl(d))
 		}
 	}
 	for _, w := range rv.Warnings {
-		fmt.Printf("  ⚠ %s\n", w)
+		fmt.Printf("  ⚠ %s\n", lbl(w))
 	}
 	if rv.Invalid != nil {
-		fmt.Printf("  ✗ not allowed in a team: %v\n", rv.Invalid)
+		fmt.Printf("  ✗ not allowed in a team: %s\n", lbl(rv.Invalid.Error()))
 	}
 }
 
@@ -180,7 +180,7 @@ func teamRejectCmd(teamFlag *string) *cobra.Command {
 					if err := tc.be.DropProposal(cmd.Context(), t.ID, args[0]); err != nil {
 						return err
 					}
-					fmt.Printf("Rejected the proposal for %s (by %s). The team is unchanged.\n", args[0], p.By)
+					fmt.Printf("Rejected the proposal for %s (by %s). The team is unchanged.\n", args[0], lbl(p.By))
 					return nil
 				}
 			}

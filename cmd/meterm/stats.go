@@ -31,7 +31,7 @@ func newStatsCmd() *cobra.Command {
 				return fmt.Errorf("no such host: %s (use `meterm list` to see saved hosts)", args[0])
 			}
 			r := cfg.Resolve(*h)
-			fmt.Printf("Fetching stats from %s (%s)...\n\n", args[0], r.Address)
+			fmt.Printf("Fetching stats from %s (%s)...\n\n", lbl(args[0]), lbl(r.Address))
 			c := sshrun.StatsCommand(r)
 			if r.Err == nil && isWindowsServer(r) {
 				c = sshrun.WinStatsCommand(r)

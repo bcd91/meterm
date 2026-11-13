@@ -139,8 +139,8 @@ func writeStatus(w io.Writer, rep statusReport, format string) error {
 	t := tabwriter.NewWriter(&buf, 0, 2, 2, ' ', 0)
 	fmt.Fprintln(t, "HOST\tKIND\tNAME\tSTATE\tROUTE\tFOR\tDETAIL")
 	for _, r := range rep.Entries {
-		fmt.Fprintf(t, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n", termsafe.Text(r.Host), termsafe.Text(r.Kind), termsafe.Text(r.Name),
-			termsafe.Text(r.State), termsafe.Text(r.Route), time.Since(r.Since).Round(time.Second), termsafe.Text(r.Detail))
+		fmt.Fprintf(t, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n", lbl(r.Host), lbl(r.Kind), lbl(r.Name), lbl(r.State), lbl(r.Route),
+			time.Since(r.Since).Round(time.Second), lbl(r.Detail))
 	}
 	if err := t.Flush(); err != nil {
 		return err

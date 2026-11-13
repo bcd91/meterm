@@ -184,3 +184,110 @@ func TestRenderUnitHostile(t *testing.T) {
 		}
 	}
 }
+
+// enable on a production host keeps a tunnel open from every login: it asks
+// first on a terminal, y only, as tunnel up's picker question does.
+func TestTunnelEnableAsksOnProduction(t *testing.T) {
+	calls, _ := serviceEnv(t)
+	host := "version: 1\nhosts:\n- name: pay1\n  env: production\n  address: 192.0.2.1\n  forwards:\n" +
+		"  - {name: ui, type: L, local_port: 8080, remote_host: localhost, remote_port: 80}\n"
+	if err := os.WriteFile(os.Getenv("METERM_CONFIG"), []byte(host), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	asTerminal(t, true)
+	enable := func(stdin string, args ...string) string {
+		var o string
+		withStdin(t, stdin, func() {
+			o = stdout(t, func() {
+				_ = stderrOf(t, func() {
+					c := newTunnelEnableCmd()
+					c.SetArgs(args)
+					_ = c.Execute()
+				})
+			})
+		})
+		return o
+	}
+	if o := enable("n\n", "pay1/ui"); !strings.Contains(o, "PRODUCTION") || !strings.Contains(o, "Cancelled") || len(*calls) != 0 {
+		t.Errorf("answered n: %q, systemctl %q", o, *calls)
+	}
+	if enable("y\n", "pay1/ui"); len(*calls) != 2 {
+		t.Errorf("answered y: systemctl %q", *calls)
+	}
+	*calls = nil
+	if o := enable("", "pay1/ui", "--yes"); strings.Contains(o, "Go on?") || len(*calls) != 2 {
+		t.Errorf("--yes: %q, systemctl %q", o, *calls)
+	}
+}
+
+// enable and disable leave evidence: the tunnel, how it ended, and on
+// production how it went ahead.
+func TestTunnelEnableAndDisableAreLogged(t *testing.T) {
+	calls, _ := serviceEnv(t)
+	host := "version: 1\nhosts:\n- name: pay1\n  env: production\n  address: 192.0.2.1\n  forwards:\n" +
+		"  - {name: ui, type: L, local_port: 8080, remote_host: localhost, remote_port: 80}\n" +
+		"- name: box\n  address: 192.0.2.2\n  forwards:\n" +
+		"  - {name: web, type: L, local_port: 8081, remote_host: localhost, remote_port: 80}\n"
+	if err := os.WriteFile(os.Getenv("METERM_CONFIG"), []byte(host), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	run := func(c interface {
+		SetArgs([]string)
+		Execute() error
+	}, stdin string, args ...string) {
+		withStdin(t, stdin, func() {
+			_ = stdout(t, func() { _ = stderrOf(t, func() { c.SetArgs(args); _ = c.Execute() }) })
+		})
+	}
+	asTerminal(t, true)
+	run(newTunnelEnableCmd(), "n\n", "pay1/ui")
+	if ev := events(t); len(ev) != 0 {
+		t.Errorf("cancelled, yet logged: %q", ev)
+	}
+	run(newTunnelEnableCmd(), "y\n", "pay1/ui")
+	run(newTunnelEnableCmd(), "", "box/web")
+	asTerminal(t, false)
+	run(newTunnelEnableCmd(), "", "pay1/ui")
+	run(newTunnelDisableCmd(), "", "pay1/ui")
+	systemctlUser = func(args ...string) error {
+		*calls = append(*calls, strings.Join(args, " "))
+		if args[0] == "enable" {
+			return errors.New("no user manager")
+		}
+		return nil
+	}
+	run(newTunnelEnableCmd(), "", "pay1/ui", "--yes")
+	ev := events(t)
+	want := []string{
+		"tunnel-enable pay1: (production, asked) ui => exit 0",
+		"tunnel-enable box: web => exit 0",
+		"tunnel-enable pay1: (production, no prompt: not a terminal) ui => exit 0",
+		"tunnel-disable pay1: (production) ui => exit 0",
+		"tunnel-enable pay1: (production, --yes) ui => failed",
+	}
+	if strings.Join(ev, "\n") != strings.Join(want, "\n") {
+		t.Errorf("events:\n%s\nwant:\n%s", strings.Join(ev, "\n"), strings.Join(want, "\n"))
+	}
+}
+
+// A tunnel whose host is gone is still turned off, and logged by its name.
+func TestTunnelDisableLogsAHostThatsGone(t *testing.T) {
+	_, unitDir := serviceEnv(t)
+	unit := serviceUnitName("old/web")
+	if err := os.MkdirAll(unitDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(unitDir, unit), []byte("[Unit]\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	c := newTunnelDisableCmd()
+	c.SetArgs([]string{"old/web"})
+	_ = stdout(t, func() {
+		if err := c.Execute(); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if ev := events(t); strings.Join(ev, "\n") != "tunnel-disable old: (host not in the inventory) web => exit 0" {
+		t.Errorf("events: %q", ev)
+	}
+}

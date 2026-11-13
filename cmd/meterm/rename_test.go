@@ -28,3 +28,11 @@ func TestRenameJumpsRewritesChains(t *testing.T) {
 		t.Errorf("group proxy_jump not renamed")
 	}
 }
+
+// A route's jump path is rewritten too.
+func TestRenameJumpsRewritesRoutes(t *testing.T) {
+	cfg := &config.Config{Hosts: []config.Host{{Name: "web13", Routes: []config.Route{{Name: "r", ProxyJump: "bastion"}, {Name: "s"}}}}}
+	if n := renameJumps(cfg, "bastion", "jump1"); n != 1 || cfg.Hosts[0].Routes[0].ProxyJump != "jump1" || cfg.Hosts[0].Routes[1].ProxyJump != "" {
+		t.Errorf("changed %d, routes %+v", n, cfg.Hosts[0].Routes)
+	}
+}

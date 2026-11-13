@@ -12,9 +12,12 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 
+	"meterm/internal/activity"
+	"meterm/internal/config"
 	"meterm/internal/termsafe"
 )
 
@@ -54,7 +57,8 @@ func serviceForOS() (tunnelService, error) {
 }
 
 func newTunnelEnableCmd() *cobra.Command {
-	return &cobra.Command{
+	var yes bool
+	cmd := &cobra.Command{
 		Use:   "enable <host>/<tunnel>",
 		Short: "Keep a saved tunnel open in the background, from login on (Linux, macOS)",
 		Long: "Writes a job that runs `meterm tunnel up --keep`, and starts it: a systemd user\n" +
@@ -62,7 +66,9 @@ func newTunnelEnableCmd() *cobra.Command {
 			"and comes back at the next login; a locked key or a refused login is retried\n" +
 			"rather than given up on. See how it's doing with `meterm status`. Its output is\n" +
 			"in `journalctl --user -u <the unit this prints>` on Linux, and in\n" +
-			"~/Library/Logs/meterm/<the label this prints>.log on macOS.",
+			"~/Library/Logs/meterm/<the label this prints>.log on macOS.\n\n" +
+			"A tunnel to a production host, or whose note says it reaches production, asks\n" +
+			"first (y only; --yes doesn't). When stdin isn't a terminal it warns and goes on.",
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if err := checkServiceSupport(); err != nil {
@@ -88,8 +94,16 @@ func newTunnelEnableCmd() *cobra.Command {
 				return err
 			}
 			f := sets[0].forward[0]
+			note := ""
 			if cfg.IsProduction(sets[0].host) || f.MentionsProduction() {
-				fmt.Fprintf(os.Stderr, "⚠ %s reaches PRODUCTION, and will stay open: %s\n", spec, termsafe.Text(f.Note))
+				what := "tunnel enable " + lbl(spec) + " (open from every login on"
+				if f.Note != "" {
+					what += "; " + lbl(f.Note)
+				}
+				var ok bool
+				if note, ok = productionGate([]config.Host{sets[0].host}, what+")", yes); !ok {
+					return nil
+				}
 			}
 
 			exe, err := svc.binary()
@@ -106,7 +120,9 @@ func newTunnelEnableCmd() *cobra.Command {
 					return err
 				}
 			}
+			run := beginActivity(cfg, sets[0].host, "tunnel-enable", noteDetail(note, f.Name))
 			name, err := svc.enable(spec, exe, config)
+			run.end(err)
 			if err != nil {
 				return err
 			}
@@ -114,6 +130,8 @@ func newTunnelEnableCmd() *cobra.Command {
 			return nil
 		},
 	}
+	cmd.Flags().BoolVarP(&yes, "yes", "y", false, "don't ask before a tunnel to production")
+	return cmd
 }
 
 func newTunnelDisableCmd() *cobra.Command {
@@ -135,13 +153,51 @@ func newTunnelDisableCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if err := svc.disable(spec); err != nil {
+			run := beginDisable(spec)
+			err = svc.disable(spec)
+			run.end(err)
+			if err != nil {
 				return err
 			}
 			fmt.Printf("Disabled %s.\n", termsafe.Text(spec))
 			return nil
 		},
 	}
+}
+
+// beginDisable logs a disable's start. It works from the name alone, as
+// disable does: a host deleted since is logged by that name.
+func beginDisable(spec string) *activityRun {
+	hostName, tunnel, _ := strings.Cut(spec, "/")
+	cfg, cerr := loadConfig()
+	var h *config.Host
+	if cerr == nil {
+		if found, i := cfg.Find(hostName); i >= 0 {
+			h = found
+		}
+	}
+	note := ""
+	switch {
+	case h == nil:
+		note = "host not in the inventory"
+	case cfg.IsProduction(*h):
+		note = "production"
+	}
+	detail := noteDetail(note, tunnel)
+	if h != nil {
+		return beginActivity(cfg, *h, "tunnel-disable", detail)
+	}
+	sink := ""
+	if cfg != nil {
+		sink = cfg.Activity.Sink
+	}
+	e, err := activity.Record("tunnel-disable", hostName, "", detail)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "meterm: warning: activity log not updated: %s\n", termsafe.Text(err.Error()))
+		return &activityRun{sink: sink, began: time.Now()}
+	}
+	activity.SendToSink(sink)
+	return &activityRun{sink: sink, start: e, logged: true, began: time.Now()}
 }
 
 func checkServiceSupport() error {

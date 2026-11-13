@@ -49,7 +49,10 @@ func newKeygenCmd() *cobra.Command {
 				return err
 			}
 			err = cfg.Update(func(c *config.Config) error {
-				h, idx := c.Find(setFor)
+				h, idx, lerr := c.Lookup(setFor)
+				if lerr != nil {
+					return lerr
+				}
 				if idx < 0 {
 					return fmt.Errorf("no such host: %s (the key was still generated at %s)", setFor, path)
 				}

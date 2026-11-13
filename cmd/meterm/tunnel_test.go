@@ -95,11 +95,13 @@ func TestTunnelArgsOpenOnlyTheTunnel(t *testing.T) {
 
 // A team host's tunnel needs a note; a personal host's doesn't.
 func TestTunnelNotesOnTeamHosts(t *testing.T) {
-	dir := t.TempDir()
-	cfgPath = filepath.Join(dir, "hosts.yaml")
-	defer func() { cfgPath = "" }()
-	t.Setenv("METERM_ACTIVITY_DIR", dir)
-	t.Setenv("METERM_NO_AUTOSYNC", "1")
+	dir := cliSandbox(t)
+	// tunnel add asks the host what it runs; a fake answers, so the real ssh
+	// (which reads ~/.ssh/config whatever HOME says) never runs.
+	installFakeSSH(t, t.TempDir())
+	sshLog := filepath.Join(dir, "ssh.log")
+	t.Setenv("METERM_TEST_SSH_LOG", sshLog)
+	t.Setenv(fakeSSHExitEnv, "255")
 	cfg, err := config.Load(cfgPath)
 	if err != nil {
 		t.Fatal(err)
@@ -137,6 +139,9 @@ func TestTunnelNotesOnTeamHosts(t *testing.T) {
 	h, _ := cfg.Find("shared")
 	if len(h.Forwards) != 1 || h.Forwards[0].Note != "Admin UI (prod)" || h.Forwards[0].LocalPort != 8081 {
 		t.Errorf("forwards = %+v", h.Forwards)
+	}
+	if b, _ := os.ReadFile(sshLog); !strings.Contains(string(b), "127.0.0.1") {
+		t.Errorf("the fake ssh wasn't the one run: %q", b)
 	}
 }
 

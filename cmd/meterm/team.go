@@ -200,7 +200,7 @@ func newTeamCmd() *cobra.Command {
 					if t.ID == tc.state.Current {
 						mark = "*"
 					}
-					fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", mark, t.Name, t.Role, tc.state.GitTeams[t.ID].Remote)
+					fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", mark, lbl(t.Name), lbl(string(t.Role)), lbl(tc.state.GitTeams[t.ID].Remote))
 				}
 				return w.Flush()
 			},
@@ -244,7 +244,7 @@ func newTeamCmd() *cobra.Command {
 				w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
 				fmt.Fprintln(w, "EMAIL\tROLE")
 				for _, m := range members {
-					fmt.Fprintf(w, "%s\t%s\n", m.Email, m.Role)
+					fmt.Fprintf(w, "%s\t%s\n", lbl(m.Email), lbl(string(m.Role)))
 				}
 				return w.Flush()
 			},
@@ -484,7 +484,7 @@ func teamLogCmd(teamFlag *string) *cobra.Command {
 			for _, e := range events {
 				c := e.Event.Clean()
 				fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n",
-					e.Time.Local().Format("2006-01-02 15:04:05"), termsafe.Text(e.UploaderEmail), c.Action, c.Host, oneLine(c.Detail, 60))
+					e.Time.Local().Format("2006-01-02 15:04:05"), lbl(e.UploaderEmail), lbl(c.Action), lbl(c.Host), oneLine(c.Detail, 60))
 			}
 			if err := w.Flush(); err != nil {
 				return err

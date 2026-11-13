@@ -9,6 +9,8 @@ import (
 
 	"github.com/spf13/cobra"
 
+	_ "earlyterm" // settles the background before Bubble Tea's init asks the terminal: see the package
+
 	"meterm/internal/config"
 	"meterm/internal/route"
 	"meterm/internal/team"

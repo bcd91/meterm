@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/json"
 	"fmt"
 	"os"
 	"sort"
@@ -63,9 +62,7 @@ func newHistoryCmd() *cobra.Command {
 						Count:         r.e.Count,
 					})
 				}
-				enc := json.NewEncoder(os.Stdout)
-				enc.SetIndent("", "  ")
-				return enc.Encode(out)
+				return encodeJSON(os.Stdout, out)
 			}
 
 			if len(rows) == 0 {
@@ -75,7 +72,7 @@ func newHistoryCmd() *cobra.Command {
 			w := tabwriter.NewWriter(os.Stdout, 0, 2, 2, ' ', 0)
 			fmt.Fprintln(w, "NAME\tLAST CONNECTED\tCOUNT")
 			for _, r := range rows {
-				fmt.Fprintf(w, "%s\t%s\t%d\n", r.name, history.FormatAgo(r.e.Last), r.e.Count)
+				fmt.Fprintf(w, "%s\t%s\t%d\n", lbl(r.name), history.FormatAgo(r.e.Last), r.e.Count)
 			}
 			return w.Flush()
 		},

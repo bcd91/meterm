@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -90,7 +89,7 @@ func newAuditWatchCmd() *cobra.Command {
 					fmt.Printf("First run: nothing failing on %d host(s).\n", len(cur.Hosts))
 				}
 			} else {
-				fmt.Print(audit.FormatChanges(title, changes))
+				fmt.Print(lblLines(audit.FormatChanges(title, changes)))
 			}
 
 			var notifyErr error
@@ -209,12 +208,10 @@ func teamAuditsCmd(teamFlag *string) *cobra.Command {
 				return err
 			}
 			if format == "json" {
-				enc := json.NewEncoder(os.Stdout)
-				enc.SetIndent("", "  ")
 				if recs == nil {
 					recs = []team.AuditRecord{}
 				}
-				return enc.Encode(recs)
+				return encodeJSON(os.Stdout, recs)
 			}
 			if len(recs) == 0 {
 				fmt.Println("No audits stored yet. Run `meterm audit watch` on shared hosts (e.g. from cron).")
@@ -229,7 +226,7 @@ func teamAuditsCmd(teamFlag *string) *cobra.Command {
 				} else if len(a.Findings) > 0 {
 					top = a.Findings[0].Title
 				}
-				fmt.Fprintf(w, "%s\t%s\t%s\t%d\t%s\t%s\n", a.Host, humanAgo(time.Since(a.Time)), a.By, a.Fails, a.Worst, oneLine(top, 50))
+				fmt.Fprintf(w, "%s\t%s\t%s\t%d\t%s\t%s\n", lbl(a.Host), humanAgo(time.Since(a.Time)), lbl(a.By), a.Fails, lbl(string(a.Worst)), oneLine(top, 50))
 			}
 			return w.Flush()
 		},

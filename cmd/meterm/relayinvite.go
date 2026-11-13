@@ -178,7 +178,7 @@ func newRelayInviteCmd() *cobra.Command {
 			fmt.Printf("Wrote %s (no secrets in it).\n\n", out)
 			fmt.Println("Send it to someone at the machine. They run:")
 			fmt.Printf("    sudo sh %s\n", filepath.Base(out))
-			fmt.Printf("It lets your key (%s) log in as %s, and starts a tunnel to %s.\n", keyFile, who, rh.Name)
+			fmt.Printf("It lets your key (%s) log in as %s, and starts a tunnel to %s.\n", keyFile, who, lbl(rh.Name))
 			fmt.Println("It prints a line starting with `meterm relay accept`; run that line here.")
 			return nil
 		},
@@ -232,7 +232,7 @@ func newRelayAcceptCmd() *cobra.Command {
 				return fmt.Errorf("your known_hosts already trusts other keys for %s; if the machine that used that port is gone, remove them with:\n  ssh-keygen -R '%s'", route.KnownName("127.0.0.1", inv.Port), route.KnownName("127.0.0.1", inv.Port))
 			}
 
-			fmt.Printf("%s, through %s (localhost:%d), logging in as %s.\n", name, rh.Name, inv.Port, reply.User)
+			fmt.Printf("%s, through %s (localhost:%d), logging in as %s.\n", name, lbl(rh.Name), inv.Port, reply.User)
 			fmt.Println("Its host keys, as the reply says:")
 			for _, k := range reply.HostKeys {
 				fmt.Println("  " + fingerprint(k))
@@ -276,7 +276,7 @@ func newRelayAcceptCmd() *cobra.Command {
 			up := waitListening(cfg, *rh, inv.Port, 40*time.Second)
 			fmt.Println()
 			if !up {
-				fmt.Printf("%s is saved, but its tunnel isn't up on %s yet. On the machine: systemctl status %s\n", name, rh.Name, relay.UnitName(rh.Name))
+				fmt.Printf("%s is saved, but its tunnel isn't up on %s yet. On the machine: systemctl status %s\n", name, lbl(rh.Name), lbl(relay.UnitName(rh.Name)))
 				return nil
 			}
 			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)

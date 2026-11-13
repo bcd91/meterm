@@ -310,9 +310,7 @@ func TestAgentSSHArgsAsSSHReadsThem(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("agents refuses to run on Windows")
 	}
-	if _, err := exec.LookPath("ssh"); err != nil {
-		t.Skip("no ssh")
-	}
+	realSSHForG(t)
 	sshConfig, remove, err := writeAgentSSHConfig()
 	if err != nil {
 		t.Fatal(err)
@@ -366,9 +364,7 @@ func TestRefusedExtraArgsReallyAreDangerous(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("agents refuses to run on Windows")
 	}
-	if _, err := exec.LookPath("ssh"); err != nil {
-		t.Skip("no ssh")
-	}
+	realSSHForG(t)
 	for name, tc := range map[string]struct {
 		extra     []string
 		key, want string

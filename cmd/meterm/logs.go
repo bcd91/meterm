@@ -59,7 +59,7 @@ func newLogsCmd() *cobra.Command {
 					if err := run.runInherited(list); err != nil {
 						return err
 					}
-					fmt.Printf("\nPick one: meterm logs %s System [-f]   (an event log above, or a file: meterm logs %s 'C:\\path\\app.log')\n", h.Name, h.Name)
+					fmt.Printf("\nPick one: meterm logs %s System [-f]   (an event log above, or a file: meterm logs %s 'C:\\path\\app.log')\n", lbl(h.Name), lbl(h.Name))
 					return nil
 				}
 				err := listLogs(cfg, *h, logfiles.DefaultDir, false, raw)
@@ -67,7 +67,7 @@ func newLogsCmd() *cobra.Command {
 				if err != nil {
 					return err
 				}
-				fmt.Printf("\nPick one: meterm logs %s %s/<file> [-f]\n", h.Name, logfiles.DefaultDir)
+				fmt.Printf("\nPick one: meterm logs %s %s/<file> [-f]\n", lbl(h.Name), logfiles.DefaultDir)
 				return nil
 			}
 			run := beginActivity(cfg, *h, "logs", strings.Join(paths, " "))

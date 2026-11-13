@@ -1,7 +1,9 @@
 package main
 
 import (
+	"errors"
 	"fmt"
+	"os/exec"
 
 	"github.com/spf13/cobra"
 
@@ -25,23 +27,56 @@ func newSftpCmd() *cobra.Command {
 
 // runSftpShell opens OpenSSH's interactive sftp prompt on a saved host.
 func runSftpShell(args []string) error {
-	cfg, err := loadConfig()
+	quietOnSuccess = true
+	code, err := sftpShell(args)
 	if err != nil {
 		return err
+	}
+	if code != 0 {
+		finish(code)
+	}
+	return nil
+}
+
+// sftpShell runs the sftp prompt and returns its exit code. The activity
+// log gets a start before sftp runs and an outcome after; last-connected
+// is written only when sftp exits 0, since it reports a connection it
+// couldn't make as a plain failure.
+func sftpShell(args []string) (int, error) {
+	cfg, err := loadConfig()
+	if err != nil {
+		return 0, err
 	}
 	h, idx, err := cfg.Target(args[0])
 	if err != nil {
-		return err
+		return 0, err
 	}
 	if idx < 0 {
-		return fmt.Errorf("no such host: %s (use `meterm list` to see saved hosts)", args[0])
+		return 0, fmt.Errorf("no such host: %s (use `meterm list` to see saved hosts)", args[0])
 	}
 	startDir := ""
 	if len(args) == 2 {
 		startDir = args[1]
 	}
-	_ = history.RecordAndSave(args[0])
 	run := beginActivity(cfg, *h, "sftp", startDir)
 	kickAutosync(false, true)
-	return run.runInherited(sshrun.SftpCommand(cfg.Resolve(*h), startDir))
+	started, runErr := runOutliving(sshrun.SftpCommand(cfg.Resolve(*h), startDir))
+	if !started {
+		run.end(runErr)
+		return 0, runErr
+	}
+	run.end(runErr)
+	code := 0
+	var exitErr *exec.ExitError
+	switch {
+	case runErr == nil:
+		_ = history.RecordAndSave(h.Name)
+	case errors.As(runErr, &exitErr):
+		if code = exitErr.ExitCode(); code < 0 {
+			code = 1
+		}
+	default:
+		return 0, runErr
+	}
+	return code, nil
 }

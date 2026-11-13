@@ -74,7 +74,7 @@ func teamShareCmd(teamFlag *string) *cobra.Command {
 			for _, sel := range hosts {
 				h, _ := cfg.Find(sel.Name)
 				if h.Team != "" && h.Team != t.ID {
-					fmt.Fprintf(os.Stderr, "skipping %s: already shared with another team\n", h.Name)
+					fmt.Fprintf(os.Stderr, "skipping %s: already shared with another team\n", lbl(h.Name))
 					continue
 				}
 				only[h.Name] = true
@@ -228,9 +228,9 @@ func runTeamSync(ctx context.Context, tc *teamCtx, t team.Team, cfg *config.Conf
 	}
 
 	for _, c := range res.Changes {
-		line := fmt.Sprintf("  %-16s %s", c.Outcome, c.Host)
+		line := fmt.Sprintf("  %-16s %s", c.Outcome, lbl(c.Host))
 		if c.Detail != "" {
-			line += " — " + c.Detail
+			line += " — " + lbl(c.Detail)
 		}
 		fmt.Println(line)
 	}
@@ -276,18 +276,18 @@ func printPushPreview(outgoing []team.Change, cfg *config.Config, remote []team.
 	for _, c := range outgoing {
 		old, existed := byName[c.Host]
 		if _, here := cfg.Find(c.Host); c.Outcome == team.PushedRemoval || (c.Outcome == team.Proposed && here < 0) {
-			fmt.Printf("  - remove %s (%s) from the team\n", c.Host, old.Address)
+			fmt.Printf("  - remove %s (%s) from the team\n", lbl(c.Host), lbl(old.Address))
 			continue
 		}
 		h, _ := cfg.Find(c.Host)
 		cur := team.SharedFromHost(*h)
 		if !existed {
-			fmt.Printf("  + add %s (%s)\n", c.Host, cur.Describe())
+			fmt.Printf("  + add %s (%s)\n", lbl(c.Host), lbl(cur.Describe()))
 			continue
 		}
-		fmt.Printf("  ~ update %s\n", c.Host)
+		fmt.Printf("  ~ update %s\n", lbl(c.Host))
 		for _, d := range team.Diff(old, cur) {
-			fmt.Printf("      %s\n", d)
+			fmt.Printf("      %s\n", lbl(d))
 		}
 	}
 }
@@ -317,7 +317,7 @@ func teamStatusCmd(teamFlag *string) *cobra.Command {
 				return err
 			}
 
-			fmt.Printf("Team %q — you are %s\n", t.Name, t.Role)
+			fmt.Printf("Team %q — you are %s\n", t.Name, lbl(string(t.Role)))
 			groups := []struct {
 				title string
 				match func(team.Outcome) bool
@@ -342,7 +342,7 @@ func teamStatusCmd(teamFlag *string) *cobra.Command {
 						case team.PulledRemoval:
 							verb = "removed by team"
 						}
-						lines = append(lines, fmt.Sprintf("  %-16s %s", verb, c.Host))
+						lines = append(lines, fmt.Sprintf("  %-16s %s", verb, lbl(c.Host)))
 					}
 				}
 				if len(lines) > 0 {
@@ -377,7 +377,7 @@ func teamStatusCmd(teamFlag *string) *cobra.Command {
 				}
 			}
 			if ign := tc.state.Ignored[t.ID]; len(ign) > 0 {
-				fmt.Printf("Ignored here: %s (meterm team unignore <host>)\n", strings.Join(ign, ", "))
+				fmt.Printf("Ignored here: %s (meterm team unignore <host>)\n", lbl(strings.Join(ign, ", ")))
 			}
 			auto := "on"
 			if !tc.state.AutosyncOn() {
@@ -389,7 +389,7 @@ func teamStatusCmd(teamFlag *string) *cobra.Command {
 			}
 			fmt.Printf("Autosync: %s, last pull %s.\n", auto, last)
 			if tc.state.LastError != "" {
-				fmt.Printf("Last background error: %s\n", tc.state.LastError)
+				fmt.Printf("Last background error: %s\n", lbl(tc.state.LastError))
 			}
 			return nil
 		},
@@ -881,7 +881,7 @@ func teamNotice() string {
 // teamEditHint reminds that edits to a team host stay local until pushed.
 func teamEditHint(h config.Host) {
 	if h.Team != "" {
-		fmt.Fprintf(os.Stderr, "%s is shared with a team: this change stays on this machine until `meterm team push`.\n", h.Name)
+		fmt.Fprintf(os.Stderr, "%s is shared with a team: this change stays on this machine until `meterm team push`.\n", lbl(h.Name))
 	}
 }
 

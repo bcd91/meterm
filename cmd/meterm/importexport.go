@@ -12,6 +12,7 @@ import (
 	"meterm/internal/config"
 	"meterm/internal/inventory"
 	"meterm/internal/sshconfig"
+	"meterm/internal/termsafe"
 )
 
 func newImportCmd() *cobra.Command {
@@ -47,11 +48,22 @@ func importHosts(imported []config.Host, all bool) error {
 	if err != nil {
 		return err
 	}
+	// An inventory is outside text: a host whose fields carry control
+	// characters is left out, saying which field.
+	clean := imported[:0:0]
+	for _, h := range imported {
+		if err := h.CheckPrintable(); err != nil {
+			fmt.Printf("skip %-20s (%v)\n", lbl(h.Name), err)
+			continue
+		}
+		clean = append(clean, h)
+	}
+	imported = clean
 	reader := bufio.NewReader(os.Stdin)
 	var ask inventory.Ask
 	if !all {
 		ask = func(h config.Host) (bool, bool) {
-			fmt.Printf("Import %q (%s)? [Y/n] ", h.Name, h.Address)
+			fmt.Printf("Import %q (%s)? [Y/n] ", h.Name, termsafe.Label(h.Address))
 			resp, err := reader.ReadString('\n')
 			if err != nil && resp == "" {
 				fmt.Println("\nNo answer (end of input); stopping. Use --yes to import without asking.")
@@ -65,11 +77,11 @@ func importHosts(imported []config.Host, all bool) error {
 	for _, o := range out {
 		switch o.Action {
 		case "exists":
-			fmt.Printf("skip %-20s (already in meterm)\n", o.Host.Name)
+			fmt.Printf("skip %-20s (already in meterm)\n", termsafe.Label(o.Host.Name))
 		case "duplicate":
-			fmt.Printf("skip %-20s (%s is already saved as %s)\n", o.Host.Name, o.Host.Address, o.Other)
+			fmt.Printf("skip %-20s (%s is already saved as %s)\n", termsafe.Label(o.Host.Name), termsafe.Label(o.Host.Address), termsafe.Label(o.Other))
 		case "added":
-			fmt.Printf("added %-20s %s\n", o.Host.Name, o.Host.Address)
+			fmt.Printf("added %-20s %s\n", termsafe.Label(o.Host.Name), termsafe.Label(o.Host.Address))
 		}
 	}
 	if inventory.Added(out) == 0 {
@@ -149,7 +161,7 @@ func newImportAnsibleCmd() *cobra.Command {
 				return fmt.Errorf("reading %s: %w", args[0], err)
 			}
 			for _, s := range skipped {
-				fmt.Printf("skip %-20s (host ranges aren't expanded; add them by hand)\n", s)
+				fmt.Printf("skip %-20s (host ranges aren't expanded; add them by hand)\n", termsafe.Label(s))
 			}
 			if len(hosts) == 0 {
 				fmt.Println("No hosts found.")

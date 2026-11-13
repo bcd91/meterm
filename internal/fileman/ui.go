@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
+	"os"
 	"strings"
 	"time"
 
@@ -11,7 +13,9 @@ import (
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
-	"github.com/charmbracelet/x/ansi"
+
+	"meterm/internal/cellwidth"
+	"meterm/internal/termsafe"
 )
 
 // Options configures a file manager session.
@@ -19,9 +23,20 @@ type Options struct {
 	Left, Right       FS // left is normally this machine, right the host
 	LeftDir, RightDir string
 	// OnEvent is told about everything that changed something, for the
-	// activity log: kind is upload, download, delete, rename or mkdir;
-	// remote reports whether it happened on the host (Right).
+	// activity log: kind is upload, download, copy, delete, rename or
+	// mkdir; remote reports whether it happened on the host (Right).
+	// detail is the whole line, and starts with how it went, then kind:
+	// "started: upload a.txt -> /srv", "ok: …", "failed: …", "cancelled:
+	// …", "aborted: …", "partial: …", "stopped: …", "already gone: …", or
+	// "asked: …" for an answer to a question part way.
 	OnEvent func(kind, detail string, remote bool)
+	// Abort drops the connection to the host. It's the way out when the
+	// host stops answering mid-operation: a cancel can't reach a peer that
+	// says nothing, and the SFTP calls waiting on it never return.
+	Abort func()
+	// Env is the host's environment (production, staging, dev, test or
+	// ""): a production host's pane and its destructive questions say so.
+	Env string
 }
 
 type mode int
@@ -31,6 +46,11 @@ const (
 	modeInput
 	modeConfirm
 	modeBusy
+	modeHelp
+	// modeNotice holds keys after a question went away under the person,
+	// until enter or esc: the answer they were typing (y is also copy, and
+	// a name is a string of commands) mustn't run as commands.
+	modeNotice
 )
 
 type inputKind int
@@ -41,12 +61,58 @@ const (
 	inputFind
 )
 
+// busyKind is what a busy file manager is waiting for.
+type busyKind int
+
+const (
+	busyNone busyKind = iota
+	busyPlan
+	busyCopy
+	busyDelete
+)
+
+// stallAfter is how long without a byte before the progress line says so.
+const stallAfter = 5 * time.Second
+
+// rateWindow is how far back the transfer rate looks.
+const rateWindow = 5 * time.Second
+
+// tickEvery is how often a busy screen redraws when nothing else happens,
+// so a stall shows even though no progress arrives.
+var tickEvery = 500 * time.Millisecond
+
+type sample struct {
+	at   time.Time
+	done int64
+}
+
 type confirmKind int
 
 const (
 	confirmDelete confirmKind = iota
 	confirmOverwrite
+	confirmInPlace
+	confirmLoss
 )
+
+// asked is what an open question or name box is about, taken as it opened.
+// Its answer acts on this alone, never on the panes as they are by then: a
+// listing that lands meanwhile moves the cursor, or changes the directory.
+type asked struct {
+	pane    int // the pane it acts on
+	fs      FS
+	dir     string
+	dirs    [2]string // each pane's directory as it opened
+	watch   [2]bool   // the panes whose directory changing cancels it
+	targets []Entry   // a delete's
+	paths   []string  // their full paths
+	from    string    // a rename's: the full path of what it renames
+	name    string    // and its name
+	initial string    // the name box's starting text
+}
+
+// dirChanged is why a question or a box went away under the person.
+const dirChanged = "cancelled: the directory changed while asking"
 
 type pane struct {
 	fs      FS
@@ -134,26 +200,56 @@ type Model struct {
 
 	lastFind string // for n (next match)
 
-	pendingPlan *Plan
-	// asked is what an open delete question or name box is about, fixed
-	// when it opened: the answer acts on this, not on what the pane shows
-	// by then. A listing of another directory landing in that pane cancels
-	// the question, and dismiss then makes the next key enter or esc, so a
-	// "y" typed as the answer doesn't act.
-	asked   *asked
-	dismiss bool
+	// A destructive answer (y to delete, o to overwrite) only counts once
+	// the question has been on screen a moment: "dy" typed as one burst
+	// (its keys are handled together) is a slip, not a decision.
+	confirmAt time.Time
+
+	// ask is what the open question or name box was opened about.
+	ask *asked
+	// copyDirs are the panes' directories when c was pressed, for the
+	// question the copy may come back with.
+	copyDirs [2]string
+
+	pendingPlan   *Plan
+	pendingDelete []Entry
+	// A copy stopped to ask about writing a file in place: what it was
+	// asked, how it was running, and what it had done so far.
+	pendingInPlace *InPlaceNeeded
+	// Or it stopped to ask about replacing a file that would lose its
+	// owner, group or hard links.
+	pendingLoss *ReplaceLoses
+	runOpts     RunOptions
+	carry       Result
+
+	// lastOp is what the latest operation did, in full, for the ? screen.
+	lastOp []string
 
 	status    string
 	statusErr bool
-	// statusPath and confirmPath are a path inside status or confirmText,
-	// shortened from the left when the line is too wide, so the words stay.
-	statusPath  string
-	confirmPath string
-	progress    *Progress
-	cancel      context.CancelFunc
-	stopAfter   context.CancelFunc // stop once the file being overwritten is done
-	stopping    bool               // stopAfter was asked for: the next esc stops at once
-	events      chan tea.Msg
+	progress  *Progress
+	cancel    context.CancelFunc
+	events    chan tea.Msg
+
+	busy       busyKind
+	busyDetail string // what the busy operation is working on, for the log if it's abandoned
+	busyRemote bool   // whether that's on the host
+	cancelling bool
+	// stopAfter stops a copy the gentle way (RunOptions.After): a file
+	// written in place is let finish. stopping says it was asked for, so the
+	// next esc stops at once.
+	stopAfter  context.CancelFunc
+	stopping   bool
+	running    *Plan // the copy under way
+	busySince  time.Time
+	clock      time.Time // the latest time seen in a progress report or tick
+	lastChange time.Time // when the byte count last moved
+	samples    []sample
+	tickID     int
+	exitErr    error // why the session ended, when it wasn't q
+	helpTop    int   // the ? screen's first line shown
+
+	now func() time.Time
 }
 
 // New returns a model; Init loads both directories.
@@ -166,16 +262,138 @@ func New(o Options) Model {
 		panes: [2]*pane{{fs: o.Left, dir: o.LeftDir, sel: map[string]bool{}}, {fs: o.Right, dir: o.RightDir, sel: map[string]bool{}}},
 		input: ti,
 		w:     100, h: 30,
+		now: time.Now,
 	}
 }
 
-type asked struct {
-	pane    int
-	fs      FS
-	dir     string
-	targets []string // full paths of what a delete removes
-	entry   string   // name of what a rename renames
+// ExitError is why the session ended, when it ended other than by q.
+func (m Model) ExitError() error { return m.exitErr }
+
+type tickMsg struct {
+	id int
+	at time.Time
 }
+
+func tickCmd(id int) tea.Cmd {
+	return tea.Tick(tickEvery, func(t time.Time) tea.Msg { return tickMsg{id: id, at: t} })
+}
+
+// startBusy enters busy mode for kind and returns a context that Esc
+// cancels, plus the ticker that keeps the screen current meanwhile.
+func (m *Model) startBusy(kind busyKind, detail string) (context.Context, tea.Cmd) {
+	ctx, cancel := context.WithCancel(context.Background())
+	now := m.now()
+	m.mode, m.busy, m.busyDetail, m.cancel, m.cancelling = modeBusy, kind, detail, cancel, false
+	m.busySince, m.clock, m.lastChange, m.samples = now, now, now, nil
+	m.tickID++
+	return ctx, tickCmd(m.tickID)
+}
+
+// mayWriteInPlace says the copy running may write a file in place, so a
+// stop at once could leave one partly written.
+func (m Model) mayWriteInPlace() bool {
+	return m.busy == busyCopy && (len(m.runOpts.InPlace) > 0 || m.runOpts.OnLoss == LossInPlace)
+}
+
+// stopNowHint is what the next esc does once a gentle stop was asked for.
+const stopNowHint = "stopping after the file written in place · esc again: stop now (it is left partly written)"
+
+// endBusy leaves busy mode.
+func (m *Model) endBusy() {
+	if m.cancel != nil {
+		m.cancel() // release the context
+	}
+	m.mode, m.busy, m.busyDetail, m.cancel, m.cancelling = modeNormal, busyNone, "", nil, false
+	m.stopAfter, m.stopping = nil, false
+	m.progress, m.running, m.samples = nil, nil, nil
+	m.tickID++ // stops the ticker
+}
+
+// observe records the byte count at time at, for the rate and the stall.
+func (m *Model) observe(at time.Time, done int64) {
+	if at.Before(m.clock) {
+		at = m.clock
+	}
+	m.clock = at
+	if n := len(m.samples); n == 0 || done != m.samples[n-1].done {
+		m.lastChange = at
+	}
+	m.samples = append(m.samples, sample{at, done})
+	// Keep one sample at or before the window's start as the base.
+	cut := 0
+	for i, s := range m.samples {
+		if !s.at.After(at.Add(-rateWindow)) {
+			cut = i
+		}
+	}
+	m.samples = m.samples[cut:]
+}
+
+// rate is bytes per second over the last rateWindow; ok is false until
+// there's a second of data to go on.
+func (m Model) rate() (float64, bool) {
+	if len(m.samples) < 2 {
+		return 0, false
+	}
+	first, last := m.samples[0], m.samples[len(m.samples)-1]
+	secs := last.at.Sub(first.at).Seconds()
+	if secs < 1 {
+		return 0, false
+	}
+	return float64(last.done-first.done) / secs, true
+}
+
+// abort is the way out of an operation that won't stop: drop the
+// connection, log what's known, and quit.
+func (m Model) abort() (tea.Model, tea.Cmd) {
+	if m.opts.Abort != nil {
+		m.opts.Abort()
+	}
+	host := m.opts.Right.Label()
+	var what string
+	switch m.busy {
+	case busyCopy:
+		what = "a copy"
+		if m.running != nil {
+			done, temp := 0, ""
+			if m.progress != nil {
+				done, temp = m.progress.Files, m.progress.Temp
+			}
+			kind, remote := m.transferKind(*m.running)
+			d := fmt.Sprintf("aborted: %s %s: connection dropped after %d of %d file(s)", kind, m.transferSummary(*m.running), done, len(m.running.Files))
+			if temp != "" {
+				d += "; unfinished temporary file may remain: " + temp
+			}
+			if m.progress != nil && m.progress.InPlace != "" {
+				d += "; was writing in place, may be partly written: " + where(m.running.Dst, m.progress.InPlace)
+			}
+			m.emit(kind, d, remote)
+		}
+	case busyDelete:
+		what = "a delete"
+		m.emit("delete", "aborted: delete "+m.busyDetail+": connection dropped; may be partly deleted", m.busyRemote)
+	case busyPlan:
+		what = "working out a copy"
+	}
+	m.exitErr = fmt.Errorf("stopped waiting for %s during %s: the connection was dropped", host, what)
+	if m.progress != nil && m.progress.Temp != "" {
+		m.exitErr = fmt.Errorf("%w; an unfinished temporary file may be left at %s", m.exitErr, m.progress.Temp)
+	}
+	if m.progress != nil && m.progress.InPlace != "" && m.running != nil {
+		m.exitErr = fmt.Errorf("%w; %s was being written in place and may be partly written", m.exitErr, where(m.running.Dst, m.progress.InPlace))
+	}
+	m.endBusy()
+	return m, tea.Quit
+}
+
+func (m Model) emit(kind, detail string, remote bool) {
+	if m.opts.OnEvent != nil {
+		m.opts.OnEvent(kind, detail, remote)
+	}
+}
+
+// logged is the line OnEvent gets: how it went, then what it was.
+func logged(outcome, kind, rest string) string { return outcome + ": " + kind + " " + rest }
 
 type dirLoadedMsg struct {
 	pane    int
@@ -201,6 +419,8 @@ type opDoneMsg struct {
 	panes  []int
 	status string
 	err    error
+	focus  string   // name to put the cursor on, only when the operation worked
+	detail []string // what it did, in full, for the ? screen
 }
 
 func (m Model) Init() tea.Cmd {
@@ -215,24 +435,85 @@ func (m Model) load(i int, dir string) tea.Cmd {
 	}
 }
 
+// Below this the file manager says the terminal is too small rather than
+// draw panes that don't fit.
+const (
+	minWidth  = 40
+	minHeight = 10
+)
+
+func (m Model) tooSmall() bool { return m.w < minWidth || m.h < minHeight }
+
+// rows is how many entries each pane shows: the screen less the borders,
+// the path line, the status lines and the key line.
 func (m Model) rows() int {
-	r := m.h - 2 /*border*/ - 1 /*path*/ - 2 /*status+help*/
+	r := m.h - 2 /*border*/ - 1 /*path*/ - len(m.statusLines()) - 1 /*keys*/
 	if r < 1 {
 		r = 1
 	}
 	return r
 }
 
-func (m *Model) setStatus(s string, isErr bool) { m.status, m.statusErr, m.statusPath = s, isErr, "" }
-
-// setStatusPath is setStatus for a message holding a path that may be
-// shortened to fit.
-func (m *Model) setStatusPath(s, path string, isErr bool) {
-	m.setStatus(s, isErr)
-	m.statusPath = path
+// Update handles msg, then keeps each pane's cursor on a row that's drawn:
+// a message taking a second line takes a row from the panes.
+func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	next, cmd := m.update(msg)
+	if fm, ok := next.(Model); ok {
+		for _, p := range fm.panes {
+			p.clamp(fm.rows())
+		}
+	}
+	return next, cmd
 }
 
-func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+func (m *Model) setStatus(s string, isErr bool) { m.status, m.statusErr = s, isErr }
+
+// capture is what a question or box about pane i is opened on: that pane,
+// and the directory each side shows now.
+func (m Model) capture(i int) *asked {
+	p := m.panes[i]
+	a := &asked{pane: i, fs: p.fs, dir: p.dir, dirs: [2]string{m.panes[0].dir, m.panes[1].dir}}
+	a.watch[i] = true
+	return a
+}
+
+// asking says a question or a name box is open (finding isn't asking).
+func (m Model) asking() bool {
+	return m.mode == modeConfirm || m.mode == modeInput && m.inputKind != inputFind
+}
+
+// dropQuestion closes the open question or name box unanswered, saying
+// why. A copy that stopped to ask stops there.
+func (m Model) dropQuestion(why string) Model {
+	if m.mode == modeConfirm && (m.confirmKind == confirmInPlace || m.confirmKind == confirmLoss) {
+		next, _ := m.stopAtInPlace(why)
+		return next.(Model)
+	}
+	if m.mode == modeInput {
+		m.input.Blur()
+	}
+	m.mode, m.pendingPlan, m.pendingDelete, m.ask = modeNormal, nil, nil, nil
+	m.setStatus(why, true)
+	return m
+}
+
+// shortWhere is where(fsys, dir) for a question: the side whole, the path
+// cut from the left to a third of the screen, so its end shows and the
+// question's choices still fit.
+func (m Model) shortWhere(fsys FS, dir string) string {
+	w := where(fsys, dir)
+	side := strings.TrimSuffix(w, dir)
+	return side + cellwidth.TruncLeft(dir, max(12, m.w/3))
+}
+
+// boxPrompt is a name box's prompt: what it does, and where, cut from the
+// left to leave room to type.
+func (m *Model) boxPrompt(what string, a *asked) {
+	m.input.Prompt = what + " in " + termsafe.Label(m.shortWhere(a.fs, a.dir)) + ": "
+	m.input.Width = max(1, m.w-cellwidth.Width(m.input.Prompt)-1)
+}
+
+func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.w, m.h = msg.Width, msg.Height
@@ -249,11 +530,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		changed := p.dir != msg.dir
-		if a := m.asked; a != nil && (m.mode == modeConfirm || m.mode == modeInput) && a.pane == msg.pane && a.dir != msg.dir {
-			m.asked, m.dismiss = nil, true
-			m.mode = modeNormal
-			m.input.Blur()
-			m.setStatus("cancelled: the directory changed while asking  (enter or esc to go on)", true)
+		if changed && m.ask != nil && m.asking() && m.ask.watch[msg.pane] && m.ask.dirs[msg.pane] != msg.dir {
+			m = m.dropQuestion(dirChanged)
+			m.mode = modeNotice
+			p = m.panes[msg.pane]
 		}
 		p.dir, p.entries, p.err = msg.dir, msg.entries, ""
 		if changed {
@@ -284,87 +564,153 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case planMsg:
+		m.endBusy()
 		if msg.err != nil {
-			m.mode = modeNormal
-			m.setStatus("copy: "+msg.err.Error(), true)
+			if errors.Is(msg.err, context.Canceled) {
+				m.setStatus("copy cancelled", false)
+			} else {
+				m.setStatus("copy: "+msg.err.Error(), true)
+			}
 			return m, nil
 		}
 		if len(msg.plan.Files) == 0 && len(msg.plan.Dirs) == 0 {
-			m.mode = modeNormal
 			m.setStatus("nothing to copy", false)
 			return m, nil
 		}
 		if n := msg.plan.Conflicts(); n > 0 {
+			if m.copyDirs != [2]string{m.panes[0].dir, m.panes[1].dir} {
+				m.setStatus(dirChanged, true) // while it was being worked out
+				return m, nil
+			}
 			plan := msg.plan
 			m.pendingPlan = &plan
+			m.ask = m.capture(m.active)
+			m.ask.dirs, m.ask.watch = m.copyDirs, [2]bool{true, true}
 			m.mode, m.confirmKind = modeConfirm, confirmOverwrite
-			m.confirmText = fmt.Sprintf("%d of %d file(s) already exist on %s.  o = overwrite   s = skip those   esc = cancel", n, len(plan.Files), plan.Dst.Label())
-			m.confirmPath = ""
+			m.confirmAt = m.now()
+			var names []string
+			for _, f := range plan.Files {
+				if f.Exists {
+					name := relTo(plan.Dst, plan.DstDir, f.Dst)
+					if f.LinkTo != "" {
+						name += " (-> " + relTo(plan.Dst, plan.Dst.Dir(f.Dst), f.LinkTo) + ", the file it points to will be overwritten)"
+					}
+					names = append(names, name)
+				}
+			}
+			m.confirmText = fmt.Sprintf("%s%d of %d file(s) already exist in %s: %s.  o = overwrite   s = skip those   esc = cancel",
+				m.prodWarning(plan.Dst), n, len(plan.Files), m.shortWhere(plan.Dst, plan.DstDir), firstFew(names, 3))
 			return m, nil
 		}
-		return m.startTransfer(msg.plan, false)
+		m.logStart(msg.plan, false)
+		return m.startTransfer(msg.plan, RunOptions{}, Result{})
 
 	case progressMsg:
+		if m.busy != busyCopy {
+			return m, nil
+		}
 		p := Progress(msg)
 		m.progress = &p
+		m.observe(p.At, p.Done)
 		return m, waitFor(m.events)
 
+	case tickMsg:
+		if msg.id != m.tickID || m.mode != modeBusy {
+			return m, nil // a ticker from an operation that has finished
+		}
+		if m.progress != nil {
+			m.observe(msg.at, m.progress.Done)
+		} else if msg.at.After(m.clock) {
+			m.clock = msg.at
+		}
+		return m, tickCmd(m.tickID)
+
 	case transferDoneMsg:
-		m.mode, m.progress, m.cancel, m.stopAfter, m.stopping = modeNormal, nil, nil, nil, false
-		dst := 1 - m.active
+		opts := m.runOpts
+		msg.res = m.carry.Add(msg.res)
+		m.endBusy()
 		for _, p := range m.panes {
 			p.sel = map[string]bool{}
 		}
-		var partly *PartlyWrittenError
-		side := msg.plan.Dst.Label() + ":"
-		switch {
-		case errors.As(msg.err, &partly):
-			what := fmt.Sprintf("copy failed: %v", partly.Err)
-			if errors.Is(msg.err, context.Canceled) {
-				what = fmt.Sprintf("cancelled after %d file(s)", msg.res.Copied)
+		var need *InPlaceNeeded
+		if errors.As(msg.err, &need) {
+			plan := msg.plan
+			m.pendingPlan, m.pendingInPlace, m.runOpts, m.carry = &plan, need, opts, msg.res
+			m.ask = m.capture(m.active)
+			m.ask.watch = [2]bool{true, true}
+			m.mode, m.confirmKind = modeConfirm, confirmInPlace
+			m.confirmAt = m.now()
+			m.confirmText = fmt.Sprintf("%sReplacing %s: %v.  i = write in place (not atomic: a failure leaves a partial file)   s = skip this file   any other key = stop",
+				m.prodWarning(plan.Dst), where(plan.Dst, need.Target), need)
+			return m, tea.Batch(m.load(0, m.panes[0].dir), m.load(1, m.panes[1].dir))
+		}
+		var loses *ReplaceLoses
+		if errors.As(msg.err, &loses) {
+			plan := msg.plan
+			m.pendingPlan, m.pendingLoss, m.runOpts, m.carry = &plan, loses, opts, msg.res
+			m.ask = m.capture(m.active)
+			m.ask.watch = [2]bool{true, true}
+			m.mode, m.confirmKind = modeConfirm, confirmLoss
+			m.confirmAt = m.now()
+			m.confirmText = m.prodWarning(plan.Dst) + lossQuestion(loses)
+			return m, tea.Batch(m.load(0, m.panes[0].dir), m.load(1, m.panes[1].dir))
+		}
+		var partial *PartialWrite
+		if msg.err != nil {
+			if errors.As(msg.err, &partial) {
+				m.setStatus(fmt.Sprintf("copy stopped after %d file(s): %v", msg.res.Copied, partial), true)
+			} else if errors.Is(msg.err, context.Canceled) {
+				m.setStatus(fmt.Sprintf("cancelled after %d file(s); the unfinished one was discarded and the file it would have replaced left as it was", msg.res.Copied), true)
+			} else {
+				m.setStatus("copy failed: "+msg.err.Error(), true)
 			}
-			m.setStatusPath(fmt.Sprintf("%s%s may be partly written; %s", side, partly.Path, what), partly.Path, true)
-			if m.opts.OnEvent != nil {
-				kind, remote := m.transferKind(msg.plan)
-				m.opts.OnEvent(kind, fmt.Sprintf("%s%s may be partly written (%v)", side, partly.Path, partly.Err), remote)
+		} else {
+			s := fmt.Sprintf("copied %d file(s), %s to %s:%s", msg.res.Copied, HumanBytes(msg.res.Bytes), msg.plan.Dst.Label(), msg.plan.DstDir)
+			if n := len(msg.res.InPlace); n > 0 {
+				s += fmt.Sprintf("; %d written in place, not atomically", n)
 			}
-		case msg.err != nil:
-			what := "copy failed: " + msg.err.Error()
-			if errors.Is(msg.err, context.Canceled) {
-				what = fmt.Sprintf("cancelled after %d file(s)", msg.res.Copied)
+			if n := len(msg.res.Followed); n > 0 {
+				rel := make([]string, n)
+				for k, f := range msg.res.Followed {
+					rel[k] = relTo(msg.plan.Dst, msg.plan.DstDir, f.Link) + " -> " + relTo(msg.plan.Dst, msg.plan.Dst.Dir(f.Link), f.Target)
+				}
+				s += fmt.Sprintf("; overwrote the file %s points to: %s", plural(n, "a link", "links"), firstFew(rel, 3))
 			}
-			switch {
-			case msg.res.Partial == "":
-				m.setStatus(what, true)
-			case msg.res.PartialErr != nil:
-				m.setStatusPath(fmt.Sprintf("couldn't remove the unfinished new file %s%s (%v); %s", side, msg.res.Partial, msg.res.PartialErr, what), msg.res.Partial, true)
-			default:
-				m.setStatusPath(fmt.Sprintf("removed the unfinished new file %s%s; %s", side, msg.res.Partial, what), msg.res.Partial, true)
+			if n := len(msg.res.Lost); n > 0 {
+				s += fmt.Sprintf("; %d replaced losing owner, group or hard links, as agreed", n)
 			}
-		default:
-			s := fmt.Sprintf("copied %d file(s), %s to %s:%s", msg.res.Copied, HumanBytes(msg.res.Bytes), msg.plan.Dst.Label(), m.panes[dst].dir)
 			if msg.res.Skipped > 0 {
 				s += fmt.Sprintf("; kept %d existing", msg.res.Skipped)
 			}
 			if len(msg.plan.Skipped) > 0 {
 				s += fmt.Sprintf("; skipped %d symlink(s)/special file(s)", len(msg.plan.Skipped))
 			}
-			m.setStatus(s, false)
+			// A warning is kept on screen like an error, until dismissed.
+			if w := warningsText(msg.res.Warnings); w != "" {
+				s += "; " + w
+			}
+			m.setStatus(s, len(msg.res.Warnings) > 0)
 		}
-		if msg.res.Copied > 0 {
-			m.report(msg.plan, msg.res, msg.err != nil)
+		if msg.res.Copied > 0 || msg.err != nil || len(msg.plan.Dirs) > 0 || len(msg.res.Warnings) > 0 {
+			m.lastOp = detailLines(m.report(msg.plan, msg.res, msg.err))
 		}
 		return m, tea.Batch(m.load(0, m.panes[0].dir), m.load(1, m.panes[1].dir))
 
 	case opDoneMsg:
-		m.mode = modeNormal
+		m.endBusy()
 		if msg.err != nil {
 			m.setStatus(msg.err.Error(), true)
 		} else {
 			m.setStatus(msg.status, false)
 		}
+		if msg.detail != nil {
+			m.lastOp = msg.detail
+		}
 		var cmds []tea.Cmd
 		for _, i := range msg.panes {
+			if msg.focus != "" { // set only by an operation that worked
+				m.panes[i].focusOn = msg.focus
+			}
 			cmds = append(cmds, m.load(i, m.panes[i].dir))
 		}
 		return m, tea.Batch(cmds...)
@@ -378,43 +724,92 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			var model tea.Model = m
 			for _, r := range msg.Runes {
 				var cmd tea.Cmd
-				model, cmd = model.Update(singleKey(r))
+				model, cmd = model.(Model).update(singleKey(r))
 				cmds = append(cmds, cmd)
 			}
 			return model, tea.Batch(cmds...)
 		}
-		if m.dismiss {
-			switch msg.String() {
-			case "enter", "esc":
-				m.dismiss = false
-				m.setStatus("", false)
-			case "ctrl+c": // not q: it may have been typed into a rename box
+		if m.tooSmall() && m.mode != modeBusy {
+			// Nothing on screen says what a key would act on: only the way
+			// out works, and a question waiting for an answer is a no.
+			switch {
+			case msg.String() == "ctrl+c", msg.String() == "q" && m.mode != modeInput:
 				return m, tea.Quit
+			case m.mode == modeConfirm:
+				if m.confirmKind == confirmInPlace || m.confirmKind == confirmLoss {
+					return m.stopAtInPlace("the terminal is too small to show the question")
+				}
+				m = m.dropQuestion("cancelled: the terminal is too small to show the question")
 			}
 			return m, nil
 		}
+		// A key typed straight after Esc can reach us in the same read,
+		// which bubbletea takes for alt+key. Nothing here binds alt, so
+		// it's taken apart again: Esc, then the key.
+		if m.mode == modeNormal && msg.Alt && msg.Type == tea.KeyRunes {
+			first, c1 := m.update(tea.KeyMsg{Type: tea.KeyEsc})
+			plain := msg
+			plain.Alt = false
+			second, c2 := first.(Model).update(plain)
+			return second, tea.Batch(c1, c2)
+		}
 		switch m.mode {
+		case modeNotice:
+			switch msg.String() {
+			case "enter", "esc":
+				m.mode = modeNormal
+				m.setStatus("", false)
+			case "ctrl+c":
+				return m, tea.Quit
+			}
+			return m, nil
 		case modeInput:
 			return m.updateInput(msg)
 		case modeConfirm:
 			return m.updateConfirm(msg)
+		case modeHelp:
+			page := max(1, m.h-3)
+			switch msg.String() {
+			case "j", "down":
+				m.helpTop++
+			case "k", "up":
+				m.helpTop--
+			case "pgdown", "ctrl+d", " ":
+				m.helpTop += page
+			case "pgup", "ctrl+u":
+				m.helpTop -= page
+			case "g", "home":
+				m.helpTop = 0
+			case "G", "end":
+				m.helpTop = len(m.helpLines())
+			case "ctrl+c":
+				return m, tea.Quit
+			default:
+				m.mode = modeNormal // any other key closes it
+			}
+			m.helpTop = max(0, min(m.helpTop, len(m.helpLines())-(m.h-2)))
+			return m, nil
 		case modeBusy:
-			switch {
-			case (msg.String() == "esc" || msg.String() == "ctrl+c") && m.cancel != nil:
-				// The first esc only asks to stop after the current file: the
-				// copy stops a new file at once and lets a file being
-				// overwritten finish (the progress shown may be behind, so
-				// it isn't asked). A second esc stops at once.
-				if !m.stopping && m.stopAfter != nil {
+			switch k := msg.String(); {
+			case (k == "esc" || k == "ctrl+c") && !m.cancelling:
+				// A copy that may write a file in place (the person agreed
+				// to it) stops the gentle way first: a file going to a
+				// temporary name stops at once, and one written in place is
+				// let finish, as stopping it would leave it partly written.
+				// The next esc stops at once.
+				if m.stopAfter != nil && !m.stopping && m.mayWriteInPlace() {
 					m.stopAfter()
 					m.stopping = true
-					m.setStatus(stopNowHint+" · stopping after the current file", true)
 					return m, nil
 				}
-				m.cancel()
-				m.setStatus("cancelling…", true)
-			case m.progress == nil:
-				m.setStatus("busy — wait for it to finish", true)
+				if m.cancel != nil {
+					m.cancel()
+				}
+				m.cancelling = true
+			case k == "esc" || k == "ctrl+c":
+				// The cancel hasn't come back: whatever it's waiting on isn't
+				// answering. Drop the connection and leave.
+				return m.abort()
 			}
 			return m, nil
 		}
@@ -426,20 +821,35 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m Model) updateNormal(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	p := m.panes[m.active]
 	rows := m.rows()
-	m.setStatus("", false)
+	if !m.statusErr {
+		m.setStatus("", false) // an error stays until dismissed or replaced
+	}
 	switch k.String() {
 	case "q", "ctrl+c":
 		return m, tea.Quit
+	case "esc":
+		// Esc clears one thing at a time: a message, then the selection.
+		if m.status != "" {
+			m.setStatus("", false)
+		} else {
+			p.sel = map[string]bool{}
+		}
+	case "?":
+		m.mode, m.helpTop = modeHelp, 0
 	case "tab", "ctrl+w":
 		m.active = 1 - m.active
 	case "j", "down":
 		p.cursor++
 	case "k", "up":
 		p.cursor--
-	case "ctrl+d", "pgdown":
-		p.cursor += rows / 2
-	case "ctrl+u", "pgup":
-		p.cursor -= rows / 2
+	case "pgdown":
+		p.cursor += rows
+	case "pgup":
+		p.cursor -= rows
+	case "ctrl+d":
+		p.cursor += max(1, rows/2)
+	case "ctrl+u":
+		p.cursor -= max(1, rows/2)
 	case "g", "home":
 		p.cursor = 0
 	case "G", "end":
@@ -467,7 +877,7 @@ func (m Model) updateNormal(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 			p.cursor++
 		}
-	case "a":
+	case "*":
 		if len(p.sel) > 0 {
 			p.sel = map[string]bool{}
 		} else {
@@ -478,7 +888,16 @@ func (m Model) updateNormal(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case ".":
 		p.hidden = !p.hidden
 		p.cursor = 0
-	case "R", "ctrl+r":
+		if !p.hidden {
+			// What's selected is what's shown: a hidden file mustn't be
+			// counted in the title, nor deleted or copied unseen.
+			for name := range p.sel {
+				if strings.HasPrefix(name, ".") {
+					delete(p.sel, name)
+				}
+			}
+		}
+	case "r", "ctrl+r":
 		return m, tea.Batch(m.load(0, m.panes[0].dir), m.load(1, m.panes[1].dir))
 	case "c", "f5", "y":
 		ts := p.targets()
@@ -490,56 +909,55 @@ func (m Model) updateNormal(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		for i, e := range ts {
 			items[i] = p.fs.Join(p.dir, e.Name)
 		}
-		m.mode = modeBusy
-		m.setStatus("working out what to copy…", false)
+		m.copyDirs = [2]string{m.panes[0].dir, m.panes[1].dir}
+		ctx, tick := m.startBusy(busyPlan, strings.Join(items, ", "))
 		src, dst, dstDir := p.fs, other.fs, other.dir
-		return m, func() tea.Msg {
-			plan, err := MakePlan(context.Background(), src, items, dst, dstDir)
+		return m, tea.Batch(func() tea.Msg {
+			plan, err := MakePlan(ctx, src, items, dst, dstDir)
 			return planMsg{plan: plan, err: err}
-		}
+		}, tick)
 	case "d", "f8", "delete":
 		ts := p.targets()
 		if len(ts) == 0 {
 			return m, nil
 		}
-		a := &asked{pane: m.active, fs: p.fs, dir: p.dir}
+		m.pendingDelete = ts
+		m.ask = m.capture(m.active)
+		m.ask.targets = ts
 		for _, e := range ts {
-			a.targets = append(a.targets, p.fs.Join(p.dir, e.Name))
+			m.ask.paths = append(m.ask.paths, p.fs.Join(p.dir, e.Name))
 		}
-		m.asked = a
 		m.mode, m.confirmKind = modeConfirm, confirmDelete
-		what := ts[0].Name
-		if len(ts) > 1 {
-			what = fmt.Sprintf("%d items", len(ts))
-		}
-		where := p.dir
-		if len(ts) == 1 {
-			where = p.fs.Join(p.dir, ts[0].Name)
-			m.confirmText = fmt.Sprintf("y = delete · other key = cancel · %s:%s", p.fs.Label(), where)
-		} else {
-			m.confirmText = fmt.Sprintf("y = delete %s · other key = cancel · in %s:%s", what, p.fs.Label(), where)
-		}
-		m.confirmPath = where
-	case "r", "f6":
-		if e, ok := p.current(); ok {
-			m.asked = &asked{pane: m.active, fs: p.fs, dir: p.dir, entry: e.Name}
+		m.confirmAt = m.now()
+		m.confirmText = fmt.Sprintf("%sDelete %s in %s?  y = delete   any other key = cancel", m.prodWarning(p.fs), deleteWhat(ts), m.shortWhere(p.fs, p.dir))
+	case "R", "f6":
+		if e, ok := p.current(); ok && e.Name != ".." {
+			m.ask = m.capture(m.active)
+			m.ask.from, m.ask.name = p.fs.Join(p.dir, e.Name), e.Name
 			m.mode, m.inputKind = modeInput, inputRename
-			m.input.Prompt = "Rename to: "
-			m.input.SetValue(e.Name)
+			if termsafe.Label(e.Name) != e.Name || strings.TrimSpace(e.Name) != e.Name {
+				// The box would show a cleaned name, which enter would
+				// then rename it to: start empty instead.
+				m.boxPrompt("Rename (this name has hidden characters; type the new name)", m.ask)
+			} else {
+				m.ask.initial = e.Name
+				m.boxPrompt("Rename", m.ask)
+			}
+			m.input.SetValue(m.ask.initial)
 			m.input.CursorEnd()
 			m.input.Focus()
 		}
 	case "/":
 		m.mode, m.inputKind = modeInput, inputFind
-		m.input.Prompt = "Find: "
+		m.input.Prompt, m.input.Width = "Find: ", 0
 		m.input.SetValue("")
 		m.input.Focus()
 	case "n":
 		m.findNext(m.lastFind, p.cursor+1)
 	case "m", "f7":
-		m.asked = &asked{pane: m.active, fs: p.fs, dir: p.dir}
+		m.ask = m.capture(m.active)
 		m.mode, m.inputKind = modeInput, inputMkdir
-		m.input.Prompt = "New directory: "
+		m.boxPrompt("New directory", m.ask)
 		m.input.SetValue("")
 		m.input.Focus()
 	}
@@ -563,56 +981,70 @@ func (m Model) updateInput(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 	switch k.String() {
 	case "esc":
-		m.mode, m.asked = modeNormal, nil
+		m.mode, m.ask = modeNormal, nil
 		m.input.Blur()
 		return m, nil
 	case "enter":
-		a := m.asked
-		m.mode, m.asked = modeNormal, nil
+		a := m.ask
+		m.mode, m.ask = modeNormal, nil
 		m.input.Blur()
+		if m.inputKind == inputRename && m.input.Value() == a.initial {
+			m.setStatus("unchanged", false)
+			return m, nil
+		}
 		name := strings.TrimSpace(m.input.Value())
 		if name == "" || strings.ContainsAny(name, `/\`) || name == "." || name == ".." {
 			m.setStatus("not a valid name", true)
 			return m, nil
 		}
-		if a == nil {
-			return m, nil
-		}
 		i := a.pane
-		p := m.panes[i]
 		fsys, dir := a.fs, a.dir
 		remote := i == 1
 		on := m.opts.OnEvent
 		switch m.inputKind {
 		case inputMkdir:
-			p.focusOn = name
 			return m, func() tea.Msg {
 				target := fsys.Join(dir, name)
-				if err := fsys.MkdirAll(target); err != nil {
+				// Mkdir, not MkdirAll: only a directory this made is
+				// logged as made.
+				if err := fsys.Mkdir(target); err != nil {
+					if e, lerr := fsys.Lstat(target); lerr == nil && e.IsDir {
+						return opDoneMsg{panes: []int{i}, status: name + " already exists; nothing was created", focus: name}
+					} else if lerr == nil {
+						err = fmt.Errorf("%s already exists and isn't a directory", name)
+					}
+					if on != nil {
+						on("mkdir", logged("failed", "mkdir", target+": "+cause(err).Error()), remote)
+					}
 					return opDoneMsg{panes: []int{i}, err: fmt.Errorf("mkdir: %w", err)}
 				}
 				if on != nil {
-					on("mkdir", target, remote)
+					on("mkdir", logged("ok", "mkdir", target), remote)
 				}
-				return opDoneMsg{panes: []int{i}, status: "created " + target}
+				return opDoneMsg{panes: []int{i}, status: "created " + target, focus: name}
 			}
 		case inputRename:
-			if a.entry == name {
+			if a.name == name {
+				m.setStatus("unchanged", false)
 				return m, nil
 			}
-			p.focusOn = name
 			return m, func() tea.Msg {
-				from, to := fsys.Join(dir, a.entry), fsys.Join(dir, name)
-				if _, err := fsys.Lstat(to); err == nil {
-					return opDoneMsg{panes: []int{i}, err: fmt.Errorf("rename: %s already exists", name)}
-				}
+				from, to := a.from, fsys.Join(dir, name)
+				// Rename itself refuses an existing target; a separate look
+				// first would leave a gap for something to appear in.
 				if err := fsys.Rename(from, to); err != nil {
+					if _, lerr := fsys.Lstat(to); errors.Is(err, fs.ErrExist) || lerr == nil {
+						err = fmt.Errorf("%s already exists", name)
+					}
+					if on != nil {
+						on("rename", logged("failed", "rename", from+" -> "+to+": "+cause(err).Error()), remote)
+					}
 					return opDoneMsg{panes: []int{i}, err: fmt.Errorf("rename: %w", err)}
 				}
 				if on != nil {
-					on("rename", from+" -> "+to, remote)
+					on("rename", logged("ok", "rename", from+" -> "+to), remote)
 				}
-				return opDoneMsg{panes: []int{i}, status: "renamed to " + name}
+				return opDoneMsg{panes: []int{i}, status: "renamed to " + name, focus: name}
 			}
 		}
 		return m, nil
@@ -637,7 +1069,7 @@ func (m *Model) findNext(q string, from int) {
 	} {
 		for i := 0; i < len(v); i++ {
 			idx := (from + i) % len(v)
-			if match(strings.ToLower(v[idx].Name)) {
+			if match(strings.ToLower(v[idx].Name)) || match(strings.ToLower(termsafe.Label(v[idx].Name))) {
 				p.cursor = idx
 				p.clamp(m.rows())
 				return
@@ -646,63 +1078,260 @@ func (m *Model) findNext(q string, from int) {
 	}
 }
 
+// confirmSettle is how long a question must have been up before a
+// destructive answer to it counts.
+const confirmSettle = 150 * time.Millisecond
+
 func (m Model) updateConfirm(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	key := strings.ToLower(k.String())
+	destructive := (m.confirmKind == confirmDelete && key == "y") || (m.confirmKind == confirmOverwrite && key == "o") ||
+		(m.confirmKind == confirmInPlace && key == "i") ||
+		(m.confirmKind == confirmLoss && (key == "r" || key == "i" && m.pendingLoss.InPlaceOK))
+	if destructive && m.now().Sub(m.confirmAt) < confirmSettle {
+		return m, nil // typed before the question could have been read: keep asking
+	}
+	a := m.ask // what the question was asked about; the answer acts on that
+	m.ask = nil
 	switch m.confirmKind {
+	case confirmLoss:
+		loses, plan, opts := m.pendingLoss, m.pendingPlan, m.runOpts
+		choice := map[string]LossChoice{"r": LossReplace, "s": LossSkip}[key]
+		if key == "i" && loses.InPlaceOK {
+			choice = LossInPlace
+		}
+		if choice == LossAsk {
+			return m.stopAtInPlace("")
+		}
+		m.pendingPlan, m.pendingLoss = nil, nil
+		// The person's decision goes in the log before a byte is written.
+		kind, remote := m.transferKind(*plan)
+		said := map[LossChoice]string{
+			LossInPlace: "chose to write in place (keeps owner, group and hard links; not atomic)",
+			LossReplace: "chose to replace",
+			LossSkip:    "chose to skip",
+		}[choice]
+		m.emit(kind, logged("asked", kind, fmt.Sprintf("%s: %s for %s (replacing it: %s); the same for any other such file in this copy", m.transferSummary(*plan), said, loses.Where, loses.what())), remote)
+		opts.OnLoss, opts.From = choice, loses.Index
+		return m.startTransfer(*plan, opts, m.carry)
+	case confirmInPlace:
+		need, plan, opts := m.pendingInPlace, m.pendingPlan, m.runOpts
+		switch key {
+		case "i":
+			m.pendingPlan, m.pendingInPlace = nil, nil
+			// The person's decision goes in the log before a byte is written.
+			kind, remote := m.transferKind(*plan)
+			m.emit(kind, logged("asked", kind, fmt.Sprintf("%s: agreed to write in place (not atomic): %s; %s", m.transferSummary(*plan), where(plan.Dst, need.Target), need.Error())), remote)
+			in := map[string]bool{}
+			for k := range opts.InPlace {
+				in[k] = true
+			}
+			in[need.Target] = true
+			opts.InPlace, opts.From = in, need.Index
+			return m.startTransfer(*plan, opts, m.carry)
+		case "s":
+			m.pendingPlan, m.pendingInPlace = nil, nil
+			carry := m.carry
+			carry.Skipped++
+			opts.From = need.Index + 1
+			return m.startTransfer(*plan, opts, carry)
+		}
+		return m.stopAtInPlace("")
 	case confirmOverwrite:
 		plan := m.pendingPlan
 		m.pendingPlan = nil
 		switch key {
 		case "o":
-			return m.startTransfer(*plan, true)
+			m.logStart(*plan, true)
+			return m.startTransfer(*plan, RunOptions{Overwrite: true}, Result{})
 		case "s":
-			return m.startTransfer(*plan, false)
+			m.logStart(*plan, false)
+			return m.startTransfer(*plan, RunOptions{}, Result{})
 		}
 		m.mode = modeNormal
 		m.setStatus("copy cancelled", false)
 		return m, nil
 	case confirmDelete:
-		a := m.asked
-		m.asked = nil
-		if key != "y" || a == nil {
+		ts := a.targets
+		m.pendingDelete, m.ask = nil, nil
+		if key != "y" {
 			m.mode = modeNormal
 			m.setStatus("delete cancelled", false)
 			return m, nil
 		}
 		i := a.pane
-		fsys := a.fs
+		fsys, dir := a.fs, a.dir
 		remote := i == 1
 		on := m.opts.OnEvent
 		m.panes[i].sel = map[string]bool{}
-		m.mode = modeBusy
-		m.setStatus("deleting…", false)
-		return m, func() tea.Msg {
-			var names []string
-			for _, target := range a.targets {
-				if err := RemoveAll(context.Background(), fsys, target); err != nil {
-					return opDoneMsg{panes: []int{i}, err: fmt.Errorf("delete %s: %w", fsys.Base(target), err)}
+		all := a.paths
+		ctx, tick := m.startBusy(busyDelete, strings.Join(all, ", "))
+		m.busyRemote = remote
+		// Say what's about to go before any of it does: if this session
+		// dies part way, the log still shows what was asked for.
+		if on != nil {
+			on("delete", logged("started", "delete", strings.Join(all, ", ")), remote)
+		}
+		return m, tea.Batch(func() tea.Msg {
+			var names, gone, removed []string // the items finished, those already gone, and every path removed
+			for n, target := range all {
+				inside := 0
+				wasGone, err := removeTree(ctx, fsys, target, func(p string) {
+					removed = append(removed, p)
+					if p != target {
+						inside++
+					}
+				})
+				if err == nil {
+					if wasGone {
+						gone = append(gone, target)
+					} else {
+						names = append(names, target)
+					}
+					continue
 				}
-				names = append(names, target)
+				outcome := "failed"
+				d := "failed on " + target + ": " + err.Error()
+				status := fmt.Sprintf("delete %s stopped: %s", fsys.Base(target), err)
+				if errors.Is(err, context.Canceled) {
+					outcome = "cancelled"
+					d = "cancelled at " + target
+					status = fmt.Sprintf("delete cancelled after %d of %d item(s)", len(names)+len(gone), len(ts))
+				}
+				if len(removed) > 0 {
+					outcome = "partial" // something went before it stopped
+				}
+				d = strings.Join(all, ", ") + ": " + d
+				if len(names) > 0 {
+					d += "; deleted: " + strings.Join(names, ", ")
+				}
+				if len(gone) > 0 {
+					d += "; already gone: " + strings.Join(gone, ", ")
+				}
+				if inside > 0 {
+					d += fmt.Sprintf("; %d %s inside %s removed before it stopped", inside, plural(inside, "entry", "entries"), target)
+				}
+				if len(removed) > 0 {
+					d += "; removed: " + capList(removed, logCap)
+					rel := make([]string, len(removed))
+					for k, p := range removed {
+						rel[k] = relTo(fsys, dir, p)
+					}
+					status += fmt.Sprintf("; removed %d before that: %s (see ? or the log for all)", len(removed), firstFew(rel, 3))
+				} else {
+					status += "; nothing was removed"
+				}
+				if rest := all[n+1:]; len(rest) > 0 {
+					d += "; not reached: " + strings.Join(rest, ", ")
+				}
+				if on != nil {
+					on("delete", logged(outcome, "delete", d), remote)
+				}
+				detail := []string{"Delete on " + fsys.Label() + ": " + status, "", "Failed on: " + target, "  " + err.Error(), "",
+					fmt.Sprintf("Removed before it stopped (%d):", len(removed))}
+				for k, p := range removed {
+					if k == logCap {
+						detail = append(detail, fmt.Sprintf("  +%d more", len(removed)-logCap))
+						break
+					}
+					detail = append(detail, "  "+p)
+				}
+				if rest := all[n+1:]; len(rest) > 0 {
+					detail = append(detail, "", "Not reached:")
+					for _, p := range rest {
+						detail = append(detail, "  "+p)
+					}
+				}
+				return opDoneMsg{panes: []int{i}, err: errors.New(status), detail: detail}
+			}
+			line := logged("ok", "delete", strings.Join(names, ", "))
+			status := fmt.Sprintf("deleted %d item(s)", len(names))
+			if len(gone) > 0 {
+				line += "; already gone: " + strings.Join(gone, ", ")
+				status += fmt.Sprintf("; %d already gone", len(gone))
+			}
+			if len(names) == 0 {
+				line = logged("already gone", "delete", strings.Join(gone, ", "))
+				status = fmt.Sprintf("nothing deleted: %s already gone", plural(len(gone), "it was", fmt.Sprintf("all %d were", len(gone))))
 			}
 			if on != nil {
-				on("delete", strings.Join(names, ", "), remote)
+				on("delete", line, remote)
 			}
-			return opDoneMsg{panes: []int{i}, status: fmt.Sprintf("deleted %d item(s)", len(a.targets))}
-		}
+			detail := []string{fmt.Sprintf("Deleted on %s (%d item(s)):", fsys.Label(), len(names))}
+			for _, p := range names {
+				detail = append(detail, "  "+p)
+			}
+			if len(gone) > 0 {
+				detail = append(detail, "", "Already gone:")
+				for _, p := range gone {
+					detail = append(detail, "  "+p)
+				}
+			}
+			return opDoneMsg{panes: []int{i}, status: status, detail: detail}
+		}, tick)
 	}
 	return m, nil
 }
 
-func (m Model) startTransfer(plan Plan, overwrite bool) (tea.Model, tea.Cmd) {
-	now, cancel := context.WithCancel(context.Background())
-	after, stopAfter := context.WithCancel(now)
-	m.cancel, m.stopAfter, m.stopping = cancel, stopAfter, false
-	m.mode = modeBusy
-	m.progress = &Progress{Total: plan.TotalBytes, FilesTotal: len(plan.Files), Started: time.Now()}
+// deleteWhat names what a delete would remove, by kind: "the file a.txt",
+// "the directory d and everything inside it", "2 files and 1 directory
+// (with everything inside it)".
+func deleteWhat(ts []Entry) string {
+	if len(ts) == 1 {
+		e := ts[0]
+		switch {
+		case e.Link:
+			return "the symlink " + e.Name + " (not what it leads to)"
+		case e.IsDir:
+			return "the directory " + e.Name + " and everything inside it"
+		}
+		return "the file " + e.Name
+	}
+	var files, dirs, links int
+	for _, e := range ts {
+		switch {
+		case e.Link:
+			links++
+		case e.IsDir:
+			dirs++
+		default:
+			files++
+		}
+	}
+	var parts []string
+	for _, c := range []struct {
+		n         int
+		one, many string
+	}{{files, "file", "files"}, {dirs, "directory", "directories"}, {links, "symlink", "symlinks"}} {
+		if c.n > 0 {
+			parts = append(parts, fmt.Sprintf("%d %s", c.n, plural(c.n, c.one, c.many)))
+		}
+	}
+	s := parts[0]
+	if len(parts) > 1 {
+		s = strings.Join(parts[:len(parts)-1], ", ") + " and " + parts[len(parts)-1]
+	}
+	if dirs > 0 {
+		s += " (with everything inside " + plural(dirs, "it", "them") + ")"
+	}
+	return s
+}
+
+// startTransfer runs plan with opts; carry is what earlier runs of the same
+// plan did (one that stopped to ask, and goes on).
+func (m Model) startTransfer(plan Plan, opts RunOptions, carry Result) (tea.Model, tea.Cmd) {
+	ctx, tick := m.startBusy(busyCopy, "")
+	after, stopAfter := context.WithCancel(ctx)
+	m.stopAfter, m.stopping = stopAfter, false
+	m.running = &plan
+	m.runOpts, m.carry = opts, carry
+	run := opts // After is this run's alone: runOpts goes on to a resumed run
+	run.After = after
+	m.progress = &Progress{Total: plan.TotalBytes, FilesTotal: len(plan.Files), Started: m.busySince, At: m.busySince}
+	m.observe(m.busySince, 0)
 	ch := make(chan tea.Msg, 16)
 	m.events = ch
 	go func() {
-		res, err := runPlan(now, after, plan, overwrite, func(p Progress) {
+		res, err := RunWith(ctx, plan, run, func(p Progress) {
 			select {
 			case ch <- progressMsg(p):
 			default: // the UI is behind; drop this update rather than slow the copy
@@ -710,7 +1339,96 @@ func (m Model) startTransfer(plan Plan, overwrite bool) (tea.Model, tea.Cmd) {
 		})
 		ch <- transferDoneMsg{res: res, err: err, plan: plan}
 	}()
-	return m, waitFor(ch)
+	return m, tea.Batch(waitFor(ch), tick)
+}
+
+// stopAtInPlace ends a copy that stopped to ask about writing in place,
+// with no: the file is left as it was, and the copy goes no further.
+func (m Model) stopAtInPlace(why string) (tea.Model, tea.Cmd) {
+	plan, res := *m.pendingPlan, m.carry
+	var err error
+	if need := m.pendingInPlace; need != nil {
+		err = fmt.Errorf("%s not copied, left as it was: %w", where(plan.Dst, need.Target), need)
+	} else {
+		loses := m.pendingLoss
+		err = fmt.Errorf("%s not copied, left as it was: %w", loses.Where, loses)
+	}
+	m.mode, m.pendingPlan, m.pendingInPlace, m.pendingLoss, m.carry, m.runOpts, m.ask = modeNormal, nil, nil, nil, Result{}, RunOptions{}, nil
+	s := fmt.Sprintf("stopped: %v; %d of %d file(s) copied before that", err, res.Copied, len(plan.Files))
+	if why != "" {
+		s = why + "; " + s
+	}
+	m.setStatus(s, true)
+	m.lastOp = detailLines(m.reportAs("stopped", plan, res, err))
+	return m, nil
+}
+
+// lossQuestion asks what to do with a file that replacing would change for
+// someone else.
+func lossQuestion(l *ReplaceLoses) string {
+	q := fmt.Sprintf("Replacing %s: %s.  ", l.Where, l.what())
+	if l.InPlaceOK {
+		q += "i = write in place (keeps owner, group and hard links; not atomic)   "
+	} else {
+		q += "(it can't be written in place: not writable)   "
+	}
+	becomes := "owner/group stay"
+	if l.NewOwner != "" {
+		becomes = "owner/group become " + l.NewOwner
+	}
+	links := ""
+	if l.Links > 1 {
+		links = ", hard links split"
+	}
+	return q + fmt.Sprintf("r = replace (%s%s)   s = skip   any other key = stop  (the answer holds for the rest of this copy)", becomes, links)
+}
+
+// prodWarning starts a destructive question about fsys when it's a
+// production host.
+func (m Model) prodWarning(fsys FS) string {
+	if fsys == m.opts.Right && m.opts.Env == "production" {
+		return "⚠ PRODUCTION " + fsys.Label() + ": "
+	}
+	return ""
+}
+
+// relTo is p as a path under base, or p itself when it isn't under base.
+func relTo(fsys FS, base, p string) string {
+	if rest, ok := strings.CutPrefix(p, strings.TrimSuffix(fsys.Join(base, "x"), "x")); ok && rest != "" {
+		return rest
+	}
+	return p
+}
+
+// firstFew is the first n items, and how many more there are.
+func firstFew(items []string, n int) string {
+	if len(items) <= n {
+		return strings.Join(items, ", ")
+	}
+	return strings.Join(items[:n], ", ") + fmt.Sprintf(", +%d more", len(items)-n)
+}
+
+// detailLines splits an activity-log line into lines for the ? screen: a
+// clause a line, and a long list an item a line. The first clause, how it
+// went and what it was, stays whole.
+func detailLines(d string) []string {
+	out := []string{"Copy:"}
+	for k, clause := range strings.Split(d, "; ") {
+		if k == 0 {
+			out = append(out, "  "+clause)
+			continue
+		}
+		head, list, ok := strings.Cut(clause, ": ")
+		if ok && strings.Contains(list, ", ") {
+			out = append(out, "  "+head+":")
+			for _, it := range strings.Split(list, ", ") {
+				out = append(out, "    "+it)
+			}
+			continue
+		}
+		out = append(out, "  "+clause)
+	}
+	return out
 }
 
 // singleKey turns one rune of a burst back into the key it was, including
@@ -735,106 +1453,301 @@ func waitFor(ch chan tea.Msg) tea.Cmd {
 	return func() tea.Msg { return <-ch }
 }
 
-// transferKind names a copy for the activity log, and says whether it
-// changed something on the host.
+// transferKind is how the activity log names a copy in this direction.
 func (m Model) transferKind(plan Plan) (kind string, remote bool) {
+	kind, remote = "download", true
 	switch {
 	case plan.Dst == m.opts.Right:
-		return "upload", true
+		kind = "upload"
 	case plan.Src != m.opts.Right:
-		return "copy", false
+		kind, remote = "copy", false
 	}
-	return "download", true
+	return kind, remote
 }
 
-// report tells OnEvent what a finished copy did.
-func (m Model) report(plan Plan, res Result, stopped bool) {
-	if m.opts.OnEvent == nil {
-		return
-	}
-	kind, remote := m.transferKind(plan)
-	names, base := plan.Items, plan.Src.Base
-	if stopped { // only what was copied before it stopped
-		names, base = res.Files, plan.Dst.Base
-	}
+// transferSummary is "a.txt, b -> /dir" for the activity log.
+func (m Model) transferSummary(plan Plan) string {
 	var tops []string
-	for _, it := range names {
+	for _, it := range plan.Items {
 		if len(tops) == 5 {
-			tops = append(tops, fmt.Sprintf("+%d more", len(names)-5))
+			tops = append(tops, fmt.Sprintf("+%d more", len(plan.Items)-5))
 			break
 		}
-		tops = append(tops, base(it))
+		tops = append(tops, plan.Src.Base(it))
 	}
-	detail := fmt.Sprintf("%s -> %s (%d file(s), %s)", strings.Join(tops, ", "), plan.DstDir, res.Copied, HumanBytes(res.Bytes))
-	if stopped {
-		detail += "; stopped before the rest"
+	return strings.Join(tops, ", ") + " -> " + plan.DstDir
+}
+
+// logStart tells OnEvent a copy is starting, before a byte is written: if
+// the session dies part way, the log still shows what was under way.
+func (m Model) logStart(plan Plan, replace bool) {
+	kind, remote := m.transferKind(plan)
+	d := fmt.Sprintf("%s (%d file(s), %s", m.transferSummary(plan), len(plan.Files), HumanBytes(plan.TotalBytes))
+	if n := plan.Conflicts(); n > 0 {
+		var names []string
+		for _, f := range plan.Files {
+			if f.Exists {
+				name := f.Dst
+				if f.LinkTo != "" {
+					name += " (-> " + f.LinkTo + ")"
+				}
+				names = append(names, name)
+			}
+		}
+		if replace {
+			d += fmt.Sprintf(", replacing %d: %s", n, capList(names, logCap))
+		} else {
+			d += fmt.Sprintf(", keeping %d existing", n)
+		}
 	}
-	m.opts.OnEvent(kind, detail, remote)
+	m.emit(kind, logged("started", kind, d+")"), remote)
+}
+
+// report tells OnEvent what a copy did, finished or not, and returns what
+// it said.
+func (m Model) report(plan Plan, res Result, err error) string {
+	return m.reportAs("", plan, res, err)
+}
+
+// reportAs is report, saying outcome when it isn't "" (a copy stopped by
+// the person's no).
+func (m Model) reportAs(outcome string, plan Plan, res Result, err error) string {
+	kind, remote := m.transferKind(plan)
+	var partial *PartialWrite
+	if outcome == "" {
+		switch {
+		case err == nil:
+			outcome = "ok"
+		case errors.As(err, &partial):
+			outcome = "partial"
+		case errors.Is(err, context.Canceled):
+			outcome = "cancelled"
+		default:
+			outcome = "failed"
+		}
+	}
+	d := fmt.Sprintf("%s (%d file(s), %s)", m.transferSummary(plan), res.Copied, HumanBytes(res.Bytes))
+	if err != nil {
+		d = fmt.Sprintf("%s (%d of %d file(s), %s)", m.transferSummary(plan), res.Copied, len(plan.Files), HumanBytes(res.Bytes))
+		if outcome == "failed" || outcome == "stopped" {
+			d += ": " + err.Error()
+		}
+	}
+	d = logged(outcome, kind, d)
+	if res.Replaced > 0 {
+		d += fmt.Sprintf("; replaced %d existing: %s", res.Replaced, capList(res.ReplacedPaths, logCap))
+	}
+	if len(res.InPlace) > 0 {
+		d += "; written in place, not atomically: " + capList(res.InPlace, logCap)
+	}
+	if len(res.Lost) > 0 {
+		d += "; replaced as agreed, losing: " + capList(res.Lost, logCap)
+	}
+	if res.Skipped > 0 {
+		d += fmt.Sprintf("; kept %d existing", res.Skipped)
+	}
+	if w := warningsText(res.Warnings); w != "" {
+		d += "; " + w
+	}
+	switch {
+	case errors.As(err, &partial):
+		d += "; stopped: " + partial.Error()
+	case errors.Is(err, context.Canceled):
+		d += "; cancelled, the unfinished file discarded"
+	}
+	m.emit(kind, d, remote)
+	return d
+}
+
+// warningsText sums up what went wrong without stopping a copy: the first
+// warning in full, and how many more.
+func warningsText(ws []string) string {
+	switch len(ws) {
+	case 0:
+		return ""
+	case 1:
+		return ws[0]
+	}
+	return fmt.Sprintf("%s (and %d more file(s) the same way)", ws[0], len(ws)-1)
+}
+
+// logCap is how many paths the activity log lists for one operation.
+const logCap = 200
+
+// capList joins up to max items, then says how many more there were.
+func capList(items []string, max int) string {
+	if len(items) <= max {
+		return strings.Join(items, ", ")
+	}
+	return strings.Join(items[:max], ", ") + fmt.Sprintf(", +%d more", len(items)-max)
+}
+
+func plural(n int, one, many string) string {
+	if n == 1 {
+		return one
+	}
+	return many
 }
 
 // ---- view ------------------------------------------------------------------
 
+// Colours readable on dark and light backgrounds alike, deepened when the
+// terminal is known to be light (see darkBackground). The cursor is drawn
+// in reverse video, which works on any theme.
 var (
-	borderActive   = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("39"))
-	borderInactive = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("240"))
+	colorAccent = lipgloss.AdaptiveColor{Light: "25", Dark: "33"}   // blue
+	colorLink   = lipgloss.AdaptiveColor{Light: "30", Dark: "37"}   // teal
+	colorSel    = lipgloss.AdaptiveColor{Light: "130", Dark: "172"} // amber
+	colorMuted  = lipgloss.AdaptiveColor{Light: "242", Dark: "245"} // grey
+	colorDanger = lipgloss.AdaptiveColor{Light: "160", Dark: "203"} // red
+	colorOK     = lipgloss.AdaptiveColor{Light: "28", Dark: "71"}   // green
+
+	borderActive   = lipgloss.NewStyle().Foreground(colorAccent)
+	borderInactive = lipgloss.NewStyle().Foreground(colorMuted)
 	pathStyle      = lipgloss.NewStyle().Bold(true)
-	dirStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("39")).Bold(true)
-	linkStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("81"))
-	selStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("214")).Bold(true)
+	dirStyle       = lipgloss.NewStyle().Foreground(colorAccent).Bold(true)
+	linkStyle      = lipgloss.NewStyle().Foreground(colorLink)
+	selStyle       = lipgloss.NewStyle().Foreground(colorSel).Bold(true)
 	cursorStyle    = lipgloss.NewStyle().Reverse(true)
-	faint          = lipgloss.NewStyle().Foreground(lipgloss.Color("244"))
-	errStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("203"))
-	okStyle        = lipgloss.NewStyle().Foreground(lipgloss.Color("78"))
+	faint          = lipgloss.NewStyle().Foreground(colorMuted)
+	errStyle       = lipgloss.NewStyle().Foreground(colorDanger)
+	okStyle        = lipgloss.NewStyle().Foreground(colorOK)
 )
 
+// darkBackground reads $COLORFGBG ("fg;bg", set by rxvt, Konsole and
+// others) without asking the terminal anything. Background colours 7 and
+// 9-15 are light; anything else, or nothing, is taken as dark.
+func darkBackground(colorfgbg string) bool {
+	parts := strings.Split(colorfgbg, ";")
+	bg := parts[len(parts)-1]
+	switch bg {
+	case "7", "9", "10", "11", "12", "13", "14", "15":
+		return false
+	}
+	return true
+}
+
 func (m Model) View() string {
+	if m.tooSmall() {
+		return cellwidth.Fit(fmt.Sprintf("too small: %d×%d, need %d×%d", m.w, m.h, minWidth, minHeight), m.w) +
+			"\n" + faint.Render(cellwidth.Fit("q quits", m.w))
+	}
+	if m.mode == modeHelp {
+		return m.viewFullHelp()
+	}
 	paneW := m.w / 2
 	left := m.viewPane(0, paneW)
 	right := m.viewPane(1, m.w-paneW)
-	body := lipgloss.JoinHorizontal(lipgloss.Top, left, right)
-	return body + "\n" + m.viewStatus() + "\n" + m.viewHelp()
+	// Joined line by line: lipgloss would measure (and pad) each line by
+	// its own idea of width, which is wrong for Thai.
+	lines := make([]string, len(left))
+	for i := range left {
+		lines[i] = left[i] + right[i]
+	}
+	return strings.Join(lines, "\n") + "\n" + strings.Join(m.statusLines(), "\n") + "\n" + m.viewHelp()
 }
 
-func (m Model) viewPane(i, width int) string {
+// viewPane draws one pane, border included, as lines exactly width columns
+// wide.
+func (m Model) viewPane(i, width int) []string {
 	p := m.panes[i]
 	inner := width - 2
 	if inner < 10 {
 		inner = 10
 	}
 	rows := m.rows()
-	title := p.fs.Label() + ":" + p.dir
-	if n := len(p.sel); n > 0 {
-		title += fmt.Sprintf("  [%d selected]", n)
-	}
 	// One header line, then exactly rows() entries: clamp() scrolls by the
 	// same count, so the cursor row is always one that gets drawn. An error
 	// goes in the header rather than taking an entry's row.
-	header := pathStyle.Render(truncLeft(title, inner))
+	header := m.viewHeader(i, inner)
 	if p.err != "" {
-		header = errStyle.Render(ansi.Truncate("⚠ "+p.err, inner, "…"))
+		header = errStyle.Render(cellwidth.FitPad("⚠ "+termsafe.Label(p.err), inner))
 	}
-	lines := []string{header}
+	body := []string{header}
 	v := p.visible()
 	for r := 0; r < rows && p.offset+r < len(v); r++ {
 		idx := p.offset + r
-		lines = append(lines, m.viewRow(p, v[idx], inner, idx == p.cursor && i == m.active, idx == p.cursor))
+		body = append(body, m.viewRow(p, v[idx], inner, idx == p.cursor && i == m.active, idx == p.cursor))
 	}
-	for len(lines) < rows+1 {
-		lines = append(lines, "")
+	for len(body) < rows+1 {
+		body = append(body, strings.Repeat(" ", inner))
 	}
-	style := borderInactive
+	// The active pane's border is heavy: which side keys act on shows in
+	// any terminal, colour or not.
+	style, b := borderInactive, [6]string{"╭", "─", "╮", "│", "╰", "╯"}
 	if i == m.active {
-		style = borderActive
+		style, b = borderActive, [6]string{"┏", "━", "┓", "┃", "┗", "┛"}
 	}
-	return style.Width(inner).Render(strings.Join(lines, "\n"))
+	side := style.Render(b[3])
+	out := []string{style.Render(b[0] + strings.Repeat(b[1], inner) + b[2])}
+	for _, l := range body {
+		out = append(out, side+l+side)
+	}
+	return append(out, style.Render(b[4]+strings.Repeat(b[1], inner)+b[5]))
 }
 
+// viewHeader is a pane's first line, width columns wide: the host's
+// environment badge, the host, the path and the selection count. The path
+// is what gives way when it doesn't fit (from the left, so its end shows);
+// the host never does, short of not fitting on its own.
+func (m Model) viewHeader(i, width int) string {
+	p := m.panes[i]
+	badge, badgeStyle := "", pathStyle
+	if p.fs == m.opts.Right {
+		switch m.opts.Env {
+		case "production":
+			badge, badgeStyle = "⚑PROD ", errStyle.Bold(true)
+		case "staging":
+			badge, badgeStyle = "⚑staging ", selStyle
+		}
+	}
+	host := termsafe.Label(p.fs.Label()) + ":"
+	path := termsafe.Label(p.dir)
+	count := ""
+	if n := p.selected(); n > 0 {
+		count = fmt.Sprintf("  [%d selected]", n)
+	}
+	fixed := cellwidth.Width(badge) + cellwidth.Width(host)
+	if fixed+cellwidth.Width(count)+4 > width {
+		count = "" // the count gives way before the path is squeezed to nothing
+	}
+	room := width - fixed - cellwidth.Width(count)
+	if room < 1 {
+		// Even the host doesn't fit with its badge: keep the badge whole.
+		host = cellwidth.Fit(host, max(1, width-cellwidth.Width(badge)))
+		path, room = "", 0
+	}
+	path = cellwidth.TruncLeft(path, max(0, room))
+	title := faint
+	if i == m.active {
+		title = pathStyle.Foreground(colorAccent)
+	}
+	out := badgeStyle.Render(badge) + title.Render(host+path) + count
+	used := cellwidth.Width(badge) + cellwidth.Width(host) + cellwidth.Width(path) + cellwidth.Width(count)
+	if used > width { // a badge wider than the pane
+		return pathStyle.Render(cellwidth.FitPad(badge+host+path, width))
+	}
+	return out + strings.Repeat(" ", width-used)
+}
+
+// selected counts the selected entries that are shown.
+func (p *pane) selected() int {
+	n := 0
+	for _, e := range p.visible() {
+		if p.sel[e.Name] {
+			n++
+		}
+	}
+	return n
+}
+
+// viewRow draws one entry exactly width columns wide.
 func (m Model) viewRow(p *pane, e Entry, width int, cursor, cursorInactive bool) string {
 	mark := " "
 	if p.sel[e.Name] {
 		mark = "*"
 	}
-	name := e.Name
+	name := termsafe.Label(e.Name)
 	if e.IsDir {
 		name += "/"
 	}
@@ -853,29 +1766,70 @@ func (m Model) viewRow(p *pane, e Entry, width int, cursor, cursorInactive bool)
 	if date != "" {
 		right = fmt.Sprintf("%9s  %s", size, date)
 	}
-	nameW := width - 2 - lipgloss.Width(right) - 1
+	nameW := width - 2 - len(right) - 1 // right is ASCII
 	if nameW < 4 {
-		nameW, right = width-2, ""
+		nameW, right = width-3, ""
 	}
-	name = ansi.Truncate(name, nameW, "…")
-	pad := nameW - lipgloss.Width(name)
-	if pad < 0 {
-		pad = 0
+	// The active pane's cursor has the marker (and reverse video); the
+	// other pane's is only underlined and dim, so the two can't be taken
+	// for each other.
+	pointer := " "
+	if cursor {
+		pointer = "›"
 	}
-	line := mark + " " + name + strings.Repeat(" ", pad) + " " + right
+	line := mark + pointer + cellwidth.FitPad(name, nameW) + " " + right
+	var st lipgloss.Style
 	switch {
 	case cursor:
 		return cursorStyle.Render(line)
 	case p.sel[e.Name]:
-		return selStyle.Render(line)
+		st = selStyle
 	case e.IsDir:
-		return dirStyle.Render(line)
+		st = dirStyle
 	case e.Link:
-		return linkStyle.Render(line)
-	case cursorInactive:
-		return faint.Render(line)
+		st = linkStyle
+	default:
+		st = lipgloss.NewStyle()
 	}
-	return line
+	if cursorInactive {
+		st = st.Underline(true).Faint(true)
+	}
+	return st.Render(line)
+}
+
+// statusLines is the status area: one line, or two when a message or a
+// question needs them (cut with "…" past that; the log has the whole of
+// what was done).
+func (m Model) statusLines() []string {
+	wrap := func(s string, st lipgloss.Style) []string {
+		lines := cellwidth.Wrap(s, max(1, m.w), 2)
+		for k, l := range lines {
+			lines[k] = st.Render(l)
+		}
+		return lines
+	}
+	switch {
+	case m.mode == modeConfirm:
+		// A question may take a third line: it names what it would replace.
+		lines := cellwidth.Wrap(termsafe.Label(m.confirmText), max(1, m.w), 3)
+		for k, l := range lines {
+			lines[k] = selStyle.Render(l)
+		}
+		return lines
+	case m.mode == modeNotice:
+		return wrap(termsafe.Label(m.status)+"  (enter or esc: go on)", errStyle)
+	case m.mode == modeInput || m.mode == modeBusy || m.progress != nil:
+		return []string{m.viewStatus()}
+	case m.status != "":
+		st := okStyle
+		s := termsafe.Label(m.status)
+		if m.statusErr {
+			st = errStyle
+			s += "  (esc dismisses)"
+		}
+		return wrap(s, st)
+	}
+	return []string{""}
 }
 
 func (m Model) viewStatus() string {
@@ -883,7 +1837,16 @@ func (m Model) viewStatus() string {
 	case m.mode == modeInput:
 		return m.input.View()
 	case m.mode == modeConfirm:
-		return selStyle.Render(fitPath(m.confirmText, m.confirmPath, m.w))
+		return selStyle.Render(cellwidth.Fit(termsafe.Label(m.confirmText), m.w))
+	case m.mode == modeBusy && m.progress == nil:
+		s := map[busyKind]string{busyPlan: "working out what to copy…", busyDelete: "deleting…"}[m.busy]
+		if secs := int(m.clock.Sub(m.busySince).Seconds()); secs >= 2 {
+			s += fmt.Sprintf(" %ds", secs)
+		}
+		if m.cancelling {
+			return errStyle.Render(cellwidth.Fit("cancelling… esc or ctrl+c again drops the connection and quits   "+s, m.w))
+		}
+		return cellwidth.Fit(s+"  (esc cancels)", m.w)
 	case m.progress != nil:
 		p := m.progress
 		pct := 0.0
@@ -891,59 +1854,190 @@ func (m Model) viewStatus() string {
 			pct = float64(p.Done) / float64(p.Total)
 		}
 		barW := 20
-		filled := int(pct * float64(barW))
+		filled := min(barW, max(0, int(pct*float64(barW))))
 		bar := strings.Repeat("█", filled) + strings.Repeat("░", barW-filled)
 		name := ""
 		if p.File != "" {
-			name = m.panes[m.active].fs.Base(p.File) + "  "
+			name = termsafe.Label(m.panes[m.active].fs.Base(p.File)) + "  "
 		}
-		// what esc does first: the rest may be cut on a narrow terminal
-		hint := "esc: stop (an overwrite finishes first)"
-		if m.stopping {
-			hint = stopNowHint
+		rate := ""
+		if r, ok := m.rate(); ok {
+			rate = " " + HumanBytes(int64(r)) + "/s"
 		}
-		s := fmt.Sprintf("%s · %s%s %3.0f%%  %s / %s  %s/s  file %d/%d",
-			hint, name, bar, pct*100, HumanBytes(p.Done), HumanBytes(p.Total), HumanBytes(int64(p.Rate())), min(p.Files+1, p.FilesTotal), p.FilesTotal)
-		return ansi.Truncate(s, m.w, "…")
+		s := fmt.Sprintf("%s%s %3.0f%%  %s / %s %s  file %d/%d",
+			name, bar, pct*100, HumanBytes(p.Done), HumanBytes(p.Total), rate, min(p.Files+1, p.FilesTotal), p.FilesTotal)
+		// What needs attention goes first, so a narrow terminal still shows it.
+		var warn []string
+		switch {
+		case m.cancelling:
+			warn = append(warn, "cancelling… esc or ctrl+c again drops the connection and quits")
+		case m.stopping:
+			warn = append(warn, stopNowHint)
+		}
+		if idle := m.clock.Sub(m.lastChange); idle >= stallAfter {
+			warn = append(warn, fmt.Sprintf("no data for %ds", int(idle.Seconds())))
+		}
+		if len(warn) > 0 {
+			w := cellwidth.Fit(strings.Join(warn, " · ")+"   ", m.w)
+			return errStyle.Render(w) + cellwidth.Fit(s, max(0, m.w-cellwidth.Width(w)))
+		}
+		return cellwidth.Fit(s+"  (esc cancels)", m.w)
 	case m.status != "":
 		st := okStyle
 		if m.statusErr {
 			st = errStyle
 		}
-		return st.Render(fitPath(m.status, m.statusPath, m.w))
+		s := termsafe.Label(m.status)
+		if m.statusErr {
+			s += "  (esc dismisses)"
+		}
+		return st.Render(cellwidth.Fit(s, m.w))
 	}
 	return ""
 }
 
-const stopNowHint = "esc again: stop now (an overwrite is left partly written)"
-
-// fitPath fits s into w columns by shortening path (which s contains) from
-// the left, keeping at least its last 12 columns, then cutting the end.
-func fitPath(s, path string, w int) string {
-	if over := lipgloss.Width(s) - w; over > 0 && path != "" && strings.Contains(s, path) {
-		keep := max(lipgloss.Width(path)-over, 12)
-		if keep < lipgloss.Width(path) {
-			s = strings.Replace(s, path, truncLeft(path, keep), 1)
-		}
-	}
-	return ansi.Truncate(s, w, "…")
-}
-
+// viewHelp is the one-line key reminder: as many keys as fit, most used
+// first, and always where to find the rest.
 func (m Model) viewHelp() string {
-	h := "tab switch  hjkl move  / find  space select  a all  c copy→  d delete  r rename  m mkdir  . hidden  ~ home  R reload  q quit"
-	return faint.Render(ansi.Truncate(h, m.w, "…"))
+	// Only the keys that do something now: while a copy runs, q waits.
+	switch {
+	case m.mode == modeBusy && m.cancelling:
+		return faint.Render(cellwidth.Fit("esc or ctrl+c again: drop the connection and quit", m.w))
+	case m.mode == modeBusy && m.stopping:
+		return faint.Render(cellwidth.Fit("esc or ctrl+c again: stop now, leaving the file written in place partly written", m.w))
+	case m.mode == modeBusy:
+		return faint.Render(cellwidth.Fit("esc or ctrl+c cancel   (other keys wait until this is done)", m.w))
+	case m.mode == modeConfirm:
+		// The question names its keys too, but a long one is cut: these
+		// always show.
+		keys := map[confirmKind]string{
+			confirmDelete:    "y delete   any other key cancels",
+			confirmOverwrite: "o overwrite   s skip those   esc cancel",
+			confirmInPlace:   "i write in place   s skip this file   any other key stops",
+			confirmLoss:      "r replace   s skip   any other key stops",
+		}[m.confirmKind]
+		if m.confirmKind == confirmLoss && m.pendingLoss != nil && m.pendingLoss.InPlaceOK {
+			keys = "i write in place   " + keys
+		}
+		return faint.Render(cellwidth.Fit(keys, m.w))
+	case m.mode == modeNotice:
+		return faint.Render(cellwidth.Fit("enter or esc: go on   (other keys wait, so an answer typed already does nothing)", m.w))
+	case m.mode == modeInput && m.inputKind == inputFind:
+		return faint.Render(cellwidth.Fit("enter or esc: done finding", m.w))
+	case m.mode == modeInput:
+		return faint.Render(cellwidth.Fit("enter ok   esc cancel", m.w))
+	}
+	keys := []string{"tab side", "space select", "c copy", "d delete", "R rename", "m mkdir", "/ find", "hjkl move", "* all", ". hidden", "~ home", "r reload"}
+	tail := "? help  q quit"
+	line := ""
+	for _, k := range keys {
+		if cellwidth.Width(line+k+"  "+tail) > m.w {
+			break
+		}
+		line += k + "  "
+	}
+	return faint.Render(cellwidth.Fit(line+tail, m.w))
 }
 
-// truncLeft keeps the end of a long path, which is the part that matters.
-func truncLeft(s string, w int) string {
-	if lipgloss.Width(s) <= w {
-		return s
+// fullHelp is the ? screen. The keys mean what they mean in the host
+// picker wherever both have the idea (r reloads, R renames, d deletes,
+// space marks, / finds, esc clears, ? helps, q quits).
+var fullHelp = []string{
+	"Keys",
+	"  tab, ctrl+w        switch side",
+	"  j k, up down       move",
+	"  g G, home end      top, bottom",
+	"  pgup pgdn          a page up, down",
+	"  ctrl+u ctrl+d      half a page up, down",
+	"  l, enter, right    open a directory",
+	"  h, backspace, left go up a directory",
+	"  space, insert      select or unselect, and move down",
+	"  *                  select all / none",
+	"  c, y, F5           copy to the other side (asks before replacing files)",
+	"  d, F8, delete      delete (asks first; directories with everything inside)",
+	"  R, F6              rename (refuses a name that's taken)",
+	"  m, F7              new directory",
+	"  /, n               find by name, next match",
+	"  .                  show hidden files",
+	"  ~                  home directory",
+	"  r, ctrl+r          reload both sides",
+	"  esc                dismiss a message, then clear the selection",
+	"  ?                  this help",
+	"  q, ctrl+c          quit",
+	"",
+	"While a copy or delete runs: esc or ctrl+c cancels; if the host has",
+	"stopped answering, press it again to drop the connection and quit.",
+	"A file you agreed to have written in place is let finish first (esc",
+	"again stops it at once, leaving it partly written). meterm never",
+	"removes an existing file it is overwriting.",
+	"",
+	"A host marked ⚑PROD is production: its questions before a delete or an",
+	"overwrite say PRODUCTION. ⚑staging marks a staging host.",
+	"",
+	"Where no temporary file can be written next to a file being replaced",
+	"(its directory is read-only), you're asked before it's written in",
+	"place, which isn't atomic: a failure part way leaves a partial file.",
+	"",
+	"A replacement keeps the old file's permissions, and its owner and group",
+	"where they can be given (as root, or a group you're in). If they can't,",
+	"or the file has other hard links, you're asked once per copy: write in",
+	"place (keeps them; not atomic), replace (they change, links split), or",
+	"skip. A host doesn't say how many hard links a file has, so there a",
+	"replacement splits them unasked. ACLs and extended attributes are never",
+	"carried over by a replacement. A file whose permissions can't be set on",
+	"its replacement (the server refuses) is left as it was, rather than",
+	"replaced by one more open.",
+	"",
+	"Uploads, downloads, deletes and renames on the host are in the",
+	"activity log (meterm activity), in full.",
+}
+
+// helpLines is the ? screen: the keys, then what the last operation did.
+func (m Model) helpLines() []string {
+	if len(m.lastOp) == 0 {
+		return fullHelp
 	}
-	r := []rune(s)
-	for len(r) > 0 && lipgloss.Width(string(r))+1 > w {
-		r = r[1:]
+	out := append(append([]string(nil), fullHelp...), "", "Last operation (also in the activity log):")
+	for _, l := range m.lastOp {
+		out = append(out, "  "+termsafe.Label(l))
 	}
-	return "…" + string(r)
+	return out
+}
+
+func (m Model) viewFullHelp() string {
+	inner := m.w - 4
+	rows := m.h - 2
+	help := m.helpLines()
+	top := min(m.helpTop, max(0, len(help)-rows))
+	title := " meterm files: keys "
+	right := ""
+	if len(help) > rows {
+		right = fmt.Sprintf(" %d-%d of %d · j/k scroll ", top+1, min(top+rows, len(help)), len(help))
+	}
+	border := func(open, close, left, right string) string {
+		fill := m.w - 2 - 1 - cellwidth.Width(left) - cellwidth.Width(right)
+		if fill < 1 {
+			right, fill = "", m.w-2-1-cellwidth.Width(left)
+		}
+		if fill < 0 {
+			left, fill = cellwidth.Fit(left, m.w-3), 0
+			fill = m.w - 3 - cellwidth.Width(left)
+		}
+		if right != "" {
+			return faint.Render(open+"─") + pathStyle.Render(left) + faint.Render(strings.Repeat("─", fill-1)) + faint.Render(right) + faint.Render("─"+close)
+		}
+		return faint.Render(open+"─") + pathStyle.Render(left) + faint.Render(strings.Repeat("─", fill)+close)
+	}
+	lines := []string{border("╭", "╮", title, right)}
+	for k := 0; k < rows; k++ {
+		l := ""
+		if top+k < len(help) {
+			l = help[top+k]
+		}
+		lines = append(lines, faint.Render("│")+" "+cellwidth.FitPad(l, inner)+" "+faint.Render("│"))
+	}
+	lines = append(lines, border("╰", "╯", " any other key closes ", ""))
+	return strings.Join(lines, "\n")
 }
 
 // RunUI starts the file manager full-screen and returns when the person quits.
@@ -952,7 +2046,13 @@ func RunUI(o Options) error {
 	// terminal (OSC 11) and waits up to 5 seconds for an answer some
 	// terminals never send, reading stdin at the same time as Bubble Tea —
 	// which shows up as keys ignored and the UI freezing for seconds.
-	lipgloss.SetHasDarkBackground(true)
-	_, err := tea.NewProgram(New(o), tea.WithAltScreen()).Run()
-	return err
+	lipgloss.SetHasDarkBackground(darkBackground(os.Getenv("COLORFGBG")))
+	final, err := tea.NewProgram(New(o), tea.WithAltScreen()).Run()
+	if err != nil {
+		return err
+	}
+	if fm, ok := final.(Model); ok {
+		return fm.ExitError()
+	}
+	return nil
 }
