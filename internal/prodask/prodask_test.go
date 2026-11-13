@@ -181,3 +181,31 @@ func TestIssueNeedsAPrivateDir(t *testing.T) {
 		t.Error("Issue in a world-writable dir")
 	}
 }
+
+// A token file swapped for another between its checks and its reading (a
+// racing process replacing it with one holding the same value) doesn't
+// count: what's read must be the file that was checked.
+func TestConsumeRefusesAFileSwappedWhileRead(t *testing.T) {
+	clearEnv(t)
+	dir := privDir(t)
+	env, err := Issue(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	setEnv(t, env)
+	value := strings.TrimPrefix(env[1], ValueEnv+"=")
+	old := betweenStatAndOpen
+	betweenStatAndOpen = func(p string) {
+		other := filepath.Join(dir, "other")
+		if err := os.WriteFile(other, []byte(value), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Rename(other, p); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Cleanup(func() { betweenStatAndOpen = old })
+	if asked, note := Consume(); asked || !strings.Contains(note, "changed while being read") {
+		t.Errorf("swapped file: %v %q", asked, note)
+	}
+}

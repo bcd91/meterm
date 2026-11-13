@@ -4,10 +4,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/charmbracelet/bubbletea"
+	"meterm/internal/config"
 )
-
-var _ = tea.KeyEnter
 
 // Typed quotes are the palette's own, as before the picker learnt to quote
 // names: a "..." that happens to be a valid Go literal is not decoded. A
@@ -57,5 +55,22 @@ func TestPickerReferencesReadBackExactly(t *testing.T) {
 	tok := typedName("zw\u200bsp", refs)
 	if got := splitArgs(`cp '`+tok+`' x`, refs); got[1] != tok {
 		t.Errorf("quoted reference: %q", got)
+	}
+}
+
+// L's follow-up palette names the host by reference too, not by its raw
+// name (which could carry an escape onto the screen).
+func TestLogsFollowUpNamesTheHostByReference(t *testing.T) {
+	m := fleet(t)
+	slowDial(t)
+	writeHosts(t, m.cfgPath, config.Host{Name: "lo\x1b[2Jgs", Address: "192.0.2.95"})
+	m = drive(t, m, nil, "r")
+	m.reselect("lo\x1b[2Jgs")
+	m, _ = step(t, m, "L")
+	if strings.Contains(m.afterExec, "\x1b") || !strings.Contains(m.afterExec, "‹") {
+		t.Fatalf("afterExec = %q", m.afterExec)
+	}
+	if got := splitArgs(m.afterExec, m.refs); len(got) < 2 || got[1] != "lo\x1b[2Jgs" {
+		t.Errorf("reads back as %q", got)
 	}
 }

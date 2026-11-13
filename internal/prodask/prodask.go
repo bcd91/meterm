@@ -41,6 +41,10 @@ const tokenBytes = 16 // 128 bits
 // where it isn't checked); tests replace it.
 var ownedByUs = fileOwnedByUs
 
+// betweenStatAndOpen runs after the token file's checks and before it's
+// opened; tests swap the file there, as a racing process could.
+var betweenStatAndOpen = func(string) {}
+
 // Issue writes a fresh token to a new file in dir and returns the two
 // environment entries a child needs to Consume it. dir must be the caller's
 // own: on unix it is refused when group or others can write to it.
@@ -134,6 +138,7 @@ func check(path, value string) error {
 			return errors.New("not owned by this user")
 		}
 	}
+	betweenStatAndOpen(path)
 	f, err := os.Open(path)
 	if err != nil {
 		return err

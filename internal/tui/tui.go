@@ -1134,7 +1134,7 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if name := m.selectedName(); name != "" {
 					// List what's there first, then hand back a palette ready
 					// for the file to tail.
-					m.afterExec = "logs " + name + " -f /var/log/"
+					m.afterExec = "logs " + typedName(name, m.refs) + " -f /var/log/"
 					return m, m.run(false, keyAction("L", name)...)
 				}
 			case key.Matches(msg, keys.Tunnel):
