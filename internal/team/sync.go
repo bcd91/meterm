@@ -171,7 +171,8 @@ func Sync(ctx context.Context, b Backend, teamID string, role Role, cfg *config.
 				continue
 			}
 			incoming := r.ApplyTo(l, teamID)
-			if err := incoming.CheckShared(); err != nil {
+			warn, err := incoming.CheckFromTeam()
+			if err != nil {
 				keepBase()
 				add(name, Rejected, "not applied: "+err.Error())
 				continue
@@ -180,7 +181,7 @@ func Sync(ctx context.Context, b Backend, teamID string, role Role, cfg *config.
 				cfg.Upsert(incoming)
 			}
 			res.Base[name] = r
-			add(name, Pulled, "")
+			add(name, Pulled, flagged(warn))
 
 		case remoteUnchanged: // we moved
 			wantPush := opt.Push && (opt.Only == nil || opt.Only[name])
@@ -207,7 +208,7 @@ func Sync(ctx context.Context, b Backend, teamID string, role Role, cfg *config.
 				}
 				if !lok {
 					p.Host = r
-				} else if err := ls.ApplyTo(config.Host{}, teamID).CheckShared(); err != nil {
+				} else if _, err := ls.ApplyTo(config.Host{}, teamID).CheckFromTeam(); err != nil {
 					add(name, Rejected, "not proposed: "+err.Error())
 					continue
 				}
@@ -241,14 +242,15 @@ func Sync(ctx context.Context, b Backend, teamID string, role Role, cfg *config.
 				add(name, PushedRemoval, "")
 				continue
 			}
-			if err := ls.ApplyTo(config.Host{}, teamID).CheckShared(); err != nil {
+			warn, err := ls.ApplyTo(config.Host{}, teamID).CheckFromTeam()
+			if err != nil {
 				keepBase()
 				add(name, Rejected, "not shared: "+err.Error())
 				continue
 			}
 			if opt.DryRun {
 				keepBase()
-				add(name, Pushed, "")
+				add(name, Pushed, flagged(warn))
 				continue
 			}
 			stored, err := b.PutHost(ctx, teamID, ls, expected)
@@ -261,7 +263,7 @@ func Sync(ctx context.Context, b Backend, teamID string, role Role, cfg *config.
 				return res, fmt.Errorf("push %s: %w", name, err)
 			}
 			res.Base[name] = stored
-			add(name, Pushed, "")
+			add(name, Pushed, flagged(warn))
 
 		default:
 			keepBase() // keep comparing against the old base so it stays a conflict
@@ -269,6 +271,16 @@ func Sync(ctx context.Context, b Backend, teamID string, role Role, cfg *config.
 		}
 	}
 	return res, nil
+}
+
+// flagged is the Detail for a host kept or sent although this version would
+// refuse it if it were typed in new (config.Host.CheckFromTeam): the field
+// and why, and how to fix it.
+func flagged(warn error) string {
+	if warn == nil {
+		return ""
+	}
+	return "warning: " + warn.Error() + "; kept, as older versions took it: fix it with `meterm edit`"
 }
 
 // Resolve settles one host that sync reported as a conflict or name-taken.
@@ -304,7 +316,7 @@ func Resolve(ctx context.Context, b Backend, teamID string, role Role, cfg *conf
 			cur = *l
 		}
 		incoming := r.ApplyTo(cur, teamID)
-		if err := incoming.CheckShared(); err != nil {
+		if _, err := incoming.CheckFromTeam(); err != nil {
 			return base, fmt.Errorf("the team's copy of %s isn't safe to use: %w", name, err)
 		}
 		cfg.Upsert(incoming)

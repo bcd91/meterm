@@ -187,9 +187,13 @@ func ReviewProposal(p Proposal, team []SharedHost) Review {
 		}
 		return rv
 	}
-	if err := p.Host.ApplyTo(config.Host{}, "proposal").CheckShared(); err != nil {
+	warn, err := p.Host.ApplyTo(config.Host{}, "proposal").CheckFromTeam()
+	if err != nil {
 		rv.Invalid = err
 		return rv
+	}
+	if warn != nil {
+		rv.Warnings = append(rv.Warnings, warn.Error()+": older versions took it, so it isn't refused here")
 	}
 	addrs := []string{p.Host.Address}
 	for _, rt := range p.Host.Routes {

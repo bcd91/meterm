@@ -132,11 +132,30 @@ v0.23.1 asked about nothing but deleting a host in the picker.
 
 - A host can be named as it's shown when its saved name has hidden
   characters; a name two hosts show as is an error naming both.
-- `add`, `edit`, `rename` and `import`, like hosts from a team, refuse
-  control and invisible characters (zero-width, bidi, soft hyphen, BOM) in
-  names, notes and tags. `add`, `edit`, `rename`, `group add`, `tunnel add`,
-  `import` and team hosts refuse a name that mixes Latin, Cyrillic or Greek letters
-  (`pаy1` with a Cyrillic `а`); one already saved still works.
+- `add`, `edit`, `rename` and `import` refuse control and invisible
+  characters (zero-width space, joiner and non-joiner, bidi controls, soft
+  hyphen, BOM) in names, addresses, users, groups, tags and jump hosts.
+  Notes and tunnel notes may hold the zero-width joiner and non-joiner,
+  which emoji (`👨‍💻`, `🏳️‍🌈`) and Persian need; every other control or
+  invisible character is refused there too. A host name, group, route or
+  tunnel name is refused when one word in it mixes Latin with Cyrillic or
+  Greek letters (`pаypal` with a Cyrillic `а`); words are split at `-`,
+  `_`, `.`, digits and anything else that isn't a letter, so `db-москва`
+  and `api-μ` are fine. `add`, `edit`, `rename`, `group add`, `tunnel add`
+  and `import` apply this; a look-alike name already saved still works and
+  can still be edited.
+- **Team pulls keep and flag, and never drop a host silently.** A team host
+  that v0.23.1 accepted but these rules refuse (an invisible character, a
+  word mixing alphabets) is still pulled, kept and listed with a warning
+  naming the host and the field, as a host saved locally with one still
+  loads; fix it with `meterm edit`. `team push`, `team approve` and `team
+  resolve --theirs` take such a host too, so a member can still sync a host
+  someone else created. A team host with what v0.23.1 refused as well
+  (control characters such as escape sequences and line breaks, bidi
+  controls, ssh options that run commands) is not applied: `team pull` and
+  `team sync` report it as `rejected`, `team status` lists it, and the
+  command exits non-zero. Before, a rejected host was only reported and the
+  command exited 0.
 - `add` and `edit` refuse an address, user or jump that ssh would read as an
   option or split (`--address=-oProxyCommand=…`), and an identity file
   starting with `-`, naming the flag. Before, only `connect` refused them.

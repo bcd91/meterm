@@ -70,7 +70,7 @@ func newTunnelAddCmd() *cobra.Command {
 				return fmt.Errorf("no such host: %s (use `meterm list` to see saved hosts)", args[0])
 			}
 			fw.Note = strings.TrimSpace(note)
-			if err := config.CheckText("--note", fw.Note); err != nil || len(fw.Note) > 200 {
+			if err := config.CheckNote("--note", fw.Note); err != nil || len(fw.Note) > 200 {
 				return fmt.Errorf("--note: plain text, at most 200 characters")
 			}
 			for _, f := range h.Forwards {

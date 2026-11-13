@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"meterm/internal/activity"
@@ -557,5 +558,93 @@ func TestUploadStartThenOutcome(t *testing.T) {
 	}
 	if broken := activity.VerifyShared(eventsOf(got)); broken != nil {
 		t.Errorf("chain: %v", broken)
+	}
+}
+
+// A host an older version shared stays when this one would refuse it now,
+// flagged; one that was never safe is rejected and counts as a problem.
+func TestPullKeepsHostsOlderVersionsAccepted(t *testing.T) {
+	s := NewMemoryStore()
+	teamID, a, b := teamOf(t, s, RoleMember)
+	for _, h := range []SharedHost{
+		{Name: "db-москва", Address: "192.0.2.1"},
+		{Name: "plain", Address: "192.0.2.2", Notes: "\U0001F468‍\U0001F4BB oncall"},
+		{Name: "fa", Address: "192.0.2.3", Notes: "می‌خواهم"},
+		{Name: "pаypal", Address: "192.0.2.4"},
+		{Name: "esc", Address: "192.0.2.5", Notes: "a\x1b]0;PWN\x07"},
+	} {
+		if _, err := a.PutHost(ctx, teamID, h, 0); err != nil {
+			t.Fatal(err)
+		}
+	}
+	bCfg := emptyCfg(t)
+	res, err := Sync(ctx, b, teamID, RoleMember, bCfg, Base{}, Options{Pull: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, n := range []string{"db-москва", "plain", "fa", "pаypal"} {
+		if _, i := bCfg.Find(n); i < 0 {
+			t.Errorf("%q dropped: %+v", n, res.Changes)
+		}
+		if _, ok := res.Base[n]; !ok {
+			t.Errorf("%q not in the base", n)
+		}
+	}
+	got := map[string]Change{}
+	for _, c := range res.Changes {
+		got[c.Host] = c
+	}
+	if c := got["pаypal"]; c.Outcome != Pulled || !strings.Contains(c.Detail, "name") {
+		t.Errorf("look-alike not flagged: %+v", c)
+	}
+	for _, n := range []string{"db-москва", "plain", "fa"} {
+		if c := got[n]; c.Outcome != Pulled || c.Detail != "" {
+			t.Errorf("%s: %+v", n, c)
+		}
+	}
+	if _, i := bCfg.Find("esc"); i >= 0 || got["esc"].Outcome != Rejected {
+		t.Errorf("escape host: %+v", got["esc"])
+	}
+	if Problems(res.Changes) != 1 {
+		t.Errorf("Problems = %d, want 1 (the rejected host)", Problems(res.Changes))
+	}
+
+	// A member who did not create the flagged host can still sync an edit to it
+	// (this store takes no proposals, so it ends as forbidden, not rejected).
+	h, _ := bCfg.Find("pаypal")
+	h.Port = 2222
+	res, err = Sync(ctx, b, teamID, RoleMember, bCfg, res.Base, Options{Push: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if o := outcomes(res)["pаypal"]; o == Rejected {
+		t.Errorf("edit of a flagged host: %v (%+v)", o, res.Changes)
+	}
+}
+
+// Taking the team's copy works for a host only this version would refuse.
+func TestResolveTheirsKeepsFlaggedHost(t *testing.T) {
+	s := NewMemoryStore()
+	teamID, a, b := teamOf(t, s, RoleAdmin)
+	if _, err := a.PutHost(ctx, teamID, SharedHost{Name: "pаypal", Address: "192.0.2.4"}, 0); err != nil {
+		t.Fatal(err)
+	}
+	bCfg := emptyCfg(t)
+	bCfg.Upsert(config.Host{Name: "pаypal", Address: "192.0.2.9"})
+	if _, err := Resolve(ctx, b, teamID, RoleAdmin, bCfg, Base{}, "pаypal", true); err != nil {
+		t.Fatal(err)
+	}
+	if h, _ := bCfg.Find("pаypal"); h == nil || h.Address != "192.0.2.4" {
+		t.Errorf("got %+v", h)
+	}
+	// And pushing it as an admin works too.
+	h, _ := bCfg.Find("pаypal")
+	h.Port = 2222
+	res, err := Sync(ctx, b, teamID, RoleAdmin, bCfg, Base{"pаypal": {Name: "pаypal", Address: "192.0.2.4"}}, Options{Push: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if o := outcomes(res)["pаypal"]; o != Pushed {
+		t.Errorf("push of a flagged host: %+v", res.Changes)
 	}
 }

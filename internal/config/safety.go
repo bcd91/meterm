@@ -42,13 +42,15 @@ func CheckUser(s string) error {
 
 // CheckJump accepts a comma-separated jump path: saved host names, or
 // [user@]host[:port] specs.
-func CheckJump(spec string) error {
+func CheckJump(spec string) error { return checkJump(spec, refused) }
+
+func checkJump(spec string, ctl func(rune) bool) error {
 	if spec == "" {
 		return nil
 	}
 	for _, hop := range strings.Split(spec, ",") {
 		hop = strings.TrimSpace(hop)
-		if hop == "" || strings.HasPrefix(hop, "-") || hasControl(hop) || strings.ContainsAny(hop, " \t'\"`$\\;&|<>()*?") {
+		if hop == "" || strings.HasPrefix(hop, "-") || has(hop, ctl) || strings.ContainsAny(hop, " \t'\"`$\\;&|<>()*?") {
 			return fmt.Errorf("jump host %q isn't a host name or [user@]host[:port]", hop)
 		}
 		host := hop
@@ -72,25 +74,50 @@ func CheckJump(spec string) error {
 	return nil
 }
 
-// hasControl says s holds a character termsafe.Label wouldn't show as it
-// is: a control character, a bidi control, or an invisible one (zero-width
-// space or joiner, soft hyphen, BOM...). Refusing them keeps two names
-// that show alike from being two hosts.
-func hasControl(s string) bool {
+// refused says r is a character termsafe.Label wouldn't show as it is: a
+// control character, a bidi control, or an invisible one (zero-width space
+// or joiner, soft hyphen, BOM...). Refusing them keeps two names that show
+// alike from being two hosts.
+func refused(r rune) bool { return unicode.IsControl(r) || termsafe.Drops(r) }
+
+// refusedInNote is refused less the zero-width joiner and non-joiner, which
+// prose needs: emoji sequences hold a joiner (👨‍💻, 🏳️‍🌈) and Persian
+// writes with the non-joiner. Display drops both, and a note doesn't tell
+// one host from another, so they can't make two hosts pass for one.
+func refusedInNote(r rune) bool { return r != 0x200c && r != 0x200d && refused(r) }
+
+// refusedBefore is what v0.23.1 refused in text from a team: control
+// characters (C0, C1, DEL — escapes and line breaks among them), the line
+// and paragraph separators, and the bidi embeddings, overrides and
+// isolates. A team host holding anything else that refused takes was
+// accepted then, so it is kept now, with a warning (CheckFromTeam).
+func refusedBefore(r rune) bool {
+	return unicode.IsControl(r) || r == 0x2028 || r == 0x2029 || (r >= 0x202a && r <= 0x202e) || (r >= 0x2066 && r <= 0x2069)
+}
+
+func has(s string, ctl func(rune) bool) bool {
 	for _, r := range s {
-		if unicode.IsControl(r) || termsafe.Drops(r) {
+		if ctl(r) {
 			return true
 		}
 	}
 	return false
 }
 
+func hasControl(s string) bool { return has(s, refused) }
+
 // CheckText rejects control characters — terminal escapes, line breaks,
 // bidi overrides, invisible characters — in text that gets printed: names, notes, tags, groups.
 // A team-shared note with an escape sequence could otherwise rewrite the
 // terminal or set the clipboard.
-func CheckText(field, s string) error {
-	if hasControl(s) {
+func CheckText(field, s string) error { return checkText(field, s, refused) }
+
+// CheckNote is CheckText for free text — notes, tunnel notes — which may
+// also hold the zero-width joiner and non-joiner (refusedInNote).
+func CheckNote(field, s string) error { return checkText(field, s, refusedInNote) }
+
+func checkText(field, s string, ctl func(rune) bool) error {
+	if has(s, ctl) {
 		return fmt.Errorf("%s contains control or invisible characters", field)
 	}
 	return nil
@@ -100,26 +127,32 @@ func CheckText(field, s string) error {
 // "pаy1" with a Cyrillic а shows as "pay1" and is another host.
 var ErrMixedScript = errors.New("mixes letters from different alphabets, so it can look like another name")
 
-// MixedScripts names the alphabets s mixes ("Latin and Cyrillic"), or ""
-// when it doesn't mix Latin, Cyrillic and Greek. Other scripts (Thai, CJK)
-// alongside Latin are fine: they can't pass for Latin letters.
+// MixedScripts names the alphabets one word of s mixes ("Latin and
+// Cyrillic"), or "" when no word mixes Latin, Cyrillic and Greek. A word is
+// a run of letters (with their combining marks): "-", "_", ".", digits and
+// anything else that isn't a letter split words, so "db-москва" and
+// "api-μ" are fine while "pаypal" with a Cyrillic а is not. Other scripts
+// (Thai, CJK) alongside Latin are fine: they can't pass for Latin letters.
 func MixedScripts(s string) string {
-	var found []string
-	for _, sc := range []struct {
-		name string
-		t    *unicode.RangeTable
-	}{{"Latin", unicode.Latin}, {"Cyrillic", unicode.Cyrillic}, {"Greek", unicode.Greek}} {
-		for _, r := range s {
-			if unicode.IsLetter(r) && unicode.Is(sc.t, r) {
-				found = append(found, sc.name)
-				break
+	words := strings.FieldsFunc(s, func(r rune) bool { return !unicode.IsLetter(r) && !unicode.IsMark(r) })
+	for _, w := range words {
+		var found []string
+		for _, sc := range []struct {
+			name string
+			t    *unicode.RangeTable
+		}{{"Latin", unicode.Latin}, {"Cyrillic", unicode.Cyrillic}, {"Greek", unicode.Greek}} {
+			for _, r := range w {
+				if unicode.IsLetter(r) && unicode.Is(sc.t, r) {
+					found = append(found, sc.name)
+					break
+				}
 			}
 		}
+		if len(found) >= 2 {
+			return strings.Join(found, " and ")
+		}
 	}
-	if len(found) < 2 {
-		return ""
-	}
-	return strings.Join(found, " and ")
+	return ""
 }
 
 // CheckName is CheckText for a name, which also mustn't mix alphabets that
@@ -154,7 +187,9 @@ var safeFlags = map[string]bool{"-4": true, "-6": true, "-C": true, "-q": true, 
 
 // CheckSharedExtraArgs accepts only the extra ssh arguments it's safe for
 // a teammate to set: a few bare flags and connection-tuning -o options.
-func CheckSharedExtraArgs(args []string) error {
+func CheckSharedExtraArgs(args []string) error { return checkSharedExtraArgs(args, refused) }
+
+func checkSharedExtraArgs(args []string, ctl func(rune) bool) error {
 	for i := 0; i < len(args); i++ {
 		a := args[i]
 		if safeFlags[a] {
@@ -175,7 +210,7 @@ func CheckSharedExtraArgs(args []string) error {
 			key, val, ok = strings.Cut(strings.TrimSpace(opt), " ")
 		}
 		key = strings.ToLower(strings.TrimSpace(key))
-		if !ok || !safeOptions[key] || hasControl(val) || strings.ContainsAny(val, "%$`") {
+		if !ok || !safeOptions[key] || has(val, ctl) || strings.ContainsAny(val, "%$`") {
 			return fmt.Errorf("ssh option %q isn't allowed on a team host (only connection tuning is)", opt)
 		}
 	}
@@ -185,7 +220,9 @@ func CheckSharedExtraArgs(args []string) error {
 // CheckConnection checks the fields of h that reach ssh's command line:
 // address, user, jump path, routes and forwards; and extra args when the
 // host is shared with a team.
-func (h Host) CheckConnection() error {
+func (h Host) CheckConnection() error { return h.checkConnection(refused) }
+
+func (h Host) checkConnection(ctl func(rune) bool) error {
 	if err := CheckAddress(h.Address); err != nil {
 		return err
 	}
@@ -200,7 +237,7 @@ func (h Host) CheckConnection() error {
 			return err
 		}
 	}
-	if err := CheckJump(h.ProxyJump); err != nil {
+	if err := checkJump(h.ProxyJump, ctl); err != nil {
 		return err
 	}
 	for _, rt := range h.Routes {
@@ -209,7 +246,7 @@ func (h Host) CheckConnection() error {
 				return fmt.Errorf("route %q: %w", rt.Name, err)
 			}
 		}
-		if err := CheckJump(rt.ProxyJump); err != nil {
+		if err := checkJump(rt.ProxyJump, ctl); err != nil {
 			return fmt.Errorf("route %q: %w", rt.Name, err)
 		}
 		if rt.Port < 0 || rt.Port > 65535 {
@@ -227,7 +264,7 @@ func (h Host) CheckConnection() error {
 		return fmt.Errorf("port %d is out of range", h.Port)
 	}
 	if h.Team != "" {
-		if err := CheckSharedExtraArgs(h.ExtraArgs); err != nil {
+		if err := checkSharedExtraArgs(h.ExtraArgs, ctl); err != nil {
 			return err
 		}
 	}
@@ -236,41 +273,69 @@ func (h Host) CheckConnection() error {
 
 // CheckShared checks everything about a host that came from a team: the
 // connection fields, the extra args against the team allowlist, and the
-// text fields for control characters.
-func (h Host) CheckShared() error {
+// text fields for control and invisible characters and look-alike names.
+func (h Host) CheckShared() error { return h.checkShared(true) }
+
+// CheckFromTeam is CheckShared for a host a team already holds — pulled,
+// taken with `team resolve --theirs`, or pushed again after an edit. err is
+// what v0.23.1 refused too (escape sequences, line breaks, bidi controls,
+// unsafe ssh arguments): such a host isn't used. warn is what only this
+// version refuses (invisible characters, a word mixing alphabets): the
+// team already had that host, so it is kept and flagged rather than
+// dropped, as a local host saved with one still loads.
+func (h Host) CheckFromTeam() (warn, err error) {
+	if err := h.checkShared(false); err != nil {
+		return nil, err
+	}
+	return h.checkShared(true), nil
+}
+
+// checkShared is CheckShared; with strict false it applies only the rules
+// v0.23.1 did (refusedBefore, no alphabet check).
+func (h Host) checkShared(strict bool) error {
+	ctl, note := refusedBefore, refusedBefore
+	if strict {
+		ctl, note = refused, refusedInNote
+	}
+	name := func(field, s string) error {
+		if !strict {
+			return checkText(field, s, ctl)
+		}
+		return CheckName(field, s)
+	}
 	h.Team = "shared" // apply the extra-args allowlist
-	if err := h.CheckConnection(); err != nil {
+	if err := h.checkConnection(ctl); err != nil {
 		return err
 	}
 	if h.Name == "" || strings.HasPrefix(h.Name, "-") || len(h.Name) > 128 {
 		return fmt.Errorf("host name %q isn't usable", h.Name)
 	}
 	for _, f := range []struct{ name, val string }{{"name", h.Name}, {"group", h.Group}} {
-		if err := CheckName(f.name, f.val); err != nil {
+		if err := name(f.name, f.val); err != nil {
 			return err
 		}
 	}
-	if err := CheckText("notes", h.Notes); err != nil {
+	if err := checkText("notes", h.Notes, note); err != nil {
 		return err
 	}
 	if _, err := NormalizeEnv(h.Env); err != nil {
 		return err
 	}
 	for _, t := range h.Tags {
-		if err := CheckText("a tag", t); err != nil {
+		if err := checkText("a tag", t, ctl); err != nil {
 			return err
 		}
 	}
 	for _, rt := range h.Routes {
-		if err := CheckName("a route name", rt.Name); err != nil {
+		if err := name("a route name", rt.Name); err != nil {
 			return err
 		}
 	}
 	for _, f := range h.Forwards {
-		if err := CheckName("a tunnel name", f.Name); err != nil {
+		if err := name("a tunnel name", f.Name); err != nil {
 			return err
 		}
-		if err := CheckText("a tunnel note", f.Note); err != nil {
+		if err := checkText("a tunnel note", f.Note, note); err != nil {
 			return err
 		}
 		if len(f.Note) > 200 {
@@ -288,7 +353,7 @@ func (h Host) CheckShared() error {
 func (h Host) CheckPrintable() error {
 	fields := []struct{ name, val string }{
 		{"name", h.Name}, {"address", h.Address}, {"user", h.User}, {"group", h.Group},
-		{"notes", h.Notes}, {"identity_file", h.IdentityFile}, {"proxy_jump", h.ProxyJump},
+		{"identity_file", h.IdentityFile}, {"proxy_jump", h.ProxyJump},
 		{"env", h.Env},
 	}
 	for _, u := range h.Users {
@@ -304,11 +369,23 @@ func (h Host) CheckPrintable() error {
 	}
 	for _, f := range h.Forwards {
 		fields = append(fields, struct{ name, val string }{"a tunnel name", f.Name},
-			struct{ name, val string }{"a tunnel note", f.Note},
 			struct{ name, val string }{"a tunnel remote_host", f.RemoteHost})
 	}
 	for _, f := range fields {
 		if err := CheckText(f.name, f.val); err != nil {
+			return err
+		}
+	}
+	notes := []string{h.Notes}
+	for _, f := range h.Forwards {
+		notes = append(notes, f.Note)
+	}
+	for i, n := range notes {
+		field := "notes"
+		if i > 0 {
+			field = "a tunnel note"
+		}
+		if err := CheckNote(field, n); err != nil {
 			return err
 		}
 	}

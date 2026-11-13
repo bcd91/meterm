@@ -327,6 +327,7 @@ func teamStatusCmd(teamFlag *string) *cobra.Command {
 				{"Needs you (meterm team resolve <host> --theirs|--mine):", func(o team.Outcome) bool { return o == team.Conflict || o == team.NameTaken }},
 				{"Can't push with your role:", func(o team.Outcome) bool { return o == team.Forbidden }},
 				{"Waiting for an owner or admin (meterm team proposals; push again after edits):", func(o team.Outcome) bool { return o == team.Proposed }},
+				{"Refused, not used here (fix the team's copy, or yours):", func(o team.Outcome) bool { return o == team.Rejected }},
 			}
 			any := false
 			for _, g := range groups {
@@ -342,7 +343,11 @@ func teamStatusCmd(teamFlag *string) *cobra.Command {
 						case team.PulledRemoval:
 							verb = "removed by team"
 						}
-						lines = append(lines, fmt.Sprintf("  %-16s %s", verb, lbl(c.Host)))
+						line := fmt.Sprintf("  %-16s %s", verb, lbl(c.Host))
+						if c.Outcome == team.Rejected {
+							line += " — " + lbl(c.Detail)
+						}
+						lines = append(lines, line)
 					}
 				}
 				if len(lines) > 0 {

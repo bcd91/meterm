@@ -346,8 +346,8 @@ func addWizard(cfg *config.Config, existing *config.Host, in io.Reader) error {
 	// file) is shown cleaned, and Enter keeps it cleaned: keeping it as it is
 	// would only fail the check at the end, after every prompt.
 	var cleaned []string
-	prompt := func(label, cur string) string {
-		shown, dirty := cur, config.CheckText("", cur) != nil
+	promptWith := func(check func(field, s string) error, label, cur string) string {
+		shown, dirty := cur, check("", cur) != nil
 		if dirty {
 			shown = strings.Join(strings.Fields(termsafe.Label(cur)), " ")
 		}
@@ -374,6 +374,7 @@ func addWizard(cfg *config.Config, existing *config.Host, in io.Reader) error {
 		}
 		return line
 	}
+	prompt := func(label, cur string) string { return promptWith(config.CheckText, label, cur) }
 
 	h.Name = prompt("Name", h.Name)
 	if h.Name == "" {
@@ -407,7 +408,7 @@ func addWizard(cfg *config.Config, existing *config.Host, in io.Reader) error {
 
 	h.Tags = config.SplitTags(prompt("Tags (comma-separated)", strings.Join(h.Tags, ",")))
 	h.ProxyJump = prompt("Jump host (saved host name or user@host; empty = none)", h.ProxyJump)
-	h.Notes = prompt("Notes", h.Notes)
+	h.Notes = promptWith(config.CheckNote, "Notes", h.Notes) // may hold joiners (emoji, Persian)
 	env, err := config.NormalizeEnv(prompt("Environment ("+config.EnvList+"; empty = inherit)", h.Env))
 	if err != nil {
 		return err
@@ -491,14 +492,15 @@ func addWizard(cfg *config.Config, existing *config.Host, in io.Reader) error {
 // tunnels) the way the prompts clean a value, and says what it changed.
 func cleanUnasked(h *config.Host) []string {
 	var out []string
-	clean := func(what string, fields ...*string) {
+	cleanWith := func(check func(field, s string) error, what string, fields ...*string) {
 		for _, f := range fields {
-			if config.CheckText("", *f) != nil {
+			if check("", *f) != nil {
 				*f = strings.Join(strings.Fields(termsafe.Label(*f)), " ")
 				out = append(out, what)
 			}
 		}
 	}
+	clean := func(what string, fields ...*string) { cleanWith(config.CheckText, what, fields...) }
 	h.Routes = append([]config.Route(nil), h.Routes...)
 	for k := range h.Routes {
 		rt := &h.Routes[k]
@@ -507,7 +509,8 @@ func cleanUnasked(h *config.Host) []string {
 	h.Forwards = append([]config.Forward(nil), h.Forwards...)
 	for k := range h.Forwards {
 		fw := &h.Forwards[k]
-		clean("a tunnel", &fw.Name, &fw.Note, &fw.RemoteHost)
+		clean("a tunnel", &fw.Name, &fw.RemoteHost)
+		cleanWith(config.CheckNote, "a tunnel", &fw.Note)
 	}
 	return out
 }

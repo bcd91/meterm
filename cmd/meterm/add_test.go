@@ -249,3 +249,34 @@ func TestWizardRefusesAnOptionLookingIdentity(t *testing.T) {
 		t.Errorf("saved identity %q", got.IdentityFile)
 	}
 }
+
+// Editing a host whose notes hold joiners (an emoji sequence, Persian)
+// keeps them: they aren't refused in notes, so they aren't cleaned either.
+func TestEditKeepsJoinersInNotes(t *testing.T) {
+	cliSandbox(t)
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	note := "\U0001F468‍\U0001F4BB oncall می‌خواهم"
+	tun := "\U0001F3F3️‍\U0001F308"
+	if err := cfg.Update(func(c *config.Config) error {
+		c.Upsert(config.Host{Name: "plain", Address: "192.0.2.80", Notes: note, Forwards: []config.Forward{{Name: "f", Type: "D", LocalPort: 1080, Note: tun}}})
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	stored, _ := cfg.Find("plain")
+	out := stdout(t, func() {
+		if err := addWizard(cfg, stored, strings.NewReader("\n\n\n\n\n\n\n\n\n\n\n")); err != nil {
+			t.Fatal(err)
+		}
+	})
+	got, _ := cfg.Find("plain")
+	if got.Notes != note || got.Forwards[0].Note != tun {
+		t.Errorf("notes %q, tunnel note %q", got.Notes, got.Forwards[0].Note)
+	}
+	if strings.Contains(out, "cleaned") {
+		t.Errorf("said it cleaned something: %s", out)
+	}
+}
