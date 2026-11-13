@@ -227,11 +227,7 @@ func runTeamSync(ctx context.Context, tc *teamCtx, t team.Team, cfg *config.Conf
 	}
 
 	for _, c := range res.Changes {
-		line := fmt.Sprintf("  %-16s %s", c.Outcome, lbl(c.Host))
-		if c.Detail != "" {
-			line += " — " + lbl(c.Detail)
-		}
-		fmt.Println(line)
+		fmt.Println(changeLine(c))
 	}
 	if len(res.Changes) == 0 {
 		fmt.Printf("Hosts for %q are up to date.\n", t.Name)
@@ -265,6 +261,17 @@ func runTeamSync(ctx context.Context, tc *teamCtx, t team.Team, cfg *config.Conf
 	return nil
 }
 
+// changeLine is one result line of a pull or push: the outcome, the host
+// spelled as `list` and the picker spell it (exactName), so pay1 and
+// pay<ZWSP>1 don't read as one host, and the detail.
+func changeLine(c team.Change) string {
+	line := fmt.Sprintf("  %-16s %s", c.Outcome, exactName(c.Host))
+	if c.Detail != "" {
+		line += " — " + lbl(c.Detail)
+	}
+	return line
+}
+
 // printPushPreview shows, field by field, what each outgoing change does to
 // the team's copy — the place to catch a typo before everyone gets it.
 func printPushPreview(outgoing []team.Change, cfg *config.Config, remote []team.SharedHost) {
@@ -275,16 +282,16 @@ func printPushPreview(outgoing []team.Change, cfg *config.Config, remote []team.
 	for _, c := range outgoing {
 		old, existed := byName[c.Host]
 		if _, here := cfg.Find(c.Host); c.Outcome == team.PushedRemoval || (c.Outcome == team.Proposed && here < 0) {
-			fmt.Printf("  - remove %s (%s) from the team\n", lbl(c.Host), lbl(old.Address))
+			fmt.Printf("  - remove %s (%s) from the team\n", exactName(c.Host), lbl(old.Address))
 			continue
 		}
 		h, _ := cfg.Find(c.Host)
 		cur := team.SharedFromHost(*h)
 		if !existed {
-			fmt.Printf("  + add %s (%s)\n", lbl(c.Host), lbl(cur.Describe()))
+			fmt.Printf("  + add %s (%s)\n", exactName(c.Host), lbl(cur.Describe()))
 			continue
 		}
-		fmt.Printf("  ~ update %s\n", lbl(c.Host))
+		fmt.Printf("  ~ update %s\n", exactName(c.Host))
 		for _, d := range team.Diff(old, cur) {
 			fmt.Printf("      %s\n", lbl(d))
 		}
@@ -342,7 +349,7 @@ func teamStatusCmd(teamFlag *string) *cobra.Command {
 						case team.PulledRemoval:
 							verb = "removed by team"
 						}
-						line := fmt.Sprintf("  %-16s %s", verb, lbl(c.Host))
+						line := fmt.Sprintf("  %-16s %s", verb, exactName(c.Host))
 						if c.Outcome == team.Rejected {
 							line += " — " + lbl(c.Detail)
 						}

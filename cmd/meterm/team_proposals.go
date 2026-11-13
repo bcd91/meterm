@@ -80,14 +80,14 @@ func printReview(rv team.Review) {
 	fmt.Printf("Proposed by %s on %s:\n", lbl(p.By), p.At.Local().Format("2006-01-02 15:04"))
 	switch {
 	case p.Remove:
-		fmt.Printf("  - remove %s (%s) from the team\n", lbl(p.Host.Name), lbl(p.Host.Describe()))
+		fmt.Printf("  - remove %s (%s) from the team\n", exactName(p.Host.Name), lbl(p.Host.Describe()))
 	case rv.Current == nil:
-		fmt.Printf("  + add %s\n", lbl(p.Host.Name))
+		fmt.Printf("  + add %s\n", exactName(p.Host.Name))
 		for _, d := range team.Diff(team.SharedHost{}, p.Host) {
 			fmt.Printf("      %s\n", lbl(d))
 		}
 	default:
-		fmt.Printf("  ~ update %s\n", lbl(p.Host.Name))
+		fmt.Printf("  ~ update %s\n", exactName(p.Host.Name))
 		for _, d := range rv.Diff {
 			fmt.Printf("      %s\n", lbl(d))
 		}

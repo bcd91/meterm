@@ -38,10 +38,10 @@ func newRenameCmd() *cobra.Command {
 			err = cfg.Update(func(c *config.Config) error {
 				h, i := c.Find(oldName)
 				if i < 0 {
-					return fmt.Errorf("no such host: %s", oldName)
+					return fmt.Errorf("no such host: %s", exactName(oldName))
 				}
 				if _, j := c.Find(newName); j >= 0 {
-					return fmt.Errorf("a host called %s already exists", newName)
+					return fmt.Errorf("a host called %s already exists", exactName(newName))
 				}
 				if strings.ContainsAny(newName, " ,:") {
 					return fmt.Errorf("host names can't contain spaces, commas or colons")
@@ -69,7 +69,7 @@ func newRenameCmd() *cobra.Command {
 			}
 			fmt.Println()
 			if wasTeam != "" {
-				fmt.Fprintf(os.Stderr, "%s is a team host: `meterm team push` will rename it for everyone (remove %s, add %s).\n", newName, lbl(oldName), newName)
+				fmt.Fprintf(os.Stderr, "%s is a team host: `meterm team push` will rename it for everyone (remove %s, add %s).\n", exactName(newName), exactName(oldName), exactName(newName))
 			}
 			return nil
 		},

@@ -173,19 +173,19 @@ func newRmCmd() *cobra.Command {
 			prod := cfg.IsProduction(*h)
 			users := cfg.JumpedBy(h.Name)
 			if yes && prod {
-				fmt.Fprintf(os.Stderr, "⚠ removing %s, a PRODUCTION host.\n", lbl(h.Name))
+				fmt.Fprintf(os.Stderr, "⚠ removing %s, a PRODUCTION host.\n", exactName(h.Name))
 			}
 			if yes && len(users) > 0 {
 				fmt.Fprintf(os.Stderr, "⚠ %s\n", tui.JumpBrokenText(users))
 			}
 			if !yes {
 				if prod {
-					fmt.Printf("⚠ %s is a PRODUCTION host.\n", lbl(h.Name))
+					fmt.Printf("⚠ %s is a PRODUCTION host.\n", exactName(h.Name))
 				}
 				if len(users) > 0 {
 					fmt.Printf("⚠ %s\n", tui.JumpBrokenText(users))
 				}
-				fmt.Printf("Remove host %q? [y/N] ", lbl(name))
+				fmt.Printf("Remove host %s? [y/N] ", exactName(name))
 				resp, _ := bufio.NewReader(os.Stdin).ReadString('\n')
 				if strings.ToLower(strings.TrimSpace(resp)) != "y" {
 					return cancelled(exactName(name) + " not removed")
@@ -448,7 +448,7 @@ func addWizard(cfg *config.Config, existing *config.Host, in io.Reader) error {
 		}
 		cur, idx := c.Find(existing.Name)
 		if idx < 0 {
-			return fmt.Errorf("host %q was removed while you were editing it, so nothing was saved", termsafe.Label(existing.Name))
+			return fmt.Errorf("host %s was removed while you were editing it, so nothing was saved", exactName(existing.Name))
 		}
 		if h.Name != existing.Name {
 			if _, j := c.Find(h.Name); j >= 0 {
