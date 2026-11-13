@@ -140,7 +140,9 @@ v0.23.1 asked about nothing but deleting a host in the picker.
   exists"): git work on a clone is one at a time, and a command that can't
   get it within 10s says "team sync busy … retry" (not "you are not in a
   team called …"), and `team list` shows that team as "(busy, try again)"
-  and exits non-zero rather than leaving it out.
+  and exits non-zero rather than leaving it out. A git lock file left in the
+  clone by a git that was stopped is removed once it's 30s old, saying so;
+  a newer one may be a live git meterm didn't start, and is left.
 
 ### File manager
 

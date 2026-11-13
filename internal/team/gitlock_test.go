@@ -80,21 +80,60 @@ func TestBusyCloneSaysRetry(t *testing.T) {
 }
 
 // A git killed mid-command (a cancelled sync) leaves its index.lock; the
-// next meterm to take the clone clears it rather than failing on it.
+// next meterm to take the clone clears it, once it's old enough to be a
+// dead git's, rather than failing on it, and says so.
 func TestStaleIndexLockIsCleared(t *testing.T) {
 	a, _ := twoProcesses(t)
-	for _, f := range []string{"index.lock", "HEAD.lock", filepath.Join("refs", "remotes", "origin", "main.lock")} {
+	var said strings.Builder
+	old := lockNote
+	lockNote = &said
+	t.Cleanup(func() { lockNote = old })
+	locks := []string{"index.lock", "HEAD.lock", filepath.Join("refs", "remotes", "origin", "main.lock")}
+	then := time.Now().Add(-staleGitLock - time.Second)
+	for _, f := range locks {
 		p := filepath.Join(a.Dir, ".git", f)
 		_ = os.MkdirAll(filepath.Dir(p), 0o700)
 		if err := os.WriteFile(p, nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chtimes(p, then, then); err != nil {
 			t.Fatal(err)
 		}
 	}
 	if err := a.change(ctx, "after a crash", func() error { return a.writeFile("y", []byte("y")) }); err != nil {
 		t.Fatalf("change with stale locks: %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(a.Dir, ".git", "index.lock")); !os.IsNotExist(err) {
-		t.Errorf("index.lock still there: %v", err)
+	for _, f := range locks {
+		if _, err := os.Stat(filepath.Join(a.Dir, ".git", f)); !os.IsNotExist(err) {
+			t.Errorf("%s still there: %v", f, err)
+		}
+		if !strings.Contains(said.String(), "removed a stale git lock "+filepath.Join(a.Dir, ".git", f)) {
+			t.Errorf("not said: %s; said %q", f, said.String())
+		}
+	}
+}
+
+// A lock that new may be a live git meterm didn't start (your own, in the
+// clone): it's left, and that git's command isn't broken under it.
+func TestFreshGitLockIsLeft(t *testing.T) {
+	a, _ := twoProcesses(t)
+	var said strings.Builder
+	old := lockNote
+	lockNote = &said
+	t.Cleanup(func() { lockNote = old })
+	p := filepath.Join(a.Dir, ".git", "refs", "heads", "theirs.lock")
+	_ = os.MkdirAll(filepath.Dir(p), 0o700)
+	if err := os.WriteFile(p, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if done, err := a.read(ctx); err == nil {
+		done()
+	}
+	if _, err := os.Stat(p); err != nil {
+		t.Errorf("a fresh lock was removed: %v", err)
+	}
+	if said.Len() != 0 {
+		t.Errorf("said %q", said.String())
 	}
 }
 
