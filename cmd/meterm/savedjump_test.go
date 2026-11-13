@@ -18,13 +18,13 @@ func TestJumpNamingASavedHostWithHiddenCharacterConnects(t *testing.T) {
 	sshLog := filepath.Join(dir, "ssh.log")
 	t.Setenv("METERM_TEST_SSH_LOG", sshLog)
 	// As v0.23.1 saved it, or a team handed it over.
-	hosts := "groups:\n  behind:\n    proxy_jump: \"bas​tion\"\n" +
+	hosts := "groups:\n  behind:\n    proxy_jump: \"bas\u200btion\"\n" +
 		"hosts:\n" +
-		"  - name: \"bas​tion\"\n    address: 192.0.2.10\n" +
-		"  - name: inner\n    address: 192.0.2.11\n    proxy_jump: \"bas​tion\"\n" +
+		"  - name: \"bas\u200btion\"\n    address: 192.0.2.10\n" +
+		"  - name: inner\n    address: 192.0.2.11\n    proxy_jump: \"bas\u200btion\"\n" +
 		"  - name: viagroup\n    address: 192.0.2.12\n    group: behind\n" +
-		"  - name: viaroute\n    address: 192.0.2.13\n    routes:\n      - name: vpn\n        proxy_jump: \"bas​tion\"\n" +
-		"  - name: raw\n    address: 192.0.2.14\n    proxy_jump: \"ops@bas​tion.example.com:22\"\n"
+		"  - name: viaroute\n    address: 192.0.2.13\n    routes:\n      - name: vpn\n        proxy_jump: \"bas\u200btion\"\n" +
+		"  - name: raw\n    address: 192.0.2.14\n    proxy_jump: \"ops@bas\u200btion.example.com:22\"\n"
 	if err := os.WriteFile(cfgPath, []byte(hosts), 0o600); err != nil {
 		t.Fatal(err)
 	}

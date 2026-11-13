@@ -16,7 +16,7 @@ func TestNewShareWithLookalikeNameIsRefused(t *testing.T) {
 	s := NewMemoryStore()
 	teamID, a, _ := teamOf(t, s, RoleMember)
 	cfg := emptyCfg(t)
-	for _, n := range []string{"web-арр", "pay​1", "pаypal"} {
+	for _, n := range []string{"web-\u0430\u0440\u0440", "pay\u200b1", "p\u0430ypal"} {
 		cfg.Upsert(config.Host{Name: n, Address: "192.0.2.20", Team: teamID})
 	}
 	cfg.Upsert(config.Host{Name: "plain", Address: "192.0.2.21", Team: teamID})
@@ -28,7 +28,7 @@ func TestNewShareWithLookalikeNameIsRefused(t *testing.T) {
 	for _, c := range res.Changes {
 		got[c.Host] = c
 	}
-	for _, n := range []string{"web-арр", "pay​1", "pаypal"} {
+	for _, n := range []string{"web-\u0430\u0440\u0440", "pay\u200b1", "p\u0430ypal"} {
 		if c := got[n]; c.Outcome != Rejected || !strings.Contains(c.Detail, "not shared") {
 			t.Errorf("%+q: %+v", n, c)
 		}
@@ -50,14 +50,14 @@ func TestNewProposalWithLookalikeNameIsRefusedAndAnEditIsFlagged(t *testing.T) {
 		t.Fatal(err)
 	}
 	// An older version shared this one.
-	old := SharedHost{Name: "pаypal", Address: "192.0.2.30"}
+	old := SharedHost{Name: "p\u0430ypal", Address: "192.0.2.30"}
 	stored, err := alice.PutHost(ctx, alice.ID, old, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
 	bCfg := emptyCfg(t)
-	bCfg.Upsert(config.Host{Name: "pay​1", Address: "192.0.2.31", Team: bob.ID})
-	bCfg.Upsert(config.Host{Name: "pаypal", Address: "192.0.2.30", Port: 2222, Team: bob.ID})
+	bCfg.Upsert(config.Host{Name: "pay\u200b1", Address: "192.0.2.31", Team: bob.ID})
+	bCfg.Upsert(config.Host{Name: "p\u0430ypal", Address: "192.0.2.30", Port: 2222, Team: bob.ID})
 	res, err := Sync(ctx, bob, bob.ID, RoleMember, bCfg, Base{old.Name: stored}, Options{Push: true})
 	if err != nil {
 		t.Fatal(err)
@@ -66,7 +66,7 @@ func TestNewProposalWithLookalikeNameIsRefusedAndAnEditIsFlagged(t *testing.T) {
 	for _, c := range res.Changes {
 		got[c.Host] = c
 	}
-	if c := got["pay​1"]; c.Outcome != Rejected || !strings.Contains(c.Detail, "not proposed") {
+	if c := got["pay\u200b1"]; c.Outcome != Rejected || !strings.Contains(c.Detail, "not proposed") {
 		t.Errorf("new proposal: %+v", c)
 	}
 	if c := got[old.Name]; c.Outcome != Proposed || !strings.Contains(c.Detail, "warning") {

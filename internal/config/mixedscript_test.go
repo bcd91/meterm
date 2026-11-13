@@ -39,18 +39,18 @@ func TestMixedScriptNamesAreRefused(t *testing.T) {
 // "web-app". In a name with Latin letters such a word is refused too.
 func TestLookalikeWordBesideLatinIsRefused(t *testing.T) {
 	for name, bad := range map[string]bool{
-		"web-арр":       true,  // Cyrillic арр
-		"web1а":         true,  // Cyrillic а
-		"web-Ρ":         true,  // Greek capital Rho
-		"pаypal":        true,  // mixed in one word, as before
-		"АРР-web":       true,  // Cyrillic АРР, capitals
-		"db-москва":     false, // москва: м к в don't look like a, k, b
-		"api-μ":         false, // μ
-		"web.сервер_02": false, // сервер holds в
-		"арр":           false, // all Cyrillic, no Latin word to pass for
-		"арр-сервер":    false,
-		"web-ไทย":       false, // Thai
-		"web-فارسی":     false, // Persian
+		"web-\u0430\u0440\u0440": true, // Cyrillic
+		"web1\u0430":             true, // Cyrillic a
+		"web-\u03a1":             true, // Greek capital Rho
+		"p\u0430ypal":            true, // mixed in one word, as before
+		"\u0410\u0420\u0420-web": true, // Cyrillic capitals
+		"db-\u043c\u043e\u0441\u043a\u0432\u0430": false, // Moscow: lowercase m, k, v are small-capital shapes
+		"api-\u03bc": false, // mu
+		"web.\u0441\u0435\u0440\u0432\u0435\u0440_02":             false, // "server": holds v
+		"\u0430\u0440\u0440":                                      false, // all Cyrillic, no Latin word to pass for
+		"\u0430\u0440\u0440-\u0441\u0435\u0440\u0432\u0435\u0440": false,
+		"web-\u0e44\u0e17\u0e22":                                  false, // Thai
+		"web-\u0641\u0627\u0631\u0633\u06cc":                      false, // Persian
 	} {
 		err := CheckName("name", name)
 		if bad != (err != nil) || bad && !errors.Is(err, ErrMixedScript) {
