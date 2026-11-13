@@ -14,7 +14,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -344,16 +343,17 @@ type model struct {
 	picks         []choice          // modePick's rows
 	pickIdx       int
 	pickTitle     string
-	flash         string   // one-off message shown in the footer until the next key
-	flashNeutral  bool     // the message is news, not a warning (a session that ended)
-	lastFlash     string   // the last message, kept for the ? screen
-	sort          sortMode // the rows' order; s cycles it
-	helpTop       int      // the ? screen's first line shown
-	hint          []string // the palette's completion candidates
-	afterExec     string   // palette text to open with once the dispatched command returns
-	pendingSelect string   // host to put the cursor on when the re-run filter's rows arrive
-	pendingDown   bool     // and then move one row down (after marking)
-	warned        string   // palette text already warned about (shell syntax): Enter again runs it
+	flash         string            // one-off message shown in the footer until the next key
+	flashNeutral  bool              // the message is news, not a warning (a session that ended)
+	lastFlash     string            // the last message, kept for the ? screen
+	sort          sortMode          // the rows' order; s cycles it
+	helpTop       int               // the ? screen's first line shown
+	hint          []string          // the palette's completion candidates
+	afterExec     string            // palette text to open with once the dispatched command returns
+	pendingSelect string            // host to put the cursor on when the re-run filter's rows arrive
+	pendingDown   bool              // and then move one row down (after marking)
+	warned        string            // palette text already warned about (shell syntax): Enter again runs it
+	refs          map[string]string // ‹...› references the picker wrote into the palette → the exact host name (see typedName)
 
 	running     []string // the command last dispatched, for saying how it ended
 	pending     []string // modeConfirmRun: the command waiting for a yes
@@ -392,6 +392,7 @@ func New(cfgPath, selfPath string) model {
 		hist:     hist,
 		checks:   map[string]health.Result{},
 		marked:   map[string]bool{},
+		refs:     map[string]string{},
 		now:      time.Now,
 	}
 	m.loadAttention()
@@ -491,7 +492,7 @@ func (m model) hostNames() map[string]bool {
 	out := make(map[string]bool, 2*len(m.cfg.Hosts))
 	for _, h := range m.cfg.Hosts {
 		out[h.Name] = true
-		out[termsafe.Label(h.Name)] = true // as typed: see typedName
+		out[termsafe.Label(h.Name)] = true // typed as it shows
 	}
 	return out
 }
@@ -760,12 +761,12 @@ func buildDispatchCmd(selfPath, cfgPath string, args []string) *exec.Cmd {
 }
 
 // splitArgs is a minimal shell-word tokenizer for the command palette:
-// whitespace-separated, with '...' or "..." for values containing spaces.
-// A "..." that is a valid Go string literal is read as one ("zw\u200bsp",
-// "it's"): that's how the picker writes a host name it can't show as it is
-// (typedName), and it must come back exactly. Any other "..." is taken as
-// typed, backslashes and all.
-func splitArgs(s string) []string {
+// whitespace-separated, with '...' or "..." for values containing spaces,
+// taken as typed (backslashes and all). The one exception is a reference the
+// picker itself wrote (typedName) for a host name it can't show as it is:
+// ‹...› outside quotes that matches an entry in refs exactly is replaced by
+// the name it stands for. Anything else between ‹ and › is just text.
+func splitArgs(s string, refs map[string]string) []string {
 	var args []string
 	var cur strings.Builder
 	var quote byte
@@ -779,17 +780,7 @@ func splitArgs(s string) []string {
 			} else {
 				cur.WriteByte(c)
 			}
-		case c == '"':
-			word = true
-			if j := goQuoteEnd(s, i); j > 0 {
-				if v, err := strconv.Unquote(s[i : j+1]); err == nil {
-					cur.WriteString(v)
-					i = j
-					continue
-				}
-			}
-			quote = c
-		case c == '\'':
+		case c == '"' || c == '\'':
 			word = true
 			quote = c
 		case c == ' ' || c == '\t':
@@ -799,6 +790,14 @@ func splitArgs(s string) []string {
 			}
 			word = false
 		default:
+			if tok := refAt(s, i); tok != "" {
+				if name, ok := refs[tok]; ok {
+					word = true
+					cur.WriteString(name)
+					i += len(tok) - 1
+					continue
+				}
+			}
 			word = true
 			cur.WriteByte(c)
 		}
@@ -1029,7 +1028,7 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.resizeList()
 				return m, nil
 			case tea.KeyEnter:
-				if v := m.palette.Value(); shellish(v) && m.warned != v {
+				if v := m.palette.Value(); shellish(v, m.refs) && m.warned != v {
 					m.warned = v // first Enter: the warning under the prompt; the second runs it
 					return m, nil
 				}
@@ -1042,7 +1041,7 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				return m, m.run(tunnelLeadsToProduction(args, m.cfg), args...)
 			case tea.KeyTab:
-				v, cands := complete(m.palette.Value(), m.cfg)
+				v, cands := complete(m.palette.Value(), m.cfg, m.refs)
 				m.palette.SetValue(v)
 				m.palette.CursorEnd()
 				m.hint = cands
@@ -1100,7 +1099,7 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, m.refreshItems()
 			case key.Matches(msg, keys.Rename):
 				if name := m.selectedName(); name != "" {
-					return m, m.openPalette("rename " + typedName(name) + " ")
+					return m, m.openPalette("rename " + typedName(name, m.refs) + " ")
 				}
 				return m, nil
 			case key.Matches(msg, keys.Mark):
@@ -1120,7 +1119,7 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				return m, nil
 			case key.Matches(msg, keys.Exec):
-				return m, m.openPalette(execPrefill(m.markedNames(), m.selectedName()))
+				return m, m.openPalette(execPrefill(m.markedNames(), m.selectedName(), m.refs))
 			case key.Matches(msg, keys.Team):
 				return m, m.dispatch("team", "status")
 			case key.Matches(msg, keys.Audit), key.Matches(msg, keys.Routes), key.Matches(msg, keys.Access):
@@ -1427,7 +1426,7 @@ func (m model) paletteArgs() []string {
 	if value == "" {
 		return nil
 	}
-	return withSelectedHost(execKeepsLine(value, splitArgs(value)), m.selectedName(), m.hostNames())
+	return withSelectedHost(execKeepsLine(value, splitArgs(value, m.refs)), m.selectedName(), m.hostNames())
 }
 
 // paletteHint is the line under the palette: the completions after a tab,
@@ -1438,7 +1437,7 @@ func (m model) paletteHint() string {
 	if len(m.hint) > 0 {
 		return faintStyle.Render(clamp(" " + termsafe.Label(strings.Join(m.hint, "  "))))
 	}
-	if v := m.palette.Value(); shellish(v) {
+	if v := m.palette.Value(); shellish(v, m.refs) {
 		msg := " ⚠ not a shell: $(…), $VAR, \\ and ~/ go to the host as typed, not expanded here — for that, run it in a terminal"
 		if m.warned == v {
 			msg += " · enter again to run it anyway"

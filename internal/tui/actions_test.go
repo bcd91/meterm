@@ -89,7 +89,7 @@ func TestComplete(t *testing.T) {
 		{"connect zz", "connect zz", 0},
 	}
 	for _, c := range cases {
-		got, cands := complete(c.in, cfg)
+		got, cands := complete(c.in, cfg, map[string]string{})
 		if got != c.want || len(cands) != c.cands {
 			t.Errorf("complete(%q) = %q %v, want %q with %d candidates", c.in, got, cands, c.want, c.cands)
 		}
@@ -121,13 +121,13 @@ func TestTunnelChoices(t *testing.T) {
 }
 
 func TestExecPrefill(t *testing.T) {
-	if got := execPrefill(nil, "GW1"); got != "exec GW1 -- " {
+	if got := execPrefill(nil, "GW1", nil); got != "exec GW1 -- " {
 		t.Errorf("got %q", got)
 	}
-	if got := execPrefill([]string{"a", "b"}, "GW1"); got != "exec a b -- " {
+	if got := execPrefill([]string{"a", "b"}, "GW1", nil); got != "exec a b -- " {
 		t.Errorf("got %q", got)
 	}
-	if got := execPrefill(nil, ""); got != "exec " {
+	if got := execPrefill(nil, "", nil); got != "exec " {
 		t.Errorf("got %q", got)
 	}
 }
@@ -331,7 +331,7 @@ func TestPaletteWarnsAboutShellSyntax(t *testing.T) {
 		"connect API -- \"echo '$(cat ~/.ssh/id_ed25519.pub)'\"": true, `connect API -- -t "sudo cp \$F x"`: true,
 		"cp ~/x API:/tmp": true, "exec API -- echo $HOME": true,
 	} {
-		if got := shellish(s); got != want {
+		if got := shellish(s, nil); got != want {
 			t.Errorf("shellish(%q) = %v", s, got)
 		}
 	}
@@ -366,13 +366,13 @@ func TestProductionHostBadgeAndTunnelWarning(t *testing.T) {
 
 func TestExecKeepsTheTypedLine(t *testing.T) {
 	line := `exec --tag web -- df -h | grep '/srv x'`
-	got := execKeepsLine(line, splitArgs(line))
+	got := execKeepsLine(line, splitArgs(line, nil))
 	want := []string{"exec", "--tag", "web", "--", `df -h | grep '/srv x'`}
 	if strings.Join(got, "\x00") != strings.Join(want, "\x00") {
 		t.Errorf("got %q", got)
 	}
 	for _, line := range []string{"exec -- uptime", "exec web1", "logs web1 -- a b"} {
-		if got := execKeepsLine(line, splitArgs(line)); strings.Join(got, "\x00") != strings.Join(splitArgs(line), "\x00") {
+		if got := execKeepsLine(line, splitArgs(line, nil)); strings.Join(got, "\x00") != strings.Join(splitArgs(line, nil), "\x00") {
 			t.Errorf("%q changed: %q", line, got)
 		}
 	}

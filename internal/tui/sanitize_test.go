@@ -73,7 +73,7 @@ func TestHostTextNeverReachesTheTerminalRaw(t *testing.T) {
 	check("tunnel flash", press(m, "t").View())
 }
 
-// R and x prefill the palette with the host's own name, Go-quoted, so no
+// R and x prefill the palette with a reference to the host's own name, so no
 // escape reaches the screen and what runs is that host, not one whose name
 // shows the same (see TestPrefillActsOnTheSelectedHostItself).
 func TestPrefillQuotesAControlName(t *testing.T) {
@@ -82,14 +82,14 @@ func TestPrefillQuotesAControlName(t *testing.T) {
 	writeHosts(t, m.cfgPath, config.Host{Name: "evil\x1b]52;c;SGVsbG8=\x07name", Address: "192.0.2.80"})
 	m = drive(t, m, nil, "r")
 	p := press(m, "R")
-	if p.palette.Value() != `rename "evil\x1b]52;c;SGVsbG8=\aname" ` {
+	if p.palette.Value() != `rename ‹evil\x1b]52;c;SGVsbG8=\aname› ` {
 		t.Errorf("R: %q", p.palette.Value())
 	}
 	p = press(m, "x")
-	if p.palette.Value() != `exec "evil\x1b]52;c;SGVsbG8=\aname" -- ` {
+	if p.palette.Value() != `exec ‹evil\x1b]52;c;SGVsbG8=\aname› -- ` {
 		t.Errorf("x: %q", p.palette.Value())
 	}
-	if got := splitArgs(p.palette.Value() + "uptime"); len(got) != 4 || got[1] != "evil\x1b]52;c;SGVsbG8=\x07name" {
+	if got := splitArgs(p.palette.Value()+"uptime", p.refs); len(got) != 4 || got[1] != "evil\x1b]52;c;SGVsbG8=\x07name" {
 		t.Errorf("the prefill reads back as %q", got)
 	}
 }

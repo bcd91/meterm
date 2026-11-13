@@ -268,24 +268,3 @@ func TestPrefillActsOnTheSelectedHostItself(t *testing.T) {
 		t.Errorf("x on production: ran %v, mode %v", ran, p.mode)
 	}
 }
-
-func TestSplitArgsReadsGoQuotes(t *testing.T) {
-	for in, want := range map[string][]string{
-		`exec "zw\u200bsp" -- uptime`: {"exec", "zw\u200bsp", "--", "uptime"},
-		`rename "a b" c`:              {"rename", "a b", "c"},
-		`rename "it's" c`:             {"rename", "it's", "c"},
-		`cp "C:\path" x`:              {"cp", `C:\path`, "x"}, // not a Go string: as typed
-		`cp 'a\u200bb' x`:             {"cp", `a\u200bb`, "x"},
-		`exec "\x1b[2J" -- x`:         {"exec", "\x1b[2J", "--", "x"},
-	} {
-		if got := splitArgs(in); strings.Join(got, "\x00") != strings.Join(want, "\x00") {
-			t.Errorf("splitArgs(%q) = %q, want %q", in, got, want)
-		}
-	}
-	if shellish(`exec "zw\u200bsp" -- uptime`) {
-		t.Error("a quoted host name reads as shell syntax")
-	}
-	if !shellish(`exec "zw\u200bsp" -- echo \$HOME`) {
-		t.Error("the remote command's backslash went unnoticed")
-	}
-}

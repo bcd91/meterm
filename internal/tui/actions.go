@@ -95,7 +95,7 @@ func withSelectedHost(args []string, host string, hostNames map[string]bool) []s
 // completion is the palette's tab completion of the word being typed.
 // It returns the new input value and, when the word is ambiguous, the
 // candidates to show.
-func complete(value string, cfg *config.Config) (string, []string) {
+func complete(value string, cfg *config.Config, refs map[string]string) (string, []string) {
 	if strings.ContainsAny(value, `'"`) {
 		return value, nil // inside quoting: not a word we can reason about
 	}
@@ -125,10 +125,10 @@ func complete(value string, cfg *config.Config) (string, []string) {
 		cands = Commands[fields[0]]
 	case len(fields) >= 2 && fields[0] == "tunnel" && fields[1] == "up":
 		for _, h := range cfg.Hosts {
-			cands = append(cands, typedName(h.Name))
+			cands = append(cands, typedName(h.Name, refs))
 			for _, f := range h.Forwards {
 				if f.Name != "" {
-					cands = append(cands, typedName(h.Name+"/"+f.Name))
+					cands = append(cands, typedName(h.Name+"/"+f.Name, refs))
 				}
 			}
 		}
@@ -137,19 +137,19 @@ func complete(value string, cfg *config.Config) (string, []string) {
 			return value, nil // a remote path: we don't list remote files
 		}
 		for _, h := range cfg.Hosts {
-			cands = append(cands, typedName(h.Name)+":")
+			cands = append(cands, typedName(h.Name, refs)+":")
 		}
 		suffix = ""
 	default:
 		for _, h := range cfg.Hosts {
-			cands = append(cands, typedName(h.Name))
+			cands = append(cands, typedName(h.Name, refs))
 		}
 	}
 
 	var match []string
 	for _, c := range cands {
 		low := strings.ToLower(c)
-		if strings.HasPrefix(low, strings.ToLower(cur)) || strings.HasPrefix(low, `"`+strings.ToLower(cur)) {
+		if strings.HasPrefix(low, strings.ToLower(cur)) || strings.HasPrefix(low, "‹"+strings.ToLower(cur)) {
 			match = append(match, c)
 		}
 	}
@@ -236,7 +236,7 @@ func keyAction(k, host string) []string {
 
 // execPrefill is what `x` puts in the palette: exec on the marked hosts, or
 // on the selected one when nothing is marked.
-func execPrefill(marked []string, selected string) string {
+func execPrefill(marked []string, selected string, refs map[string]string) string {
 	hosts := marked
 	if len(hosts) == 0 {
 		if selected == "" {
@@ -246,22 +246,53 @@ func execPrefill(marked []string, selected string) string {
 	}
 	shown := make([]string, len(hosts))
 	for k, h := range hosts {
-		shown[k] = typedName(h)
+		shown[k] = typedName(h, refs)
 	}
 	return "exec " + strings.Join(shown, " ") + " -- "
 }
 
-// typedName is a host's name as the palette holds it, so that what Enter
-// runs is that host and no other: the name itself when it's plain, otherwise
-// a Go-quoted string ("two words", "zw\u200bsp", "it's") that splitArgs
-// reads back exactly. A name with hidden characters is never shown as the
-// name it looks like: "zwsp" and "zw\u200bsp" are two hosts, and a cleaned
-// name would run on the wrong one (see config.Lookup).
-func typedName(name string) string {
-	if name != "" && termsafe.Label(name) == name && !strings.ContainsAny(name, " '\"\\") {
+// typedName is a host's name as the picker writes it into the palette, so
+// that what Enter runs is that host and no other: the name itself when it's
+// plain, otherwise a reference ‹...› (the name with its hidden characters
+// spelled out, e.g. ‹zw\u200bsp›) recorded in refs, which splitArgs swaps
+// back for the exact name. A name with hidden characters is never shown as
+// the name it looks like: "zwsp" and "zw\u200bsp" are two hosts, and a
+// cleaned name would run on the wrong one (see config.Lookup). Typed text
+// is never decoded: only a reference the picker wrote stands for a name.
+func typedName(name string, refs map[string]string) string {
+	if name != "" && termsafe.Label(name) == name && !strings.ContainsAny(name, " '\"\\‹›") {
 		return name
 	}
-	return strconv.Quote(name)
+	tok := refToken(name)
+	if refs != nil {
+		refs[tok] = name
+	}
+	return tok
+}
+
+// refToken is the reference typedName writes for name: one token, no
+// spaces, quotes, ‹ or › inside, different for every name.
+func refToken(name string) string {
+	q := strconv.Quote(name)
+	q = q[1 : len(q)-1]
+	q = strings.ReplaceAll(q, "‹", `\u2039`)
+	q = strings.ReplaceAll(q, "›", `\u203a`)
+	q = strings.ReplaceAll(q, " ", `\x20`)
+	q = strings.ReplaceAll(q, `\"`, `\x22`)
+	q = strings.ReplaceAll(q, "'", `\x27`)
+	return "‹" + q + "›"
+}
+
+// refAt is the ‹...› starting at s[i], or "" when there's none.
+func refAt(s string, i int) string {
+	if !strings.HasPrefix(s[i:], "‹") {
+		return ""
+	}
+	j := strings.Index(s[i+len("‹"):], "›")
+	if j < 0 {
+		return ""
+	}
+	return s[i : i+len("‹")+j+len("›")]
 }
 
 // exactArg is an argument as the picker shows it: as it is when that's
@@ -305,9 +336,9 @@ func loginChoices(h config.Host, flags []string, prod bool) []choice {
 // doesn't do: no shell runs here, so $(...), `...`, $VAR, a backslash or a
 // leading ~/ reach meterm (and the host) exactly as typed — and if the host's
 // shell expands them, it does so with the host's values, not this machine's.
-func shellish(s string) bool {
+func shellish(s string, refs map[string]string) bool {
 	head, tail, cut := strings.Cut(s, " -- ")
-	s = withoutGoQuotes(head)
+	s = withoutRefs(head, refs)
 	if cut {
 		s += " -- " + tail // the host's command: its quotes are the host's
 	}
@@ -315,36 +346,20 @@ func shellish(s string) bool {
 		strings.Contains(s, " ~/") || strings.HasPrefix(s, "~/")
 }
 
-// withoutGoQuotes is s with each "..." that splitArgs reads as a Go string
-// left out: a host name the picker quoted (typedName) isn't shell syntax.
-func withoutGoQuotes(s string) string {
+// withoutRefs is s with each reference the picker wrote (typedName) left
+// out: a host name it spelled out isn't shell syntax.
+func withoutRefs(s string, refs map[string]string) string {
 	var b strings.Builder
 	for i := 0; i < len(s); i++ {
-		if s[i] == '"' {
-			if j := goQuoteEnd(s, i); j > 0 {
-				if _, err := strconv.Unquote(s[i : j+1]); err == nil {
-					i = j
-					continue
-				}
+		if tok := refAt(s, i); tok != "" {
+			if _, ok := refs[tok]; ok {
+				i += len(tok) - 1
+				continue
 			}
 		}
 		b.WriteByte(s[i])
 	}
 	return b.String()
-}
-
-// goQuoteEnd is the index of the quote that ends the "..." starting at i,
-// stepping over backslash escapes; -1 when there's none.
-func goQuoteEnd(s string, i int) int {
-	for j := i + 1; j < len(s); j++ {
-		switch s[j] {
-		case '\\':
-			j++
-		case '"':
-			return j
-		}
-	}
-	return -1
 }
 
 // localCommands are the commands that stay on this machine: they read or
