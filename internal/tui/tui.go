@@ -1283,19 +1283,33 @@ func (m model) view() string {
 		return m.modal(dangerEdge, 64, paras)
 	case modeConfirmRun:
 		what := "This leads to production."
+		allProd := true
+		for _, n := range m.pendingProd {
+			if h, i := m.cfg.Find(n); i >= 0 && !m.cfg.IsProduction(*h) {
+				allProd = false
+			}
+		}
 		switch n := len(m.pendingProd); {
-		case n == 1:
+		case n == 1 && allProd:
 			what = "This runs on " + nameStyle.Render(exactArg(m.pendingProd[0])) + ", a production host."
+		case n == 1:
+			what = "This runs on " + nameStyle.Render(exactArg(m.pendingProd[0])) + ", reached through production."
 		case n > 1:
 			names := m.pendingProd
 			more := ""
 			if n > 5 {
 				names, more = names[:5], fmt.Sprintf(" and %d more", n-5)
 			}
-			what = fmt.Sprintf("This runs on %d production hosts: %s%s.", n, exactLine(names), more)
+			kind := "production hosts"
+			if !allProd {
+				kind = "hosts on or through production"
+			}
+			what = fmt.Sprintf("This runs on %d %s: %s%s.", n, kind, exactLine(names), more)
 		}
+		// The command as it will run, without the ↵ the palette shows:
+		// here Enter cancels.
 		return m.modal(dangerEdge, 64, []string{downStyle.Bold(true).Render("⚠ PRODUCTION"), what,
-			dimStyle.Render("↵ meterm " + exactLine(m.pending)),
+			dimStyle.Render("meterm " + exactLine(m.pending)),
 			helpStyle.Render("y = go    any other key = cancel")})
 	case modePick:
 		// As many choices as fit, the selected one always among them.

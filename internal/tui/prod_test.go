@@ -268,3 +268,34 @@ func TestPrefillActsOnTheSelectedHostItself(t *testing.T) {
 		t.Errorf("x on production: ran %v, mode %v", ran, p.mode)
 	}
 }
+
+// The question shows the command it will run without the ↵ the palette
+// uses: here Enter cancels. A host reached through production asks too,
+// says why, and y hands the command the picker's one-use answer.
+func TestProductionQuestionShowsNoEnterGlyph(t *testing.T) {
+	m := fleet(t)
+	slowDial(t)
+	writeHosts(t, m.cfgPath,
+		config.Host{Name: "bastion", Address: "192.0.2.40", Env: config.EnvProduction},
+		config.Host{Name: "inner", Address: "192.0.2.41", ProxyJump: "bastion"})
+	m = drive(t, m, nil, "r")
+	m.reselect("inner")
+	m, ran := step(t, m, "enter")
+	if ran || m.mode != modeConfirmRun {
+		t.Fatalf("enter on a host behind production: ran %v, mode %v", ran, m.mode)
+	}
+	v := stripANSI(m.View())
+	if strings.Contains(v, "↵") {
+		t.Errorf("the question shows ↵ while enter cancels:\n%s", v)
+	}
+	if !strings.Contains(v, "meterm connect inner") || !strings.Contains(v, "reached through production") {
+		t.Errorf("question:\n%s", v)
+	}
+	m, ran = step(t, waited(m), "y")
+	if !ran || m.lastDispatch == nil {
+		t.Fatal("y didn't run it")
+	}
+	if !strings.Contains(strings.Join(m.lastDispatch.Env, "\n"), "METERM_PROD_TOKEN=") {
+		t.Error("y didn't hand the command the picker's answer")
+	}
+}

@@ -377,7 +377,8 @@ var localCommands = map[string]bool{
 	// a production host it asks, as t (a one-off tunnel up) does.
 }
 
-// productionTargets is the production hosts a command line would reach:
+// productionTargets is the hosts a command line would reach that are
+// production or are reached through it (config.TouchesProduction):
 // hosts it names (as name, user@name, name:path or name/tunnel), and for
 // exec, the ones --all, --tag or --group pick. A command that reaches hosts
 // but names none (audit, keys list) covers every host. Commands that stay
@@ -452,7 +453,7 @@ func productionTargets(args []string, cfg *config.Config) []string {
 	}
 	var out []string
 	for _, h := range cfg.Hosts {
-		if picked[h.Name] && cfg.IsProduction(h) {
+		if picked[h.Name] && cfg.TouchesProduction(h) {
 			out = append(out, h.Name)
 		}
 	}

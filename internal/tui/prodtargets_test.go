@@ -36,9 +36,32 @@ func TestProductionTargetsExactSets(t *testing.T) {
 		{[]string{"exec", "--", "uptime"}, []string{"pay1", "pay2", "web1"}},
 		{[]string{"exec", "nosuchhost", "--", "uptime"}, []string{"pay1", "pay2", "web1"}},
 		{[]string{"list"}, nil},
+		// A group named like a host is the group, not the host.
+		{[]string{"exec", "--group", "web1", "--", "uptime"}, nil},
+		// A group that matches nothing still names hosts (none): no fallback.
+		{[]string{"exec", "--group", "", "--", "uptime"}, nil},
+		{[]string{"exec", "--group=", "dev1", "--", "uptime"}, nil},
+		// --group as the last word has no value: nothing read, so every host.
+		{[]string{"exec", "--group"}, []string{"pay1", "pay2", "web1"}},
 	} {
 		if got := productionTargets(c.args, cfg); !reflect.DeepEqual(got, c.want) {
 			t.Errorf("%q: %q, want %q", c.args, got, c.want)
 		}
+	}
+}
+
+// A host reached through a production jump host counts: getting there goes
+// through production.
+func TestProductionTargetsCountPathsThroughProduction(t *testing.T) {
+	cfg := &config.Config{Hosts: []config.Host{
+		{Name: "bastion", Address: "192.0.2.10", Env: config.EnvProduction},
+		{Name: "inner", Address: "192.0.2.11", ProxyJump: "bastion"},
+		{Name: "dev1", Address: "192.0.2.12"},
+	}}
+	if got := productionTargets([]string{"connect", "inner"}, cfg); !reflect.DeepEqual(got, []string{"inner"}) {
+		t.Errorf("connect inner: %q", got)
+	}
+	if got := productionTargets([]string{"connect", "dev1"}, cfg); got != nil {
+		t.Errorf("connect dev1: %q", got)
 	}
 }
