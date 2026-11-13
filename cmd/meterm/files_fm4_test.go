@@ -23,12 +23,7 @@ func TestFilesProductionToken(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	files := func(args ...string) error {
-		c := newFilesCmd()
-		c.SetArgs(args)
-		c.SilenceUsage, c.SilenceErrors = true, true
-		return c.Execute()
-	}
+	files := func(args ...string) error { return runRoot(t, append([]string{"files"}, args...)...) }
 	lastLine := func() string {
 		b, _ := os.ReadFile(filepath.Join(dir, "activity", "events.jsonl"))
 		lines := strings.Split(strings.TrimSpace(string(b)), "\n")
@@ -48,18 +43,28 @@ func TestFilesProductionToken(t *testing.T) {
 		return p
 	}
 	asTerminal(t, true)
-	var out string
+	var out, errOut string
+
+	// Typed by hand: asked, and nothing said about a picker.
+	withStdin(t, "n\n", func() { errOut = stderrOf(t, func() { out = stdout(t, func() { _ = files("web1") }) }) })
+	if strings.Count(out, "[y/N]") != 1 || ranTimes(runs) != 0 || strings.Contains(errOut, "picker") {
+		t.Fatalf("by hand: out %q, stderr %q, ssh ran %d times; want one question, no picker note", out, errOut, ranTimes(runs))
+	}
 
 	t.Setenv(fromTUIEnv, "1")
-	withStdin(t, "n\n", func() { out = stdout(t, func() { _ = files("web1") }) })
+	withStdin(t, "n\n", func() { errOut = stderrOf(t, func() { out = stdout(t, func() { _ = files("web1") }) }) })
 	if !strings.Contains(out, "Open the file manager on it?") || ranTimes(runs) != 0 {
 		t.Fatalf("METERM_FROM_TUI alone: out %q, ssh ran %d times; want the question", out, ranTimes(runs))
 	}
+	if !strings.Contains(errOut, "picker token missing; asking here.") {
+		t.Errorf("METERM_FROM_TUI alone: stderr %q; want the note that the picker's token is missing", errOut)
+	}
 
+	// Launched by the picker after its y: no second question, no note.
 	p := token(0o600, goodTok)
-	withStdin(t, "", func() { out = stdout(t, func() { _ = files("web1", "/srv") }) })
-	if strings.Contains(out, "[y/N]") || ranTimes(runs) != 1 {
-		t.Fatalf("a good token: out %q, ssh ran %d times; want no question", out, ranTimes(runs))
+	withStdin(t, "", func() { errOut = stderrOf(t, func() { out = stdout(t, func() { _ = files("web1", "/srv") }) }) })
+	if strings.Contains(out, "[y/N]") || ranTimes(runs) != 1 || strings.Contains(errOut, "picker token") {
+		t.Fatalf("a good token: out %q, stderr %q, ssh ran %d times; want no question and no note", out, errOut, ranTimes(runs))
 	}
 	if _, err := os.Stat(p); !os.IsNotExist(err) {
 		t.Errorf("the token is still there after use: %v", err)
@@ -96,5 +101,46 @@ func TestFilesProductionToken(t *testing.T) {
 	withStdin(t, "", func() { out = stdout(t, func() { _ = files("web1", "/b") }) })
 	if l := lastLine(); ranTimes(runs) != 3 || strings.Contains(out, "[y/N]") || !strings.Contains(l, "failed: files /b (production, no prompt: not a terminal)") {
 		t.Errorf("not a terminal: out %q, ssh ran %d times, log %s", out, ranTimes(runs), l)
+	}
+}
+
+// runRoot runs meterm with args as main does, through the root command, so
+// what runs before every command (taking the picker's token) runs too. The
+// answer taken is forgotten after, as a new process would.
+func runRoot(t *testing.T, args ...string) error {
+	t.Helper()
+	root := newRootCmd()
+	root.SetArgs(args)
+	defer func() { pickerAnswer, warnedPicker = nil, false }()
+	return root.Execute()
+}
+
+// A host reached through a production jump host is asked about as one, and
+// the log says it was via production.
+func TestFilesViaProductionAsks(t *testing.T) {
+	dir := cliSandbox(t)
+	runs := fakeHostileSSH(t)
+	saveHosts(t, config.Host{Name: "web1", Address: "192.0.2.60", Env: config.EnvProduction},
+		config.Host{Name: "inner", Address: "192.0.2.61", ProxyJump: "web1"})
+	lastLine := func() string {
+		b, _ := os.ReadFile(filepath.Join(dir, "activity", "events.jsonl"))
+		lines := strings.Split(strings.TrimSpace(string(b)), "\n")
+		return lines[len(lines)-1]
+	}
+	asTerminal(t, true)
+	var out string
+	withStdin(t, "n\n", func() { out = stdout(t, func() { _ = runRoot(t, "files", "inner") }) })
+	if !strings.Contains(out, "reached through a PRODUCTION host") || strings.Count(out, "[y/N]") != 1 || ranTimes(runs) != 0 {
+		t.Fatalf("n: out %q, ssh ran %d times; want one question and nothing run", out, ranTimes(runs))
+	}
+	withStdin(t, "y\n", func() { out = stdout(t, func() { _ = runRoot(t, "files", "inner", "/a") }) })
+	if l := lastLine(); ranTimes(runs) != 1 || !strings.Contains(l, "failed: files /a (via production, asked)") {
+		t.Errorf("y: ssh ran %d times, log %s", ranTimes(runs), l)
+	}
+	asTerminal(t, false)
+	var errOut string
+	withStdin(t, "", func() { errOut = stderrOf(t, func() { _ = runRoot(t, "files", "inner", "/b") }) })
+	if l := lastLine(); !strings.Contains(l, "(via production, no prompt: not a terminal)") || !strings.Contains(errOut, "reached through a PRODUCTION host") {
+		t.Errorf("not a terminal: stderr %q, log %s", errOut, l)
 	}
 }

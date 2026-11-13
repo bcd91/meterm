@@ -14,7 +14,6 @@ import (
 	"meterm/internal/activity"
 	"meterm/internal/config"
 	"meterm/internal/fileman"
-	"meterm/internal/prodask"
 	"meterm/internal/sshrun"
 )
 
@@ -228,32 +227,43 @@ func fileOutcome(word string, took time.Duration) activity.Outcome {
 	return o
 }
 
-// filesProductionOK asks before the file manager opens on a production
-// host, y only. It doesn't ask with --yes, nor when the picker has asked
-// already and says so with its one-time token. With stdin not a terminal
-// nothing can answer: it goes on, says so on stderr. It returns what the
-// log should say about it ("" when the host isn't production) and whether
-// to go on.
+// filesProductionOK asks before the file manager opens on a host that is
+// production or is reached through one (config.TouchesProduction), y only.
+// It doesn't ask with --yes, nor when the picker that started this process
+// asked already and left its one-time token, taken before any command runs
+// (pickerAsked). With stdin not a terminal nothing can answer: it goes on,
+// says so on stderr. It returns what the log should say about it ("" when
+// the host doesn't touch production; "via …" when only its route does) and
+// whether to go on.
 func filesProductionOK(cfg *config.Config, h config.Host, yes, shell bool) (string, bool) {
-	if !cfg.IsProduction(h) {
+	if !cfg.TouchesProduction(h) {
 		return "", true
 	}
-	asked, why := prodask.Consume() // used up whatever happens next
+	via, what := "", "a PRODUCTION host"
+	if !cfg.IsProduction(h) {
+		via, what = "via ", "reached through a PRODUCTION host"
+	}
+	p := pickerAsked()
 	switch {
-	case asked:
-		return "production, picker asked", true
-	case why != "":
-		fmt.Fprintf(os.Stderr, "meterm: %s; asking here.\n", why)
+	case p.asked:
+		return via + prodPickerAsked, true
+	case p.from:
+		// Only the picker's own children are told: it should have left a token.
+		fmt.Fprintf(os.Stderr, "meterm: %s; asking here.\n", p.why)
 	}
 	if yes {
-		fmt.Fprintf(os.Stderr, "⚠ opening files on %s, a PRODUCTION host.\n", lbl(h.Name))
-		return "production, --yes", true
+		fmt.Fprintf(os.Stderr, "⚠ opening files on %s, %s.\n", lbl(h.Name), what)
+		return via + prodYes, true
 	}
 	if !stdinTerminal() {
-		fmt.Fprintf(os.Stderr, "⚠ opening files on %s, a PRODUCTION host, not asking (stdin isn't a terminal).\n", lbl(h.Name))
-		return "production, no prompt: not a terminal", true
+		fmt.Fprintf(os.Stderr, "⚠ opening files on %s, %s, not asking (stdin isn't a terminal).\n", lbl(h.Name), what)
+		return via + prodNoTerminal, true
 	}
-	fmt.Printf("⚠ %s is a PRODUCTION host: deletes and overwrites there are for real.\n", lbl(h.Name))
+	if via == "" {
+		fmt.Printf("⚠ %s is a PRODUCTION host: deletes and overwrites there are for real.\n", lbl(h.Name))
+	} else {
+		fmt.Printf("⚠ %s is reached through a PRODUCTION host.\n", lbl(h.Name))
+	}
 	q := "Open the file manager on it?"
 	if shell {
 		q = "Open the sftp prompt on it?"
@@ -261,7 +271,7 @@ func filesProductionOK(cfg *config.Config, h config.Host, yes, shell bool) (stri
 	if !confirm(q) {
 		return "", false
 	}
-	return "production, asked", true
+	return via + prodAsked, true
 }
 
 // limitedBuffer keeps the first 8 KB of ssh's stderr: enough for the error

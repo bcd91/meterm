@@ -51,6 +51,19 @@ func loadConfig() (*config.Config, error) {
 }
 
 func main() {
+	if err := newRootCmd().Execute(); err != nil {
+		// Errors can quote what was typed, or a saved name: not for the terminal to obey.
+		fmt.Fprintln(os.Stderr, "meterm:", termsafe.Lines(err.Error()))
+		finish(1)
+	}
+	finish(0)
+}
+
+// newRootCmd is meterm with all its commands, as main runs it: tests drive
+// it too, so what runs before every command (the picker's token) runs there.
+// --config binds to cfgPath; a value already set (a test's) stays.
+func newRootCmd() *cobra.Command {
+	keep := cfgPath
 	root := &cobra.Command{
 		Use:     "meterm",
 		Short:   "Remember your SSH hosts so you don't have to",
@@ -63,7 +76,7 @@ func main() {
 	// time plus the whole usage text, which buries the actual message.
 	root.SilenceUsage = true
 	root.SilenceErrors = true
-	root.PersistentFlags().StringVar(&cfgPath, "config", "", "path to meterm's host file (default: OS config dir)/meterm/hosts.yaml")
+	root.PersistentFlags().StringVar(&cfgPath, "config", keep, "path to meterm's host file (default: OS config dir)/meterm/hosts.yaml")
 	var debug bool
 	root.PersistentFlags().BoolVar(&debug, "debug", false, "trace the git commands team commands run, on stderr; same as METERM_DEBUG=1")
 	root.PersistentPreRun = func(*cobra.Command, []string) {
@@ -110,10 +123,5 @@ func main() {
 		newTeamCmd(),
 	)
 
-	if err := root.Execute(); err != nil {
-		// Errors can quote what was typed, or a saved name: not for the terminal to obey.
-		fmt.Fprintln(os.Stderr, "meterm:", termsafe.Lines(err.Error()))
-		finish(1)
-	}
-	finish(0)
+	return root
 }
