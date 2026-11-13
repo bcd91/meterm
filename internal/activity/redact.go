@@ -56,7 +56,10 @@ var (
 	redisAuthRE        = regexp.MustCompile(`((?:^|\s)-a\s*)(` + secretValue + `)`)
 	keygenRE           = regexp.MustCompile(`((?:^|\s)-[NP]\s*)(` + secretValue + `)`)
 	userPassRE         = regexp.MustCompile(`((?:^|[\s'"])[\w.-]+:)([^\s'"|;]+)`)
-	htpasswdRE         = regexp.MustCompile(`((?:^|\s)-[A-Za-z]*b[A-Za-z]*\s+\S+\s+\S+\s+)(` + secretValue + `)`)
+	// openssl's -k is a password and -K a raw key, each the next word.
+	// (-pass, -passin, -passout are caught as credential flags.)
+	opensslKeyRE = regexp.MustCompile(`((?:^|\s)-[kK]\s+)(` + secretValue + `)`)
+	htpasswdRE   = regexp.MustCompile(`((?:^|\s)-[A-Za-z]*b[A-Za-z]*\s+\S+\s+\S+\s+)(` + secretValue + `)`)
 )
 
 // Redact masks what looks like a credential in a command or path about to go
@@ -141,6 +144,9 @@ func programFlags(s string) string {
 	}
 	if has("chpasswd") {
 		mask(userPassRE)
+	}
+	if has("openssl") {
+		mask(opensslKeyRE)
 	}
 	if has("htpasswd") {
 		mask(htpasswdRE)

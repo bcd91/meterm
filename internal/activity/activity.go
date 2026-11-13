@@ -928,6 +928,8 @@ func RecordOutcome(start Event, o Outcome) (Event, error) {
 	// nothing of exit_code still shows it.
 	took := o.Took.Round(100 * time.Millisecond).String()
 	switch {
+	case o.ExitCode != nil && o.Note != "":
+		e.Detail = fmt.Sprintf("seq %d: exit %d (%s), %s", start.Seq, *o.ExitCode, o.Note, took)
 	case o.ExitCode != nil:
 		e.Detail = fmt.Sprintf("seq %d: exit %d, %s", start.Seq, *o.ExitCode, took)
 	case o.Note != "":

@@ -165,3 +165,40 @@ func TestAppendRedactsBeforeHashing(t *testing.T) {
 		t.Errorf("chain broken after redacting: %+v", broken)
 	}
 }
+
+// A credential word at the end of a path is still a key: db/password: x
+// must not let x through (a reverted change once did).
+func TestRedactPathEndingInACredentialWord(t *testing.T) {
+	for _, c := range []struct{ in, secret string }{
+		{"echo db/password: hunter2", "hunter2"},
+		{"vault kv put kv/app/token: abc123", "abc123"},
+		{"curl -d 'api/secret: abc'", "abc"},
+	} {
+		if got := Redact(c.in); strings.Contains(got, c.secret) || !strings.Contains(got, redacted) {
+			t.Errorf("Redact(%q) = %q", c.in, got)
+		}
+	}
+}
+
+// openssl takes a password or a raw key in its own flags.
+func TestRedactOpenssl(t *testing.T) {
+	for _, c := range []struct{ in, secret string }{
+		{"openssl enc -aes-256-cbc -k hunter2 -in a -out b", "hunter2"},
+		{"openssl enc -aes-256-cbc -K 00112233445566778899aabbccddeeff -iv 00 -in a", "00112233445566778899aabbccddeeff"},
+		{"openssl enc -pass pass:hunter2 -in a", "hunter2"},
+		{"openssl rsa -passin pass:hunter2 -in k.pem", "hunter2"},
+		{"openssl pkcs12 -export -passout pass:hunter2 -in c.pem", "hunter2"},
+		{"openssl req -passin=pass:hunter2", "hunter2"},
+		{"sudo /usr/bin/openssl enc -d -k 'two words' -in a", "two words"},
+	} {
+		if got := Redact(c.in); strings.Contains(got, c.secret) || !strings.Contains(got, redacted) {
+			t.Errorf("Redact(%q) = %q", c.in, got)
+		}
+	}
+	// -kfile names a file; -k means something else to other programs.
+	for _, in := range []string{"openssl enc -d -kfile /run/pw -in a", "tar -k -xf a.tar", "make -k all", "curl -k https://example.com"} {
+		if got := Redact(in); got != in {
+			t.Errorf("Redact(%q) = %q, want it unchanged", in, got)
+		}
+	}
+}
