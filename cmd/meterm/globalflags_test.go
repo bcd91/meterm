@@ -38,9 +38,7 @@ func TestGlobalFlagsBeforeConnect(t *testing.T) {
 			for i, a := range args {
 				args[i] = strings.ReplaceAll(a, "OTHER", other)
 			}
-			root := newRootCmd()
-			root.SetArgs(args)
-			if err := root.Execute(); err != nil {
+			if err := runRoot(t, args...); err != nil {
 				t.Fatalf("%v", err)
 			}
 			if b, _ := os.ReadFile(sshLog); !strings.Contains(string(b), "192.0.2.99") {
