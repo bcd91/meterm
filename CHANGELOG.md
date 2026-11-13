@@ -68,7 +68,8 @@ map now, so some keys moved. `?` in the picker lists the picker's first.
   removed when its terminal closes (SIGHUP) or it's sent SIGTERM, not only
   when it quits. One left by a picker that was killed outright is removed
   by the next picker, once that PID isn't running and the directory holds
-  only what a picker puts there (not on Windows).
+  only what a picker puts there (not on Windows). Ended by SIGTERM, the
+  picker exits 143 (after that cleanup), not 0 as if you'd quit it.
 
 ### Safety prompts
 
@@ -104,8 +105,8 @@ v0.23.1 asked about nothing but deleting a host in the picker.
   the command with `meterm: cancelled: …` on stderr (`web1 not removed`,
   `nothing ran`, `tunnel not enabled`) and exit status 1: `rm` (which
   exited 0 in v0.23.1), `group rm`, `exec` and `cp` on production,
-  `tunnel enable`, `files`, `keys revoke`, `team push`, `team approve`,
-  `team remove`, and the relay commands. A script that relied on exit 0
+  `tunnel enable`, `files`, `keys revoke`, `team push`, `team sync`,
+  `team share`, `team approve`, `team remove`, and the relay commands. A script that relied on exit 0
   after "no" must check for 1. From the picker, it shows as cancelled, not
   failed.
 
@@ -179,7 +180,11 @@ v0.23.1 asked about nothing but deleting a host in the picker.
   `team sync` report it as `rejected`, `team status` lists it, `list` and the
   picker count it in the team reminder ("1 refused"), and the command
   exits non-zero. Before, a rejected host was only reported and the
-  command exited 0.
+  command exited 0. Every `team pull` and `team sync` keeps exiting 1
+  while the team holds such a host, for every member: an owner or admin
+  fixes it by saving a clean host of that name (`meterm add`) and running
+  `meterm team resolve <host> --mine`, or by fixing or removing that host
+  in the team's repository.
 - `add` and `edit` refuse an address, user or jump that ssh would read as an
   option or split (`--address=-oProxyCommand=…`), and an identity file
   starting with `-`, naming the flag. Before, only `connect` refused them.

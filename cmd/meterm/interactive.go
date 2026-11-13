@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"os"
 
 	"github.com/mattn/go-isatty"
@@ -25,7 +26,13 @@ func runInteractive(cmd *cobra.Command, args []string) error {
 	tui.Commands = commandTree(cmd.Root())
 	tui.HostAttention = hostAttention
 	tui.TeamNames = teamNames
-	return tui.Run(path, teamNotice())
+	err = tui.Run(path, teamNotice())
+	if errors.Is(err, tui.ErrTerminated) {
+		// Cleaned up already; exit as a shell reports a TERM (128+15), so
+		// whatever stopped the picker doesn't read it as a quit.
+		osExit(143)
+	}
+	return err
 }
 
 // commandTree is the visible commands and their subcommands, for the

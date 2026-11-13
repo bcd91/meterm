@@ -16,6 +16,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 	"unicode/utf8"
@@ -1499,25 +1500,56 @@ func Run(cfgPath, notice string) error {
 		defer os.RemoveAll(d)
 	}
 	p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithReportFocus())
-	// Bubble Tea quits on SIGTERM (and then the deferred removal runs), but
-	// not on SIGHUP, which is what a closed terminal sends: without this it
-	// would kill the picker before anything is removed. SIGKILL can't be
-	// caught; the next picker's sweep clears what that leaves.
-	hup := make(chan os.Signal, 1)
-	signal.Notify(hup, syscall.SIGHUP)
-	defer signal.Stop(hup)
-	ended := make(chan struct{})
-	defer close(ended)
-	go func() {
-		select {
-		case <-hup:
-			p.Kill()
-		case <-ended:
-		}
-	}()
-	final, err := p.Run()
+	final, err := runProgram(p)
 	if fm, ok := final.(model); ok && fm.outcomeDir != "" && fm.outcomeDir != m.outcomeDir {
 		_ = os.RemoveAll(fm.outcomeDir) // made on first use after all
 	}
 	return err
+}
+
+// ErrTerminated is Run's error when the picker was ended by SIGTERM, after
+// its cleanup: a script or supervisor that stopped it must not read the
+// exit as a quit by the person.
+var ErrTerminated = errors.New("terminated")
+
+// runProgram runs p until it ends. Bubble Tea quits on SIGTERM (and then
+// the caller's deferred removal runs), but returns no error for it, and it
+// doesn't stop on SIGHUP, which is what a closed terminal sends: without
+// this the picker would be killed before anything is removed. SIGKILL
+// can't be caught; the next picker's sweep clears what that leaves.
+func runProgram(p *tea.Program) (tea.Model, error) {
+	sig := make(chan os.Signal, 2)
+	signal.Notify(sig, syscall.SIGHUP, syscall.SIGTERM)
+	defer signal.Stop(sig)
+	var termed atomic.Bool
+	ended := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			select {
+			case s := <-sig:
+				if s == syscall.SIGTERM {
+					termed.Store(true) // Bubble Tea quits on it itself
+				} else {
+					p.Kill()
+				}
+			case <-ended:
+				return
+			}
+		}
+	}()
+	final, err := p.Run()
+	close(ended)
+	<-done
+	// Bubble Tea may have quit on the TERM before the loop above took it.
+	for len(sig) > 0 {
+		if <-sig == syscall.SIGTERM {
+			termed.Store(true)
+		}
+	}
+	if termed.Load() {
+		return final, ErrTerminated
+	}
+	return final, err
 }
