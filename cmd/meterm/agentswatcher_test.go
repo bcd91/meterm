@@ -94,7 +94,7 @@ func TestWatcherKeyThisMachineCantUse(t *testing.T) {
 			if _, _, err := watcherKeyLine(context.Background(), job.resolve(context.Background()), "", time.Second); err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Errorf("agents key: %v", err)
 			}
-			if msg, code := checkWatcherKey(context.Background(), job, time.Second); code != keyCheckUnsure || !strings.Contains(msg, tc.want) {
+			if msg, code := checkWatcherKey(context.Background(), job, time.Second, nil); code != keyCheckUnsure || !strings.Contains(msg, tc.want) {
 				t.Errorf("--check: %d %s", code, msg)
 			}
 			// The watch keeps asking (it may be fixed here), and doesn't say it stopped.
@@ -370,7 +370,7 @@ func TestCheckWatcherKeyCantTell(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			fakeSSHScript(t, script)
 			cannedSSHG(t, "user agent\n")
-			if msg, code := checkWatcherKey(context.Background(), job, 5*time.Second); code != keyCheckUnsure {
+			if msg, code := checkWatcherKey(context.Background(), job, 5*time.Second, nil); code != keyCheckUnsure {
 				t.Errorf("%d %s", code, msg)
 			}
 		})

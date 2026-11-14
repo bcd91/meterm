@@ -58,8 +58,10 @@ What changed between releases that you'd notice in use. Newest first.
   `--check` probes the watcher key (a command, stdin, a forward both ways) and reads its
   `authorized_keys` line with your ordinary login: exit 0 only if the installed line for the
   key is exactly meterm's and the probes found no way through; exit 2, loudly, if a probe got
-  through or the line has other options (naming them); exit 1 if it can't tell. sshd-wide
-  settings aren't read. A host named `key` is now `meterm agents -- key`.
+  through or the line has other options (naming them); exit 1 if it can't tell (a file over
+  256 KiB, a line meterm can't read). It doesn't read sshd's own settings, other key files, the
+  account's shell startup files or which `claude` runs; it says so in its answer. The read is
+  in the activity log, as `exec` is. A host named `key` is now `meterm agents -- key`.
 - A watcher look keeps what your ssh config says about where the host is, how to get there and
   which host keys count (`HostName`, `User`, `Port`, `ProxyJump`, known-hosts files,
   `HostKeyAlias`, `AddressFamily`, `BindAddress`, `BindInterface`), read with `ssh -G`, but none

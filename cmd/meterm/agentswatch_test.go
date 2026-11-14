@@ -444,6 +444,14 @@ func TestAgentsWatchFlags(t *testing.T) {
 	}
 	t.Setenv("METERM_CONFIG", cfgFile)
 	argvFile := fakeSSHScript(t, `echo '[]'`)
+	// If one of these did start a watch, it ends here rather than at the test's timeout.
+	old := agentsWatchParent
+	agentsWatchParent = func() context.Context {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		t.Cleanup(cancel)
+		return ctx
+	}
+	t.Cleanup(func() { agentsWatchParent = old })
 	for _, tc := range []struct {
 		args []string
 		want string

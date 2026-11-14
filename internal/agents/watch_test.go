@@ -300,3 +300,22 @@ func TestWatchUnknownDoesntEndAWait(t *testing.T) {
 		t.Errorf("known: %+v", ch)
 	}
 }
+
+// An unknown answer between two pid-less "waiting" ones breaks the run: it isn't raised
+// until two answers in a row say so.
+func TestWatchUnknownBreaksThePendingRun(t *testing.T) {
+	row := func(state string) Host {
+		ev, conf := Classify(state, "", "")
+		return Host{Host: "h", Reachable: true, Agents: []Agent{{ID: "a", State: state, Event: ev, Confidence: conf}}}
+	}
+	tr := NewTracker()
+	for i, st := range []string{"blocked", "frobnicating", "blocked"} {
+		look, ch := tr.Observe(row(st), at(i), 0)
+		if len(ch) != 0 {
+			t.Fatalf("look %d raised: %+v %+v", i+1, ch, look.Sessions)
+		}
+	}
+	if _, ch := tr.Observe(row("blocked"), at(3), 0); len(ch) != 1 || ch[0].Why != WhySeenTwice {
+		t.Errorf("two in a row: %+v", ch)
+	}
+}

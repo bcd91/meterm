@@ -10,7 +10,6 @@ import (
 	"math/rand/v2"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"meterm/internal/agents"
@@ -289,7 +288,22 @@ type watchWriter struct {
 	stop    <-chan struct{}
 	lines   chan []byte
 	done    chan struct{}
-	taken   atomic.Int64 // when stdout last took a line, Unix nanoseconds
+	// takenAt is when stdout last took a line, under mu: a time.Time from time.Now,
+	// so it's measured on the monotonic clock and a step of the wall clock can't
+	// shorten the wait for it.
+	takenAt time.Time
+}
+
+func (o *watchWriter) took() {
+	o.mu.Lock()
+	o.takenAt = time.Now()
+	o.mu.Unlock()
+}
+
+func (o *watchWriter) sinceTaken() time.Duration {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return time.Since(o.takenAt)
 }
 
 func newWatchWriter(ctx context.Context, w io.Writer, format string, cancel context.CancelFunc) *watchWriter {
@@ -304,7 +318,7 @@ func newWatchWriter(ctx context.Context, w io.Writer, format string, cancel cont
 			if _, err := o.w.Write(b); err != nil {
 				o.fail(err)
 			}
-			o.taken.Store(time.Now().UnixNano())
+			o.took()
 		}
 	}()
 	return o
@@ -372,9 +386,9 @@ var errWatchBlocked = fmt.Errorf("%w: stdout isn't being read", errWatchOutput)
 // Called once, after every other write.
 func (o *watchWriter) close(last any, stall, capAll time.Duration) error {
 	start := time.Now()
-	o.taken.Store(start.UnixNano())
+	o.took()
 	stuck := func() bool {
-		return time.Since(time.Unix(0, o.taken.Load())) > stall || time.Since(start) > capAll
+		return o.sinceTaken() > stall || time.Since(start) > capAll
 	}
 	tick := time.NewTicker(50 * time.Millisecond)
 	defer tick.Stop()

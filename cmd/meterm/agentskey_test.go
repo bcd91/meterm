@@ -5,10 +5,12 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/rsa"
 	"encoding/pem"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"slices"
 	"strings"
@@ -600,10 +602,33 @@ const prohibited = `echo 'channel 0: open failed: administratively prohibited: o
 const remoteRefused = `echo 'Error: remote port forwarding failed for listen port 0' >&2; exit 255`
 
 // farSide is a fake ssh's answer to --check's ordinary read of authorized_keys: the
-// file at path, as readAuthorizedKeys prints it.
-func farSide(path string) string {
-	return `for a; do case "$a" in *authorized_keys2*) echo '--meterm-file-- /h/.ssh/authorized_keys'; cat '` + path +
-		`'; echo; echo '--meterm-missing-- /h/.ssh/authorized_keys2'; exit 0;; esac; done; `
+// file at path as authorized_keys, and no authorized_keys2, printed as
+// readAuthorizedKeys does, with the nonce taken from the command it was sent.
+func farSide(path string) string { return farSides(path, "") }
+
+// farSides is farSide with authorized_keys2 too. "" is a file that isn't there, and
+// "!" one that can't be read.
+func farSides(ak, ak2 string) string {
+	one := func(f, name string) string {
+		switch f {
+		case "":
+			return `echo "--meterm-$n-missing-- ` + name + `"; `
+		case "!":
+			return `echo "--meterm-$n-unreadable-- ` + name + `"; `
+		}
+		return `echo "--meterm-$n-file-- $(wc -c <'` + f + `') ` + name + `"; head -c 262145 '` + f + `'; echo; echo "--meterm-$n-end--"; `
+	}
+	return `for a; do case "$a" in *authorized_keys2*) n=$(printf '%s' "$a" | sed -n 's/.*--meterm-\([0-9a-f]*\)-missing.*/\1/p'); ` +
+		one(ak, "/h/.ssh/authorized_keys") + one(ak2, "/h/.ssh/authorized_keys2") + `exit 0;; esac; done; `
+}
+
+// nonceOf is the word in a readAuthorizedKeys command.
+func nonceOf(cmd string) string {
+	m := regexp.MustCompile(`--meterm-([0-9a-f]{16})-missing`).FindStringSubmatch(cmd)
+	if m == nil {
+		return "\x00none"
+	}
+	return m[1]
 }
 
 // fwd is a fake ssh's answer to -W, and a refusal of -R, ahead of what it does
@@ -636,8 +661,8 @@ func TestCheckWatcherKey(t *testing.T) {
 		want              string
 	}{
 		{"unlimited", meterms, `for a; do last=$a; done; eval "$last"`, keyCheckUnlimited, "NOT LIMITED"},
-		{"meterm's line, nothing through", other + meterms, fwd(prohibited) + `echo '[]'`, keyCheckLimited, "exactly meterm's line"},
-		{"meterm's line, no claude", meterms, fwd(prohibited) + `exit 127`, keyCheckLimited, "exactly meterm's line"},
+		{"meterm's line, nothing through", other + meterms, fwd(prohibited) + `echo '[]'`, keyCheckLimited, "exactly meterm's"},
+		{"meterm's line, no claude", meterms, fwd(prohibited) + `exit 127`, keyCheckLimited, "exactly meterm's"},
 		{"forwards", meterms, fwd(`echo SSH-2.0-OpenSSH_10.0; exec sleep 30`) + `echo '[]'`, keyCheckUnlimited, "port forwarding is allowed"},
 		{"forward tried", meterms, fwd(`echo 'channel 0: open failed: connect failed: Connection refused' >&2; echo 'stdio forwarding failed' >&2; exit 255`) + `echo '[]'`, keyCheckUnlimited, "port forwarding is allowed"},
 		{"forward unclear", meterms, fwd(`echo 'stdio forwarding failed' >&2; exit 255`) + `echo '[]'`, keyCheckUnsure, "couldn't be told"},
@@ -659,7 +684,7 @@ func TestCheckWatcherKey(t *testing.T) {
 			}
 			argvFile := fakeSSHScript(t, farSide(far)+tc.script)
 			cannedSSHG(t, "user agent\nhostname 192.0.2.1\n")
-			msg, code := checkWatcherKey(context.Background(), job, 5*time.Second)
+			msg, code := checkWatcherKey(context.Background(), job, 5*time.Second, nil)
 			if code != tc.code || !strings.Contains(msg, tc.want) {
 				t.Errorf("%d %q", code, msg)
 			}
@@ -682,19 +707,28 @@ func TestCheckWatcherKey(t *testing.T) {
 	}
 	for name, script := range map[string]string{
 		"ordinary login fails": `for a; do case "$a" in *authorized_keys2*) echo 'bcd@192.0.2.1: Permission denied (publickey).' >&2; exit 255;; esac; done; ` + fwd(prohibited) + `echo '[]'`,
-		"unreadable":           `for a; do case "$a" in *authorized_keys2*) echo '--meterm-unreadable-- /h/.ssh/authorized_keys'; echo '--meterm-missing-- /h/.ssh/authorized_keys2'; exit 0;; esac; done; ` + fwd(prohibited) + `echo '[]'`,
+		"unreadable":           farSides("!", "") + fwd(prohibited) + `echo '[]'`,
 		"garbled answer":       `for a; do case "$a" in *authorized_keys2*) echo '[]'; exit 0;; esac; done; ` + fwd(prohibited) + `echo '[]'`,
 		// meterm's line, but not the answer that was asked for: no file headers.
 		"no headers": `for a; do case "$a" in *authorized_keys2*) cat '` + farFile + `'; exit 0;; esac; done; ` + fwd(prohibited) + `echo '[]'`,
 		// meterm's line in one file, and the other can't be read.
-		"one file unreadable": `for a; do case "$a" in *authorized_keys2*) echo '--meterm-file-- /h/.ssh/authorized_keys'; cat '` + farFile +
-			`'; echo; echo '--meterm-unreadable-- /h/.ssh/authorized_keys2'; exit 0;; esac; done; ` + fwd(prohibited) + `echo '[]'`,
+		"one file unreadable": farSides(farFile, "!") + fwd(prohibited) + `echo '[]'`,
+		// A header with the right shape but not this check's word: a file pretending.
+		"forged headers": `for a; do case "$a" in *authorized_keys2*) echo '--meterm-0000000000000000-file-- 10 x'; cat '` + farFile + `'; echo '--meterm-0000000000000000-end--'; exit 0;; esac; done; ` + fwd(prohibited) + `echo '[]'`,
+		// A file whose header says it's small, but more came: it grew while being read.
+		"grew while read": `for a; do case "$a" in *authorized_keys2*) n=$(printf '%s' "$a" | sed -n 's/.*--meterm-\([0-9a-f]*\)-missing.*/\1/p'); echo "--meterm-$n-file-- 10 /h/.ssh/authorized_keys"; head -c 270000 /dev/zero | tr '\0' '#'; echo; cat '` + farFile + `'; echo; echo "--meterm-$n-end--"; echo "--meterm-$n-missing-- /h/.ssh/authorized_keys2"; exit 0;; esac; done; ` + fwd(prohibited) + `echo '[]'`,
+		// More than meterm reads of the whole answer.
+		"answer too long": `for a; do case "$a" in *authorized_keys2*) head -c 1100000 /dev/zero | tr '\0' '#'; exit 0;; esac; done; ` + fwd(prohibited) + `echo '[]'`,
 	} {
 		t.Run(name, func(t *testing.T) {
 			fakeSSHScript(t, script)
 			cannedSSHG(t, "user agent\nhostname 192.0.2.1\n")
-			if msg, code := checkWatcherKey(context.Background(), job, 5*time.Second); code != keyCheckUnsure {
+			msg, code := checkWatcherKey(context.Background(), job, 5*time.Second, nil)
+			if code != keyCheckUnsure {
 				t.Errorf("%d %q", code, msg)
+			}
+			if name == "answer too long" && !strings.Contains(msg, "more than meterm reads") {
+				t.Errorf("%q", msg)
 			}
 		})
 	}
@@ -705,18 +739,18 @@ func TestCheckWatcherKey(t *testing.T) {
 	}
 	fakeSSHScript(t, `for a; do case "$a" in *authorized_keys2*) printf '%s\n' "$@" >'`+far+`.argv';; esac; done; `+farSide(far)+fwd(prohibited)+`echo '[]'`)
 	cannedSSHG(t, "user agent\nhostname 192.0.2.1\n")
-	checkWatcherKey(context.Background(), job, 5*time.Second)
+	checkWatcherKey(context.Background(), job, 5*time.Second, nil)
 	readArgv, _ := os.ReadFile(far + ".argv")
 	argv := strings.Split(strings.TrimSpace(string(readArgv)), "\n")
-	if argv[len(argv)-1] != readAuthorizedKeys || slices.Contains(argv, key) || slices.Contains(argv, "IdentitiesOnly=yes") {
+	if !regexp.MustCompile(`^`+regexp.QuoteMeta(readAuthorizedKeys("NONCE"))+`$`).MatchString(strings.ReplaceAll(argv[len(argv)-1], nonceOf(argv[len(argv)-1]), "NONCE")) || slices.Contains(argv, key) || slices.Contains(argv, "IdentitiesOnly=yes") {
 		t.Errorf("ordinary read argv %q", argv)
 	}
 
 	// Two checks don't send the same word.
 	argvFile := fakeSSHScript(t, `echo '[]'`)
 	cannedSSHG(t, "user agent\n")
-	checkWatcherKey(context.Background(), job, 5*time.Second)
-	checkWatcherKey(context.Background(), job, 5*time.Second)
+	checkWatcherKey(context.Background(), job, 5*time.Second, nil)
+	checkWatcherKey(context.Background(), job, 5*time.Second, nil)
 	b, _ := os.ReadFile(argvFile)
 	var words []string
 	for _, l := range strings.Split(string(b), "\n") {
@@ -748,5 +782,128 @@ func TestAgentsIdentityWithHiddenCharacters(t *testing.T) {
 	h, _ := cfg.Find("a")
 	if r := cfg.Resolve(*h); checkAgentsIdentity(r) == "" {
 		t.Errorf("from defaults: %q", r.AgentsIdentity)
+	}
+}
+
+// What sshd might read and meterm can't is "can't tell", never left out: a file too
+// big to read all of, a line with a control byte, a line Go's parser won't take. An RSA
+// key under rsa-sha2-256/512 is read as the ssh-rsa key it is. cert-authority for the
+// watcher key lets a certificate it signs in without the line's limits: not limited.
+func TestCheckWatcherKeyReadsLikeSSHD(t *testing.T) {
+	dir := t.TempDir()
+	key := newWatcherKey(t, dir, "watch")
+	job := agentJob{label: "devbox", resolve: func(context.Context) config.Resolved {
+		return config.Resolved{Name: "devbox", Address: "192.0.2.1", AgentsIdentity: key}
+	}}
+	opts, _ := agents.KeyOptions()
+	pub := string(mustRead(t, key+".pub"))
+	typ, blob, _ := strings.Cut(pub, " ")
+	meterms := opts + " " + pub + "\n"
+	bad := `restrict,command="cat >/dev/null; exit 1" `
+	for _, tc := range []struct {
+		name, ak, ak2 string
+		code          int
+		want          string
+	}{
+		{"meterm's, CRLF", strings.ReplaceAll(meterms, "\n", "\r\n"), "", keyCheckLimited, "exactly meterm's"},
+		{"too big, then the line sshd uses", strings.Repeat("# filler\n", 30000) + bad + pub + "\n", meterms, keyCheckUnsure, "too big"},
+		{"a NUL after the blob", bad + typ + " " + blob + "\x00x\n" + meterms, "", keyCheckUnsure, "control character"},
+		{"a form feed in the base64", bad + typ + " " + blob[:10] + "\f" + blob[10:] + "\n" + meterms, "", keyCheckUnsure, "control character"},
+		{"a line starting with a vertical tab", "\v" + bad + pub + "\n" + meterms, "", keyCheckUnsure, "control character"},
+		{"a line Go can't parse", bad + typ + " notbase64!!\n" + meterms, "", keyCheckUnsure, "can't read"},
+		{"cert-authority for the watcher key", "cert-authority " + pub + "\n" + meterms, "", keyCheckUnlimited, "has cert-authority"},
+		{"meterm's, a control byte in its comment", opts + " " + pub + " meterm\x01x\n", "", keyCheckUnsure, "control character"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			write := func(c string) string {
+				if c == "" {
+					return ""
+				}
+				p := filepath.Join(t.TempDir(), "ak")
+				if err := os.WriteFile(p, []byte(c), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				return p
+			}
+			fakeSSHScript(t, farSides(write(tc.ak), write(tc.ak2))+fwd(prohibited)+`echo '[]'`)
+			cannedSSHG(t, "user agent\nhostname 192.0.2.1\n")
+			if msg, code := checkWatcherKey(context.Background(), job, 5*time.Second, nil); code != tc.code || !strings.Contains(msg, tc.want) {
+				t.Errorf("%d %q", code, msg)
+			}
+		})
+	}
+
+	// An RSA watcher key, its other line written as rsa-sha2-512: read, and not meterm's.
+	priv, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	block, err := ssh.MarshalPrivateKey(priv, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rsaKey := filepath.Join(dir, "rsawatch")
+	if err := os.WriteFile(rsaKey, pem.EncodeToMemory(block), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	rpk, _ := ssh.NewPublicKey(&priv.PublicKey)
+	rpub := strings.TrimSpace(string(ssh.MarshalAuthorizedKey(rpk)))
+	if err := os.WriteFile(rsaKey+".pub", []byte(rpub), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, rblob, _ := strings.Cut(rpub, " ")
+	rjob := agentJob{label: "devbox", resolve: func(context.Context) config.Resolved {
+		return config.Resolved{Name: "devbox", Address: "192.0.2.1", AgentsIdentity: rsaKey}
+	}}
+	for _, name := range []string{"rsa-sha2-256", "rsa-sha2-512"} {
+		p := filepath.Join(t.TempDir(), "ak")
+		content := bad + name + " " + rblob + "\n" + opts + " " + rpub + "\n"
+		if err := os.WriteFile(p, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		fakeSSHScript(t, farSides(p, "")+fwd(prohibited)+`echo '[]'`)
+		cannedSSHG(t, "user agent\nhostname 192.0.2.1\n")
+		if msg, code := checkWatcherKey(context.Background(), rjob, 5*time.Second, nil); code != keyCheckUnlimited || !strings.Contains(msg, "options differ") {
+			t.Errorf("%s: %d %q", name, code, msg)
+		}
+	}
+}
+
+// --check's read of authorized_keys is a login with the person's own key that runs a
+// command: it's in the activity log, as exec is, by program name. The probes with the
+// watcher key aren't, as looks aren't.
+func TestCheckRecordsTheOrdinaryRead(t *testing.T) {
+	dir := t.TempDir()
+	key := newWatcherKey(t, dir, "watch")
+	opts, _ := agents.KeyOptions()
+	far := filepath.Join(dir, "ak")
+	if err := os.WriteFile(far, []byte(opts+" "+string(mustRead(t, key+".pub"))+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfgFile := filepath.Join(dir, "hosts.yaml")
+	if err := os.WriteFile(cfgFile, []byte("version: 1\nhosts:\n- {name: devbox, address: 192.0.2.1, agents_identity: "+key+"}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("METERM_CONFIG", cfgFile)
+	activityDir := filepath.Join(dir, "activity")
+	t.Setenv("METERM_ACTIVITY_DIR", activityDir)
+	fakeSSHScript(t, farSide(far)+fwd(prohibited)+`echo '[]'`)
+	cannedSSHG(t, "user agent\nhostname 192.0.2.1\n")
+	c := newAgentsCmd()
+	c.SetArgs([]string{"key", "devbox", "--check"})
+	c.SilenceUsage, c.SilenceErrors = true, true
+	if err := c.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(filepath.Join(activityDir, "events.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	log := string(b)
+	if strings.Count(log, `"action":"exec"`) != 1 || !strings.Contains(log, `sh (shell line)`) || strings.Contains(log, "authorized_keys") {
+		t.Errorf("activity:\n%s", log)
+	}
+	if !strings.Contains(log, `"exit_code":0`) {
+		t.Errorf("no outcome:\n%s", log)
 	}
 }

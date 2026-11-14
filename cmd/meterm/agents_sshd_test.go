@@ -100,7 +100,7 @@ func startLocalSSHD(t *testing.T, extraConfig ...string) *localSSHD {
 	if err := os.WriteFile(conf, []byte(fmt.Sprintf(`Port %s
 ListenAddress 127.0.0.1
 HostKey %s
-AuthorizedKeysFile %s %s
+AuthorizedKeysFile %s %s %s
 PidFile %s
 UsePAM no
 StrictModes no
@@ -111,7 +111,7 @@ AllowUsers %s
 SetEnv HOME=%s PATH=/usr/bin:/bin
 LogLevel VERBOSE
 PerSourcePenalties no
-%s`, s.port, hostKey, s.authorized, s.elsewhere, filepath.Join(dir, "sshd.pid"), s.me, home, strings.Join(append(extraConfig, ""), "\n"))), 0o600); err != nil {
+%s`, s.port, hostKey, s.authorized, s.authorized+"2", s.elsewhere, filepath.Join(dir, "sshd.pid"), s.me, home, strings.Join(append(extraConfig, ""), "\n"))), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	s.setAuthorized(t)
@@ -198,6 +198,7 @@ func (s *localSSHD) setAuthorized(t *testing.T, entries ...string) {
 	if err := os.WriteFile(s.elsewhere, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
+	_ = os.Remove(s.authorized + "2")
 }
 
 func (s *localSSHD) job() agentJob {
@@ -222,21 +223,21 @@ func TestLocalSSHDWatcherKey(t *testing.T) {
 	if got.Error != "" || got.Agents == nil || s.claudeRuns() != 1 {
 		t.Fatalf("look: %+v, claude ran %d", got, s.claudeRuns())
 	}
-	if msg, code := checkWatcherKey(ctx, s.job(), 10*time.Second); code != keyCheckLimited {
+	if msg, code := checkWatcherKey(ctx, s.job(), 10*time.Second, nil); code != keyCheckLimited {
 		t.Errorf("limited line: %d %s", code, msg)
 	}
 
 	// The same key also on a plain line before it: sshd takes that one, and --check
 	// says so, loudly.
 	s.setAuthorized(t, "watch", "watch-limited", "main")
-	if msg, code := checkWatcherKey(ctx, s.job(), 10*time.Second); code != keyCheckUnlimited || !strings.Contains(msg, "NOT LIMITED") {
+	if msg, code := checkWatcherKey(ctx, s.job(), 10*time.Second, nil); code != keyCheckUnlimited || !strings.Contains(msg, "NOT LIMITED") {
 		t.Errorf("plain line first: %d %s", code, msg)
 	}
 	// A forced command alone, or restrict with port-forwarding let back in: the key
 	// runs nothing else, but it forwards, so it isn't limited.
 	for _, entry := range []string{"watch-cmdonly", "watch-pf"} {
 		s.setAuthorized(t, entry, "main")
-		if msg, code := checkWatcherKey(ctx, s.job(), 10*time.Second); code != keyCheckUnlimited || !strings.Contains(msg, "port forwarding is allowed") {
+		if msg, code := checkWatcherKey(ctx, s.job(), 10*time.Second, nil); code != keyCheckUnlimited || !strings.Contains(msg, "port forwarding is allowed") {
 			t.Errorf("%s: %d %s", entry, code, msg)
 		}
 	}
@@ -244,13 +245,13 @@ func TestLocalSSHDWatcherKey(t *testing.T) {
 	// as the forced command runs what comes on stdin.
 	for entry, want := range map[string]string{"watch-permitopen": "remote (-R)", "watch-shell": "NOT LIMITED"} {
 		s.setAuthorized(t, entry, "main")
-		if msg, code := checkWatcherKey(ctx, s.job(), 10*time.Second); code != keyCheckUnlimited || !strings.Contains(msg, want) {
+		if msg, code := checkWatcherKey(ctx, s.job(), 10*time.Second, nil); code != keyCheckUnlimited || !strings.Contains(msg, want) {
 			t.Errorf("%s: %d %s", entry, code, msg)
 		}
 	}
 	// The line as printed: limited, forwarding refused.
 	s.setAuthorized(t, "watch-limited", "main")
-	if msg, code := checkWatcherKey(ctx, s.job(), 10*time.Second); code != keyCheckLimited || !strings.Contains(msg, "exactly meterm's line") {
+	if msg, code := checkWatcherKey(ctx, s.job(), 10*time.Second, nil); code != keyCheckLimited || !strings.Contains(msg, "exactly meterm's") {
 		t.Errorf("printed line: %d %s", code, msg)
 	}
 
@@ -266,7 +267,7 @@ func TestLocalSSHDWatcherKey(t *testing.T) {
 		"other ports":     `restrict,port-forwarding,permitlisten="127.0.0.1:18080",permitopen="127.0.0.1:5432",command="` + esc + `"`,
 	} {
 		s.setAuthorized(t, "opts:"+o, "main")
-		if msg, code := checkWatcherKey(ctx, s.job(), 10*time.Second); code != keyCheckUnlimited || !strings.Contains(msg, "options differ") {
+		if msg, code := checkWatcherKey(ctx, s.job(), 10*time.Second, nil); code != keyCheckUnlimited || !strings.Contains(msg, "options differ") {
 			t.Errorf("%s: %d %s", name, code, msg)
 		}
 	}
@@ -277,13 +278,13 @@ func TestLocalSSHDWatcherKey(t *testing.T) {
 	if err := os.WriteFile(s.elsewhere, []byte(opts+" "+string(mustRead(t, s.watch+".pub"))+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if msg, code := checkWatcherKey(ctx, s.job(), 10*time.Second); code != keyCheckUnsure || !strings.Contains(msg, "AuthorizedKeysFile") {
+	if msg, code := checkWatcherKey(ctx, s.job(), 10*time.Second, nil); code != keyCheckUnsure || !strings.Contains(msg, "AuthorizedKeysFile") {
 		t.Errorf("elsewhere: %d %s", code, msg)
 	}
 	// After it, sshd uses the limited line; but another line for the key is there, and
 	// any change to the file can bring it first: not limited.
 	s.setAuthorized(t, "watch-limited", "watch", "main")
-	if msg, code := checkWatcherKey(ctx, s.job(), 10*time.Second); code != keyCheckUnlimited || !strings.Contains(msg, "options differ") {
+	if msg, code := checkWatcherKey(ctx, s.job(), 10*time.Second, nil); code != keyCheckUnlimited || !strings.Contains(msg, "options differ") {
 		t.Errorf("plain line second: %d %s", code, msg)
 	}
 
@@ -296,7 +297,7 @@ func TestLocalSSHDWatcherKey(t *testing.T) {
 	if got.Error != agentsWatcherRefused || s.claudeRuns() != before {
 		t.Errorf("refused: %+v", got)
 	}
-	if msg, code := checkWatcherKey(ctx, s.job(), 10*time.Second); code != keyCheckUnsure || !strings.Contains(msg, "refused the watcher key") {
+	if msg, code := checkWatcherKey(ctx, s.job(), 10*time.Second, nil); code != keyCheckUnsure || !strings.Contains(msg, "refused the watcher key") {
 		t.Errorf("check with no line: %d %s", code, msg)
 	}
 	// With -q in the host's extra_args too: still read as a refused watcher key.
@@ -382,11 +383,72 @@ func writeUserSSHConfig(t *testing.T, content string) {
 func TestLocalSSHDRemoteForwardingOnly(t *testing.T) {
 	s := startLocalSSHD(t, "AllowTcpForwarding remote")
 	s.setAuthorized(t, "watch-cmdonly", "main")
-	if msg, code := checkWatcherKey(context.Background(), s.job(), 10*time.Second); code != keyCheckUnlimited || !strings.Contains(msg, "remote (-R)") {
+	if msg, code := checkWatcherKey(context.Background(), s.job(), 10*time.Second, nil); code != keyCheckUnlimited || !strings.Contains(msg, "remote (-R)") {
 		t.Errorf("%d %s", code, msg)
 	}
 	s.setAuthorized(t, "watch-limited", "main")
-	if msg, code := checkWatcherKey(context.Background(), s.job(), 10*time.Second); code != keyCheckLimited {
+	if msg, code := checkWatcherKey(context.Background(), s.job(), 10*time.Second, nil); code != keyCheckLimited {
 		t.Errorf("printed line: %d %s", code, msg)
+	}
+}
+
+// writeRaw puts these bytes in authorized_keys and authorized_keys2 ("" for none), with
+// the person's own key at the end of the second, so the ordinary read gets in.
+func (s *localSSHD) writeRaw(t *testing.T, ak, ak2 string) {
+	t.Helper()
+	ak2 += string(mustRead(t, s.main+".pub")) + "\n"
+	for p, c := range map[string]string{s.authorized: ak, s.authorized + "2": ak2, s.elsewhere: ""} {
+		if err := os.WriteFile(p, []byte(c), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// What sshd reads and Go's parser doesn't, or past what meterm reads: a line the
+// watcher key really gets in on, put before meterm's. None may be exit 0; meterm's line
+// alone still is.
+func TestLocalSSHDLinesMetermMustNotMiss(t *testing.T) {
+	s := startLocalSSHD(t)
+	ctx := context.Background()
+	opts, _ := agents.KeyOptions()
+	pub := string(mustRead(t, s.watch+".pub"))
+	typ, blob, _ := strings.Cut(strings.Fields(pub)[0]+" "+strings.Fields(pub)[1], " ")
+	meterms := opts + " " + pub + "\n"
+	bad := `restrict,command="cat >/dev/null; exit 1" `
+
+	s.writeRaw(t, meterms, "")
+	if msg, code := checkWatcherKey(ctx, s.job(), 10*time.Second, nil); code != keyCheckLimited {
+		t.Fatalf("meterm's line: %d %s", code, msg)
+	}
+	for _, tc := range []struct{ name, ak, ak2 string }{
+		{"270 KB, then the line sshd uses", strings.Repeat("# filler line\n", 20000) + bad + pub + "\n", meterms},
+		{"a NUL after the blob", bad + typ + " " + blob + "\x00\n" + meterms, ""},
+		{"a form feed in the base64", bad + typ + " " + blob[:20] + "\f" + blob[20:] + "\n" + meterms, ""},
+		{"a vertical tab first", "\v" + bad + pub + "\n" + meterms, ""},
+		{"cert-authority", "cert-authority " + pub + "\n" + meterms, ""},
+	} {
+		s.writeRaw(t, tc.ak, tc.ak2)
+		if msg, code := checkWatcherKey(ctx, s.job(), 10*time.Second, nil); code == keyCheckLimited {
+			t.Errorf("%s: exit 0: %s", tc.name, msg)
+		}
+	}
+
+	// An RSA watcher key, its working line written as rsa-sha2-512.
+	rsaKey := filepath.Join(s.dir, "rsawatch")
+	if out, err := exec.Command("ssh-keygen", "-q", "-t", "rsa", "-b", "2048", "-N", "", "-f", rsaKey).CombinedOutput(); err != nil {
+		t.Fatalf("%v %s", err, out)
+	}
+	rpub := string(mustRead(t, rsaKey+".pub"))
+	rblob := strings.Fields(rpub)[1]
+	rjob := agentJob{label: "local", resolve: func(context.Context) config.Resolved {
+		return config.Resolved{Name: "local", Address: "127.0.0.1", AgentsIdentity: rsaKey}
+	}}
+	s.writeRaw(t, opts+" "+rpub+"\n", "")
+	if msg, code := checkWatcherKey(ctx, rjob, 10*time.Second, nil); code != keyCheckLimited {
+		t.Fatalf("RSA, meterm's line: %d %s", code, msg)
+	}
+	s.writeRaw(t, bad+"rsa-sha2-512 "+rblob+"\n"+opts+" "+rpub+"\n", "")
+	if msg, code := checkWatcherKey(ctx, rjob, 10*time.Second, nil); code == keyCheckLimited {
+		t.Errorf("rsa-sha2-512 line: exit 0: %s", msg)
 	}
 }

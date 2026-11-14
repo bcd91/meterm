@@ -39,9 +39,10 @@ a tag or group, it's listed once as `refused` and never asked.
   (`PerSourcePenalties`, 5 seconds per failure by default), which has run out long before the
   next try. It keeps being asked, as the key may be put back;
   a watcher key that never got in is the exception (below). A `-q` in the host's `extra_args`
-  is left out of every look, as it would hide the refusal. If your ssh config gives the host
-  another name (`HostName`), an ordinary look's refusal names that, isn't recognised, and the
-  host is `unreachable` and backed off as one, from the interval up.
+  is left out of every look, as it would hide the refusal. A refusal is recognised by the host
+  it names, in any case, whether that's meterm's address for it or the `HostName` your ssh
+  config gives it (read with `ssh -G`); one that names a jump host is that jump host's, and
+  the look is `unreachable`.
 - **It stops on SIGINT, SIGTERM or SIGHUP**, ends any look in flight, prints a `stopped` line
   and exits 0. If stdout is closed (the reader went away), it stops the same way, ending the
   looks in flight, says so on stderr and exits 3; it never dies of SIGPIPE halfway. As the
@@ -274,11 +275,33 @@ can refuse only the ports a probe tries), so the answer rests on the line itself
    aren't byte for byte the ones `meterm agents key HOST` prints: exit 2, naming the
    difference ("has permitopen=…", "lacks restrict", "a different command").
 
-**Exit 0** means: the installed `authorized_keys` line for this key is exactly meterm's line,
-it's the only one, and the probes found no way through. It's the line's `restrict` that turns
-off forwarding, a pty, agent and X11 forwarding and `~/.ssh/rc` for the key. sshd-wide settings
-aren't read: `Match` blocks, `ForceCommand`, `AuthorizedKeysCommand`, an `AuthorizedKeysFile`
-elsewhere.
+**Exit 0** means: as far as `~/.ssh/authorized_keys` and `authorized_keys2` go, the
+installed line for this key is exactly meterm's, it's the only one, and the probes found no way
+through. **It doesn't read sshd's own settings or any other key file**: an `AuthorizedKeysFile`
+an admin set elsewhere (`/etc/ssh/keys/%u`), `AuthorizedKeysCommand`, `Match`, `ForceCommand`;
+nor the account's shell startup files (sshd runs the forced command through the account's
+shell, and Debian's bash runs `~/.bashrc` first, with what the client asked for in
+`SSH_ORIGINAL_COMMAND`), nor which `claude` the account's `PATH` finds. Those belong to the
+account or the admin, and can do anything the account can. It's the line's `restrict` that
+turns off forwarding, a pty, agent and X11 forwarding and `~/.ssh/rc` for the key.
+
+What it reads, and how:
+
+- The probes and the read are separate connections. A name that leads to more than one
+  machine (round robin, a load balancer) can send them to different ones.
+- The read runs in the account's own `$HOME` on the far side, as the account sees it.
+- Each file is read whole up to 256 KiB; a bigger one is "too big to read all of it", exit 1,
+  as a line past the cut could be the one sshd uses.
+- Every line that isn't blank or a `#` comment has to be one meterm can read: a line with a
+  control character (other than a tab, or a CR at the end), or one Go's parser won't take, is
+  exit 1, as sshd might read it, and it might be the watcher key's. An RSA key written under
+  `rsa-sha2-256` or `rsa-sha2-512` is read as the `ssh-rsa` key it is.
+- A `cert-authority` line for the watcher key is "options differ", exit 2: sshd ignores it for
+  the key itself, but anything that holds the key can sign a certificate with it, and that
+  certificate gets in on that line, without meterm's limits.
+- The read is a login with your own key that runs a command, so it's in the activity log, as
+  `exec` is, by program name (`sh (shell line)`). The probes with the watcher key aren't, as
+  looks aren't.
 
 **Exit 1**, can't tell: the key isn't in those two files (sshd may take keys from an
 `AuthorizedKeysFile` elsewhere or an `AuthorizedKeysCommand`, which meterm can't see), it's

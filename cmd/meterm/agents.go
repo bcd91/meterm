@@ -148,7 +148,7 @@ func agentsWatchMain(jobs []agentJob, flags lookFlags, interval time.Duration) e
 		fmt.Fprintf(os.Stderr, "meterm: %s, so the watch didn't start: it would log in to its hosts for nobody\n", why)
 		os.Exit(agentsWatchOutputGone) // not finish: a watch never pauses for a key
 	}
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
+	ctx, stop := signal.NotifyContext(agentsWatchParent(), os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
 	defer stop()
 	// A reader that goes away is a write error, not SIGPIPE: that would end the process
 	// on the spot, with looks in flight and their ssh configs left behind.
@@ -167,6 +167,11 @@ func agentsWatchMain(jobs []agentJob, flags lookFlags, interval time.Duration) e
 	}
 	return err
 }
+
+// agentsWatchParent is the context a watch runs under until a signal: a test bounds it,
+// so that a watch that should have refused to start can't run on for the test's whole
+// timeout (and leave its temp directories behind when it's killed).
+var agentsWatchParent = context.Background
 
 // perLookAgentQuery is sshAgentQuery with an ssh config of the look's own.
 func perLookAgentQuery(timeout time.Duration) agentQuery {

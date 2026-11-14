@@ -207,8 +207,10 @@ func (t *Tracker) Observe(h Host, at time.Time, took time.Duration) (Look, []Cha
 			s.NeedsInputSince = tr.needsSince
 			changes = append(changes, t.change(h.Host, at, ChangeNeedsInputStarted, WhySeenTwice, s, nil))
 		case a.Event == EventUnknown:
-			// Can't say: a raised wait stays raised, and a pending one stays pending.
-			// Ending it would read as the prompt answered, which nothing here knows.
+			// Can't say: a raised wait stays raised, as ending it would read as the
+			// prompt answered, which nothing here knows. A pending one starts its count
+			// again: two answers in a row means two that said so.
+			tr.pending = 0
 		default:
 			tr.pending = 0
 			if tr.needsSince != nil {

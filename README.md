@@ -1004,7 +1004,8 @@ running as you on this machine can read your keys. It installs nothing, and refu
 also log in with (sshd takes the first line a key matches). After installing the line,
 `meterm agents key HOST --check` probes the key and reads its line in `authorized_keys` with
 your ordinary login: exit 0 only if that line is exactly meterm's and nothing got through, 2 if
-something did or the line differs, 1 if it can't tell. A look with a watcher key offers that key and no other,
+something did or the line differs, 1 if it can't tell. It doesn't read sshd's own settings,
+other key files or the account's shell startup files, so 0 covers those two files only. A look with a watcher key offers that key and no other,
 none from your ssh config, and isn't made for a host your config reaches through a
 `ProxyCommand`. If the host refuses it the look fails rather than trying another; `--watch`
 stops asking a host the key never got in to, and backs off from a minute on one it did. A

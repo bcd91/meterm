@@ -17,8 +17,13 @@ import (
 // too old to know restrict, which then refuses the whole line and so the key: closed,
 // not open. The forced command is RemoteCommand itself, so a look sends what the host
 // would run anyway, and the key works the same with the line or without it. sshd runs
-// the forced command whatever the client asked for, and the command doesn't read
-// SSH_ORIGINAL_COMMAND, so nothing the client sends gets into it.
+// the forced command whatever the client asked for, and the command itself doesn't
+// read SSH_ORIGINAL_COMMAND. What it can't rule out is the account's own: sshd starts
+// the forced command through the account's login shell, which may first run its
+// startup files (Debian's bash runs ~/.bashrc for a command over ssh) with what the
+// client asked for in SSH_ORIGINAL_COMMAND, and `claude` is whatever the account's PATH
+// finds. Those are files the account itself can change, so they can't be made a limit
+// from here; `meterm agents key --check` says so too.
 func KeyOptions() (string, error) {
 	cmd := RemoteCommand
 	// authorized_keys takes \" for a quote inside command="…" and nothing else; a
