@@ -30,7 +30,12 @@ func TestClassify(t *testing.T) {
 		// Anything else is unknown, and never idle.
 		{"", "", "", EventUnknown, ConfidenceLow},
 		{"", "paused", "", EventUnknown, ConfidenceLow},
-		{"stopped", "idle", "", EventUnknown, ConfidenceLow},
+		// stopped is a session someone stopped (or a cloud one paused, or out of
+		// contact): over, with nothing running to wait on. Idle, not unknown.
+		{"stopped", "idle", "", EventIdle, ConfidenceHigh},
+		{"stopped", "", "", EventIdle, ConfidenceHigh},
+		{"stopped", "busy", "", EventIdle, ConfidenceLow},
+		{"stopped", "idle", "permission prompt", EventIdle, ConfidenceLow},
 		{"weird", "idle", "", EventUnknown, ConfidenceLow},
 		{"done", "weird", "", EventUnknown, ConfidenceLow},
 		{"", "IDLE", "", EventUnknown, ConfidenceLow},

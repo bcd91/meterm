@@ -142,10 +142,14 @@ func runAgentsWatch(ctx context.Context, w io.Writer, jobs []agentJob, query age
 			watchHost(ctx, job, labels[i], query, o, margin, sem, out)
 		}()
 	}
-	if o.outputGone != nil {
+	polled := make(chan struct{})
+	if o.outputGone == nil {
+		close(polled)
+	} else {
 		// In text form nothing may be written for a long time, so a reader that went
 		// away wouldn't be noticed by a write; look for it instead.
 		go func() {
+			defer close(polled)
 			t := time.NewTicker(time.Second)
 			defer t.Stop()
 			for {
@@ -162,6 +166,8 @@ func runAgentsWatch(ctx context.Context, w io.Writer, jobs []agentJob, query age
 		}()
 	}
 	wg.Wait()
+	cancel() // the poll ends with the looks, and is waited for
+	<-polled
 	return out.close(agents.Stopped{Schema: agents.WatchSchema, Type: agents.LineStopped, At: o.clock.now().UTC()}, agentsWatchStall, agentsWatchFlushCap)
 }
 

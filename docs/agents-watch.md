@@ -6,11 +6,12 @@ notifier as its own child process, reading stdout line by line. This page is the
 what it prints with `--format json`.
 
 ```sh
-meterm agents devbox buildbox --watch --format json    # each host about every 60s
+meterm agents --watch --format json -- devbox buildbox # each host about every 60s
 meterm agents --tag agents --watch --interval 30s      # readable lines, for a terminal
 ```
 
-Hosts are chosen as for `meterm agents`: by name, `--tag` or `--group`, never all of them,
+Put `--` before host names (`meterm agents --watch --format json -- devbox key`): a host named
+like one of `meterm agents`' own words, such as `key`, is otherwise taken for that word. Hosts are chosen as for `meterm agents`: by name, `--tag` or `--group`, never all of them,
 and a production host (or one reached through production) only when it's named. Picked up by
 a tag or group, it's listed once as `refused` and never asked.
 

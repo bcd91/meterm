@@ -319,3 +319,21 @@ func TestWatchUnknownBreaksThePendingRun(t *testing.T) {
 		t.Errorf("two in a row: %+v", ch)
 	}
 }
+
+// A raised wait whose session is then stopped ends: stopped means nothing runs that
+// could be waiting.
+func TestWatchStoppedEndsAWait(t *testing.T) {
+	pid := func(n int64) *int64 { return &n }
+	row := func(state, status string, p *int64) Host {
+		ev, conf := Classify(state, status, "")
+		return Host{Host: "h", Reachable: true, Agents: []Agent{{ID: "a", PID: p, State: state, Status: status, Event: ev, Confidence: conf}}}
+	}
+	tr := NewTracker()
+	if _, ch := tr.Observe(row("blocked", "waiting", pid(1)), at(0), 0); len(ch) != 1 {
+		t.Fatalf("%+v", ch)
+	}
+	look, ch := tr.Observe(row("stopped", "", nil), at(1), 0)
+	if len(ch) != 1 || ch[0].Change != ChangeNeedsInputEnded || look.Sessions[0].Event != EventIdle {
+		t.Errorf("%+v %+v", ch, look.Sessions)
+	}
+}

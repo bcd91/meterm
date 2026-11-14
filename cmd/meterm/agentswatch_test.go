@@ -753,3 +753,39 @@ func TestWatchStaleAfterCoversTheQueue(t *testing.T) {
 		t.Errorf("only %d pairs:\n%s", checked, out.String())
 	}
 }
+
+// A host named like a subcommand: after --, it's a host the watch looks at. Without --,
+// it's the subcommand, which doesn't know --watch; the docs tell callers to use --.
+func TestAgentsWatchHostNamedKey(t *testing.T) {
+	dir := t.TempDir()
+	cfgFile := filepath.Join(dir, "hosts.yaml")
+	if err := os.WriteFile(cfgFile, []byte("version: 1\nhosts:\n- {name: key, address: 192.0.2.2}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("METERM_CONFIG", cfgFile)
+	fakeSSHScript(t, `echo '[]'`)
+	old := agentsWatchParent
+	agentsWatchParent = func() context.Context {
+		ctx, cancel := context.WithTimeout(context.Background(), 2500*time.Millisecond)
+		t.Cleanup(cancel)
+		return ctx
+	}
+	t.Cleanup(func() { agentsWatchParent = old })
+	out := captureStdout(t, func() {
+		c := newAgentsCmd()
+		c.SetArgs([]string{"--watch", "--interval", "15s", "--format", "json", "--", "key"})
+		c.SilenceUsage, c.SilenceErrors = true, true
+		if err := c.Execute(); err != nil {
+			t.Error(err)
+		}
+	})
+	if !strings.Contains(out, `"hosts":["key"]`) || !strings.Contains(out, `"type":"look","host":"key"`) {
+		t.Errorf("with --: %s", out)
+	}
+	c := newAgentsCmd()
+	c.SetArgs([]string{"--watch", "--format", "json", "key"})
+	c.SilenceUsage, c.SilenceErrors = true, true
+	if err := c.Execute(); err == nil {
+		t.Error("without --, key was taken for a host")
+	}
+}

@@ -79,6 +79,9 @@ What changed between releases that you'd notice in use. Newest first.
 
 ### Agent events
 
+- `state: stopped` (a session someone stopped, or a cloud one paused) is `idle` now, not
+  `unknown`; a wait raised for it ends.
+
 - A session that's `working` or `needs_input` with no `pid` has `confidence: low`, in
   `meterm agents` too: it isn't confirmed.
 

@@ -27,8 +27,7 @@ const (
 
 // stateEvents and statusEvents are the values of claude agents' `state` and `status`
 // that are known. Everything else is unknown: a word that isn't here may be a new one
-// that means the agent is stuck, so it can't be taken for quiet. `stopped` is left out
-// on purpose, as it says neither that the work was done nor that it failed.
+// that means the agent is stuck, so it can't be taken for quiet.
 var (
 	stateEvents = map[string]string{
 		"working": EventWorking,
@@ -37,6 +36,12 @@ var (
 		"done":    EventDone,
 		"failed":  EventFailed,
 		"error":   EventFailed,
+		// A session someone stopped, or a cloud one paused or out of contact. In
+		// Claude Code (2.1.323 to 2.1.325, read from its code, not yet seen in output)
+		// it's one of the three ends a job can have, with done and failed, and
+		// `claude agents --json` says it only for a job that isn't running: nothing
+		// there is waiting on a person. Idle, not done: it didn't finish.
+		"stopped": EventIdle,
 	}
 	statusEvents = map[string]string{
 		"busy":    EventWorking,
@@ -50,7 +55,7 @@ var (
 // give as idle, so it goes first. `waitingFor` means it's waiting, however it's put.
 func Classify(state, status, waitingFor string) (event, confidence string) {
 	if waitingFor != "" {
-		if state == "done" || state == "failed" || state == "error" {
+		if state == "done" || state == "failed" || state == "error" || state == "stopped" {
 			return stateEvents[state], ConfidenceLow // over, and still says it's waiting
 		}
 		return EventNeedsInput, ConfidenceHigh
@@ -77,7 +82,7 @@ func Classify(state, status, waitingFor string) (event, confidence string) {
 // done or failed.
 func statusAgrees(fromState, fromStatus string) bool {
 	if fromStatus == EventIdle {
-		return fromState == EventDone || fromState == EventFailed
+		return fromState == EventDone || fromState == EventFailed || fromState == EventIdle
 	}
 	return fromState == fromStatus
 }

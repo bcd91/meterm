@@ -11,8 +11,8 @@ import (
 // stdoutGone says whether stdout is a pipe or socket whose reader has gone: poll
 // reports POLLERR or POLLHUP on it without anything being written. A terminal or a
 // file never says so.
-func stdoutGone() bool {
-	fds := []unix.PollFd{{Fd: int32(os.Stdout.Fd())}}
+func stdoutGone(f *os.File) bool {
+	fds := []unix.PollFd{{Fd: int32(f.Fd())}}
 	n, err := unix.Poll(fds, 0)
 	return err == nil && n > 0 && fds[0].Revents&(unix.POLLERR|unix.POLLHUP|unix.POLLNVAL) != 0
 }
@@ -20,8 +20,8 @@ func stdoutGone() bool {
 // stdoutUnusable says why a watch can't write to stdout from the start, or "": it was
 // closed (Go then puts /dev/null there), it is /dev/null, or it was opened read-only.
 // A watch writing nowhere would log in to its hosts for ever for nobody.
-func stdoutUnusable() string {
-	fd := int(os.Stdout.Fd())
+func stdoutUnusable(f *os.File) string {
+	fd := int(f.Fd())
 	flags, err := unix.FcntlInt(uintptr(fd), unix.F_GETFL, 0)
 	if err != nil {
 		return "stdout is closed"

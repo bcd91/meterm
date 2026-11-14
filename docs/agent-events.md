@@ -50,6 +50,7 @@ One function does this, `Classify` in `internal/agents/event.go`, with a table t
 | `state` `blocked` | `needs_input` |
 | `state` `done` | `done` |
 | `state` `failed`, `error` | `failed` |
+| `state` `stopped` | `idle` |
 | `status` `busy` | `working` |
 | `status` `waiting` | `needs_input` |
 | `status` `idle` | `idle` |
@@ -61,9 +62,21 @@ supervisor starts another (seen on Claude Code 2.1.323): `state: blocked` and no
 `meterm agents --watch` raises such a row only when two answers from the host in a row (a look that fails in between doesn't count) say so ([agents-watch.md](agents-watch.md)).
 
 `state` goes before `status`, as a finished background agent says `state: done, status: idle`.
-Matching is exact, so `IDLE` is `unknown`. `stopped` is `unknown` on purpose: it says neither
-that the work finished nor that it failed. `done` with `status: busy`, or a finished agent with
-`waitingFor` still set, keeps the `state` and has `confidence: low`.
+Matching is exact, so `IDLE` is `unknown`. `done`, `failed` or `stopped` with `status: busy`,
+or a finished or stopped agent with `waitingFor` still set, keeps the `state` and has
+`confidence: low`.
+
+`stopped` is `idle`. In Claude Code (read from 2.1.323 to 2.1.325's own code; not yet seen in
+real output) it's one of the three ends a background job can have, beside `done` and
+`failed`: a session someone stopped, or a cloud one paused ("reply to resume") or out of
+contact. `claude agents --json` says `stopped` only for a job that isn't running, so nothing
+there is waiting on a person, and a wait that was raised for it ends. It isn't `done`, as the
+work didn't finish; it can be started again by hand. Before this, meterm called it `unknown`.
+The set of `event` values hasn't changed, so `schema` stays 1.
+
+A consumer that names hosts on the command line should put `--` before them
+(`meterm agents --watch --format json -- HOST…`): a host could be named like one of
+`meterm agents`' own words, such as `key`, and without `--` it would be taken for that.
 
 `claude agents --json` isn't a promised interface. `busy`, `idle`, `waiting`, `working`,
 `blocked`, `done` and `failed`, and `waitingFor: "permission prompt"`, have been seen in real

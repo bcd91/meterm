@@ -148,8 +148,10 @@ func agentsWatchMain(jobs []agentJob, flags lookFlags, interval time.Duration) e
 	// A terminal that goes away is a hangup (SIGHUP, and writes to it failing): the
 	// ordinary end of a watch run in a terminal, and exit 0 as a signal is. Exit 3 is
 	// for a reader that was a program.
-	toTerminal := term.IsTerminal(int(os.Stdout.Fd()))
-	if why := stdoutUnusable(); why != "" {
+	// stdout once, here: a test may swap os.Stdout around a run.
+	stdout := os.Stdout
+	toTerminal := term.IsTerminal(int(stdout.Fd()))
+	if why := stdoutUnusable(stdout); why != "" {
 		fmt.Fprintf(os.Stderr, "meterm: %s, so the watch didn't start: it would log in to its hosts for nobody\n", why)
 		os.Exit(agentsWatchOutputGone) // not finish: a watch never pauses for a key
 	}
@@ -158,9 +160,9 @@ func agentsWatchMain(jobs []agentJob, flags lookFlags, interval time.Duration) e
 	// A reader that goes away is a write error, not SIGPIPE: that would end the process
 	// on the spot, with looks in flight and their ssh configs left behind.
 	signal.Ignore(syscall.SIGPIPE)
-	err := runAgentsWatch(ctx, os.Stdout, jobs, perLookAgentQuery(flags.timeout), watchOptions{
+	err := runAgentsWatch(ctx, stdout, jobs, perLookAgentQuery(flags.timeout), watchOptions{
 		interval: interval, timeout: flags.timeout, parallel: flags.parallel, format: flags.format, clock: realWatchClock,
-		grace: agentsWatchGrace, slack: agentsLookSlack, outputGone: stdoutGone,
+		grace: agentsWatchGrace, slack: agentsLookSlack, outputGone: func() bool { return stdoutGone(stdout) },
 	})
 	switch {
 	case toTerminal && errors.Is(err, errWatchOutput):
