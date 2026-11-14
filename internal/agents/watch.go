@@ -107,6 +107,9 @@ type Look struct {
 	// login there.
 	Looks    int `json:"looks"`
 	Failures int `json:"failures"`
+	// StoppedAsking: the host won't be asked again in this run (it refused the
+	// watcher key). next_look_at and stale_after are null then.
+	StoppedAsking bool `json:"stopped_asking,omitempty"`
 }
 
 // Change is a session starting or stopping needing someone.

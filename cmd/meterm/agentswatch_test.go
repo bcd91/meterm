@@ -126,7 +126,7 @@ func runWatchUntil(t *testing.T, jobs []agentJob, q agentQuery, looks int, until
 	defer cancel()
 	fc := &fakeClock{t: time.Date(2026, 11, 14, 8, 0, 0, 0, time.UTC), max: looks, until: until, r: 0.5, cancel: cancel}
 	var out bytes.Buffer
-	err := runAgentsWatch(ctx, &out, jobs, q, watchOptions{interval: time.Minute, timeout: 8 * time.Second, parallel: 4, format: format, clock: fc.clock()})
+	err := runAgentsWatch(ctx, &out, jobs, q, watchOptions{interval: time.Minute, timeout: 8 * time.Second, parallel: 4, format: format, clock: fc.clock(), grace: agentsWatchGrace})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -581,5 +581,144 @@ func TestWatchResultOfEachFailure(t *testing.T) {
 	}
 	if l := ofType(watchLines(t, out.String()), "look"); len(l) != 1 || l[0]["result"] != agents.ResultUnreachable {
 		t.Errorf("timeout: %v", l)
+	}
+}
+
+// A host that refused the watcher key isn't asked again in this run: each try is a
+// failed login there, and enough of those get an address banned.
+func TestWatchStopsAskingWhenTheWatcherKeyIsRefused(t *testing.T) {
+	for _, format := range []string{"json", "text"} {
+		var mu sync.Mutex
+		asked := map[string]int{}
+		q := func(_ context.Context, r config.Resolved) ([]byte, string, bool, error) {
+			mu.Lock()
+			asked[r.Address]++
+			mu.Unlock()
+			if r.Address == "192.0.2.1" {
+				return nil, "agent@192.0.2.1: Permission denied (publickey).", false, errWatcherKeyRefused
+			}
+			return []byte("[]"), "", false, nil
+		}
+		other := agentJob{label: "other", resolve: func(context.Context) config.Resolved {
+			return config.Resolved{Name: "other", Address: "192.0.2.2"}
+		}}
+		out := &syncBuffer{}
+		ctx, cancel := context.WithCancel(context.Background())
+		fc := &fakeClock{t: time.Date(2026, 11, 14, 8, 0, 0, 0, time.UTC), r: 0.5, cancel: cancel}
+		// Until devbox's line is out and the other host has had five looks since:
+		// devbox had as long to be asked again.
+		mark := -1
+		fc.until = func() bool {
+			mu.Lock()
+			defer mu.Unlock()
+			if mark < 0 && strings.Contains(out.String(), "watcher key") {
+				mark = asked["192.0.2.2"]
+			}
+			return mark >= 0 && asked["192.0.2.2"] >= mark+5
+		}
+		if err := runAgentsWatch(ctx, out, []agentJob{agentJobFor("devbox"), other}, q,
+			watchOptions{interval: time.Minute, timeout: time.Second, parallel: 2, format: format, clock: fc.clock()}); err != nil {
+			t.Fatal(err)
+		}
+		cancel()
+		if asked["192.0.2.1"] != 1 {
+			t.Errorf("%s: devbox asked %d times", format, asked["192.0.2.1"])
+		}
+		if format == "text" {
+			if !strings.Contains(out.String(), "not asking it again") {
+				t.Errorf("text:\n%s", out.String())
+			}
+			continue
+		}
+		var mine []map[string]any
+		for _, l := range ofType(watchLines(t, out.String()), "look") {
+			if l["host"] == "devbox" {
+				mine = append(mine, l)
+			}
+		}
+		if len(mine) != 1 || mine[0]["stopped_asking"] != true || mine[0]["result"] != "error" ||
+			mine[0]["next_look_at"] != nil || mine[0]["stale_after"] != nil || !strings.Contains(mine[0]["error"].(string), "watcher key") {
+			t.Errorf("%v", mine)
+		}
+	}
+}
+
+// With every host stopped, the watch doesn't end by itself: a seat that starts it again
+// whenever it ends would bring the failed logins back.
+func TestWatchWithNothingLeftToAskKeepsRunning(t *testing.T) {
+	tries := 0
+	q := func(context.Context, config.Resolved) ([]byte, string, bool, error) {
+		tries++
+		return nil, "", false, errWatcherKeyRefused
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	var out bytes.Buffer
+	if err := runAgentsWatch(ctx, &out, []agentJob{agentJobFor("devbox")}, q,
+		watchOptions{interval: 10 * time.Millisecond, timeout: 100 * time.Millisecond, parallel: 1, format: "json", clock: realWatchClock}); err != nil {
+		t.Fatal(err)
+	}
+	if d := time.Since(start); d < 250*time.Millisecond || tries != 1 {
+		t.Errorf("returned after %s, %d tries", d, tries)
+	}
+}
+
+// syncBuffer is a bytes.Buffer a test can read while the watch writes to it.
+type syncBuffer struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (s *syncBuffer) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.Write(p)
+}
+
+func (s *syncBuffer) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.String()
+}
+
+// stale_after holds when there are more hosts than -j slots and every look is slow:
+// a look's next line comes before its stale_after, queue and all.
+func TestWatchStaleAfterCoversTheQueue(t *testing.T) {
+	q := func(ctx context.Context, _ config.Resolved) ([]byte, string, bool, error) {
+		select {
+		case <-time.After(150 * time.Millisecond):
+		case <-ctx.Done():
+		}
+		return []byte("[]"), "", false, ctx.Err()
+	}
+	var jobs []agentJob
+	for _, n := range []string{"a", "b", "c", "d", "e"} {
+		jobs = append(jobs, agentJobFor(n))
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	var out bytes.Buffer
+	if err := runAgentsWatch(ctx, &out, jobs, q, watchOptions{interval: 10 * time.Millisecond, timeout: 200 * time.Millisecond,
+		parallel: 1, format: "json", clock: realWatchClock}); err != nil {
+		t.Fatal(err)
+	}
+	last := map[string]time.Time{}
+	checked := 0
+	for _, l := range ofType(watchLines(t, out.String()), "look") {
+		h := l["host"].(string)
+		at, _ := time.Parse(time.RFC3339Nano, l["looked_at"].(string))
+		if stale, ok := last[h]; ok {
+			checked++
+			if at.After(stale) {
+				t.Errorf("%s: a line at %s, after the last one's stale_after %s", h, at, stale)
+			}
+		}
+		if l["stale_after"] != nil {
+			last[h], _ = time.Parse(time.RFC3339Nano, l["stale_after"].(string))
+		}
+	}
+	if checked < 5 {
+		t.Errorf("only %d pairs:\n%s", checked, out.String())
 	}
 }

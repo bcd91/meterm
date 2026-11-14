@@ -247,7 +247,7 @@ meterm keys revoke --comment bob@laptop take a key away from every host (preview
 meterm stats <name>             CPU/memory/disk/network snapshot from a host (Linux + macOS/BSD)
 meterm agents [host...] [--tag t] [--group g] [--format text|json] [--timeout 8s] [-j N]   Claude Code sessions on hosts; read-only, not logged
 meterm agents [host...] --watch [--interval 60s] [--format json]   keep looking; a line per look, and when a session starts or stops waiting
-meterm agents key <name>        print the authorized_keys line that limits a watcher key to that one look
+meterm agents key <name> [--check]   print the authorized_keys line that limits a watcher key to that one look; --check: does it hold?
 
 meterm logs <name> [path...] [-f] [-n N]        tail log files (no path: list /var/log)
 meterm logs list <name> [dir]                   see what log files actually exist (default dir: /var/log)
@@ -991,15 +991,18 @@ can't be reached says `unreachable` with `sessions: null`, never an empty list, 
 and less often, down to every 10 minutes, until it answers. A session that says it's waiting but
 has no process is raised only if a second look still says so, as that's what a dead worker's row
 looks like for a few seconds. `agents_watch: false` on a host or group keeps `--watch` away from
-it. Looks are counted in the stream and nowhere else: each one is an sshd login on the host, and
+it. If stdout is closed it stops, looks in flight included, and exits 3. Looks are counted in the stream and nowhere else: each one is an sshd login on the host, and
 isn't in wtmp, so `last` and `meterm logins` don't show them.
 
 A host's `agents_identity` is a key that `agents` and `--watch` use instead of its
 `identity_file`. `meterm agents key HOST` prints the `authorized_keys` line that lets that key run
 only `claude agents --json`, for you to put on the host: the limit has to be there, as anything
-running as you on this machine can read your keys. It installs nothing. A look with a watcher
-key offers that key and no other, your ssh config's included, and if the host refuses it the
-look fails rather than trying another.
+running as you on this machine can read your keys. It installs nothing, and refuses a key you
+also log in with (sshd takes the first line a key matches). After installing the line,
+`meterm agents key HOST --check` logs in with the key and asks for something else: exit 2 if
+it got it, so the key isn't limited. A look with a watcher key offers that key and no other,
+none from your ssh config; if the host refuses it the look fails rather than trying another,
+and `--watch` stops asking that host until it's restarted.
 
 The stream's format, what it costs and what it can't see are in
 [docs/agents-watch.md](docs/agents-watch.md).

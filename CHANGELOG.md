@@ -25,6 +25,9 @@ What changed between releases that you'd notice in use. Newest first.
   so: that's what a background session's row says for a few seconds after its worker died.
 - `agents_watch: false` on a host or group keeps `--watch` away from it; `agents HOST` still asks.
 - Looks aren't in the activity log, as before; each is an sshd login on the host, not in wtmp.
+- `stale_after` allows for the wait behind `-j` when more hosts are watched than that.
+- A closed stdout stops the watch cleanly, looks in flight included, with exit 3.
+- Restarted, it raises the waits still going on again: it keeps nothing between runs.
 
 ### Watcher key
 
@@ -36,8 +39,16 @@ What changed between releases that you'd notice in use. Newest first.
   shared with a team. A host whose `agents_identity` file is missing isn't asked.
 - `meterm agents key HOST` prints the `authorized_keys` line that limits that key to
   `claude agents --json` (`restrict`, the `no-*` options and a forced command that ignores what
-  the client sends). It installs nothing; the limit belongs on the host. It refuses a key
-  that's also the host's `identity_file`. A host named `key` is now `meterm agents -- key`.
+  the client sends), and the account to put it in. It installs nothing; the limit belongs on
+  the host. It refuses a key an ordinary login could use too: the host's `identity_file`, any
+  `IdentityFile` `ssh -G` names for it (ssh's defaults included), or one in ssh-agent.
+  `--check` logs in with the watcher key and asks for something else: exit 2, loudly, if the
+  key isn't limited. A host named `key` is now `meterm agents -- key`.
+- A watcher look keeps what your ssh config says about where the host is and which host keys
+  count (`HostName`, `User`, `Port`, `ProxyJump`, known-hosts files, `HostKeyAlias`), read with
+  `ssh -G`, but none of its keys.
+- A refused watcher key stops `--watch` asking that host for the rest of the run
+  (`stopped_asking: true`), so it doesn't pile up failed logins there.
 - A meterm before this one ignores both settings, and drops them if it saves `hosts.yaml`.
 
 ### Agent events

@@ -32,9 +32,12 @@ a tag or group, it's listed once as `refused` and never asked.
   no login). Whether a sleeping host wakes for an ssh attempt is the host's setting; set
   `agents_watch: false` on one that mustn't be woken (below).
 - **It stops on SIGINT, SIGTERM or SIGHUP**, ends any look in flight, prints a `stopped` line
-  and exits 0. It runs no daemon and leaves no file: each look's ssh config is a temp file
-  removed when the look ends. The host list is read once, at the start; restart it to pick up
-  changes.
+  and exits 0. If stdout is closed (the reader went away), it stops the same way, ending the
+  looks in flight, says so on stderr and exits 3; it never dies of SIGPIPE halfway. It runs
+  no daemon and leaves no file: each look's ssh config is a temp file removed when the look
+  ends. The host list is read once, at the start; restart it to pick up changes.
+- **It remembers nothing between runs.** Started again, it raises every wait that's still
+  going on as new (`needs_input_started`), and its counts start at zero.
 
 ## The lines
 
@@ -77,8 +80,9 @@ meaning; new fields don't need it to. Times are RFC 3339 in UTC.
 | `age_s` | How old the newest answer about this host's sessions is: 0 on `ok`, seconds since `last_ok_at` on a failure, `null` if there's none. |
 | `failing_since` | The first failed look of the failures still going on; `null` when the host answers. |
 | `next_look_at` | When the next look is due. |
-| `stale_after` | `next_look_at` plus the timeout and 15 s. With no newer `look` for this host by then, the watch has stopped or is stuck: show what you have as stale, not as current. |
+| `stale_after` | The latest the next `look` for this host can come: `next_look_at`, plus the wait for a slot when more hosts are watched than `-j` (at most ⌈(hosts − j) / j⌉ other looks), plus a look's own run (timeout + 2 s) for each, plus 15 s. With no newer `look` for this host by then, the watch has stopped or is stuck: show what you have as stale, not as current. |
 | `looks`, `failures` | Looks at this host in this run, and how many failed. Each look is an sshd login there. |
+| `stopped_asking` | `true` when the host won't be asked again in this run; `next_look_at` and `stale_after` are `null` then. Only for a refused watcher key, so far: see below. Left out otherwise. |
 
 `result`:
 
@@ -86,7 +90,7 @@ meaning; new fields don't need it to. Times are RFC 3339 in UTC.
 |---|---|
 | `ok` | The host answered. `sessions` is the list. |
 | `unreachable` | ssh didn't get in: no route, refused, timed out, a key it won't take, a host key that changed. Nothing is known. |
-| `error` | The host was reached and gave no list (no `claude`, or one too old for `--json`, or output that isn't one), or it wasn't asked (an unsafe `extra_args`, a missing `agents_identity` file). Nothing is known. |
+| `error` | The host was reached and gave no list (no `claude`, or one too old for `--json`, or output that isn't one), it refused the watcher key, or it wasn't asked (an unsafe `extra_args`, a missing `agents_identity` file). Nothing is known. |
 | `refused` | Production, or reached through production, and not named. Said once, at the start. Never asked. |
 | `opted_out` | `agents_watch: false`. Said once, at the start. Never asked. |
 
@@ -184,12 +188,16 @@ here, an agent included, can read your keys. The limit has to be on the host's s
 `agents --watch` log in with instead of `identity_file`, and nothing else uses it:
 
 ```sh
-meterm keygen --file ~/.ssh/meterm_agents
+meterm keygen --file ~/.ssh/meterm_agents   # no passphrase: a look can't type one, and
+                                           # the key mustn't go into ssh-agent (below)
 # hosts.yaml:  - {name: devbox, address: 192.0.2.10, agents_identity: ~/.ssh/meterm_agents}
-meterm agents key devbox        # prints the line; meterm installs nothing
+meterm agents key devbox            # prints the line; meterm installs nothing
+# ...put the line in devbox's authorized_keys, then:
+meterm agents key devbox --check    # exit 0: limited. 2: NOT limited. 1: can't tell
 ```
 
-`meterm agents key` prints one `authorized_keys` line for it:
+`meterm agents key` prints one `authorized_keys` line for it, and names the account to put it
+in (the one a look logs in as, as `ssh -G` works it out):
 
 ```
 restrict,no-pty,no-port-forwarding,no-agent-forwarding,no-X11-forwarding,no-user-rc,command="sh -c '…claude agents --json…'" ssh-ed25519 AAAA… meterm-agents-watcher
@@ -202,8 +210,22 @@ restrict,no-pty,no-port-forwarding,no-agent-forwarding,no-X11-forwarding,no-user
 - Put it where the account can't change it, such as a root-owned `AuthorizedKeysFile`
   (`/etc/ssh/authorized_keys/%u`). In the account's own `~/.ssh/authorized_keys`, a process
   running as that account can edit the line, though only to do what it could do already.
-- It refuses a key that's also the host's `identity_file`: sshd takes the first line a key
-  matches, so one key can't be both limited and not.
+
+**It has to be a key of its own.** sshd uses the first `authorized_keys` line a key matches.
+If the watcher key is also a key you log in with, either an earlier plain line wins and the
+"watcher" key runs anything, or the limited line wins and your own logins are limited. Nothing
+shows it, as the forced command is what a look sends anyway. So `agents key` refuses a key
+that's the host's `identity_file`, any `IdentityFile` `ssh -G` names for the host (your ssh
+config's, or ssh's own defaults such as `~/.ssh/id_ed25519`), or any key ssh-agent holds
+(`ssh-add -L`): take it out of the agent with `ssh-add -d`. An identity file whose public half
+it can't read (no `.pub`, and a passphrase on the key) is named on stderr, unchecked.
+
+**Then check it.** `meterm agents key HOST --check` logs in with the watcher key alone, as a
+look does, but asks for `echo meterm-watcher-check-<random>` instead. If that word comes back,
+the key isn't limited: it says so, loudly, and exits 2. If the host ran something else, its
+forced command, the key is limited: exit 0. If the host refuses the key or doesn't answer, it
+can't tell: exit 1. Like a look, the check isn't in the activity log. Run it after installing
+the line, and after anything that changes `authorized_keys` there.
 
 With `agents_identity` set, a look offers that key and no other:
 
@@ -212,13 +234,27 @@ With `agents_identity` set, a look offers that key and no other:
   host's `extra_args` names is dropped for the look.
 - The look's ssh config leaves out your own `~/.ssh/config` and `/etc/ssh/ssh_config` for that
   host (`Match originalhost *,!ADDRESS` around the `Include`s), so an `IdentityFile`,
-  `IdentityAgent` or `CertificateFile` there isn't added either. Settings of yours for that
-  host, such as a `ProxyCommand` or `HostName` there, don't apply to a watcher look.
-- ssh-agent is still asked, for that key only, in case it holds it.
-- If the host refuses it, the look fails with `error` ("the host refused the watcher key"):
-  there's no second try with another key, as that would be the look the key rules out.
-- If the file isn't there, the host isn't asked (`error`), rather than looked at with some
-  other key.
+  `IdentityAgent` or `CertificateFile` there isn't added either.
+- What they say about the host is kept: before each such look, `ssh -G` reads them the way
+  an ordinary look would, and `HostName`, `User`, `Port`, `ProxyJump`, `UserKnownHostsFile`,
+  `GlobalKnownHostsFile` and `HostKeyAlias` are written into the look's config for that host
+  (`Match originalhost ADDRESS`). What meterm says itself (its user, port, jump hosts) still
+  comes first. Not kept: `ProxyCommand`, `LocalCommand` and `KnownHostsCommand` (programs a
+  look doesn't run), `IdentityAgent` and `CertificateFile`; `StrictHostKeyChecking` is always
+  `yes` for a look. A value with characters that can't go in a config line as one word fails
+  the look (`error`) rather than being changed. `ssh -G` prints a known-hosts path with a space
+  in it unquoted, so it's read as two paths; a host key then isn't found, and the look fails.
+- ssh-agent is still asked, for that key only, in case it holds it (which `agents key` warns
+  against, above).
+- If the host refuses it, the look fails with `error` ("the host refused the watcher key"),
+  whichever user ssh logged in as, and `--watch` stops asking that host for the rest of the run
+  (`stopped_asking: true`): every try would be a failed login there, and enough of those get
+  an address banned by tools such as fail2ban. Fix the key, then start the watch again. The
+  watch keeps running even when no host is left to ask, so a seat that restarts it whenever it
+  ends doesn't bring the failed logins back. A jump
+  host refusing its own key isn't this; it's `unreachable` and backs off as usual.
+- If the file isn't there, or its path has characters that don't show, the host isn't asked
+  (`error`), rather than looked at with some other key.
 - Jump hosts on the way read your ssh config and log in with your usual keys, as always: the
   watcher key is for the host at the end. A jump host on the very same address as that host
   is the one case where they can't be told apart, and it gets the watcher look's settings
@@ -232,4 +268,7 @@ With `agents_identity` set, a look offers that key and no other:
 | `agents_watch: false` | host, group | `--watch` doesn't look at the host at all. A single `meterm agents HOST` still does: that's someone asking. |
 
 A meterm older than the one that added these ignores them, and drops them if it saves
-`hosts.yaml`.
+`hosts.yaml`. Then, with nothing said: `meterm agents` logs in with your ordinary key again,
+and a host with `agents_watch: false` is watched. This meterm keeps no record of what the file
+said before, so it can't notice either. After running an older meterm, check that both are
+still in `hosts.yaml`.

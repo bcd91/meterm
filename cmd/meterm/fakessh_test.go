@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
@@ -11,6 +12,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"golang.org/x/crypto/ssh"
 
 	"meterm/internal/testenv"
 )
@@ -116,6 +119,10 @@ func guardSSH(m *testing.M) int {
 		return 1
 	}
 	defer os.RemoveAll(state)
+	// A watcher look reads the person's ssh config and asks ssh-agent: in tests, neither
+	// is the real one unless a test says what they are.
+	agentSSHIncludes = []string{filepath.Join(state, "no-ssh-config")}
+	agentKeys = func(context.Context) []ssh.PublicKey { return nil }
 	os.Setenv("METERM_ACTIVITY_DIR", filepath.Join(state, "activity"))
 	os.Setenv("METERM_HISTORY", filepath.Join(state, "history.json"))
 	if runtime.GOOS == "windows" {

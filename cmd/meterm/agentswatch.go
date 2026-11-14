@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math/rand/v2"
@@ -26,10 +27,19 @@ import (
 const (
 	agentsWatchDefaultInterval = time.Minute
 	agentsWatchMinInterval     = 15 * time.Second
-	// agentsWatchGrace is added to a look's next time and timeout for stale_after,
-	// for a look that waited its turn behind -j others.
+	// agentsWatchGrace is added to stale_after on top of the worst case it works out,
+	// for a slow machine.
 	agentsWatchGrace = 15 * time.Second
+	// agentsLookSlack is how far past --timeout a look can still run: ssh's WaitDelay
+	// after it's killed, and ssh -G for a watcher look.
+	agentsLookSlack = 2 * time.Second
+	// agentsWatchOutputGone is the exit code when stdout was closed: the reader went
+	// away, so the watch stopped.
+	agentsWatchOutputGone = 3
 )
+
+// errWatchOutput is a write to stdout failing: the reader is gone.
+var errWatchOutput = errors.New("stdout was closed")
 
 // watchClock is what the watch takes from the world, so tests can run it without
 // waiting: now, a sleep that says false when ctx ended first, and a random number
@@ -60,6 +70,22 @@ type watchOptions struct {
 	parallel          int
 	format            string
 	clock             watchClock
+	// grace and slack go into stale_after: agentsWatchGrace and agentsLookSlack,
+	// except in tests that check the bound itself.
+	grace, slack time.Duration
+}
+
+// staleMargin is how long after a look is due its line can still come: its own run,
+// and before that, the wait for a slot behind -j others. Waiters get a slot in turn,
+// so with n hosts and j slots a look waits for at most ceil((n-j)/j) others' runs.
+func (o watchOptions) staleMargin(watched int) time.Duration {
+	run := o.timeout + o.slack
+	j := max(o.parallel, 1)
+	waves := 0
+	if watched > j {
+		waves = (watched - j + j - 1) / j
+	}
+	return run*time.Duration(1+waves) + o.grace
 }
 
 // runAgentsWatch looks at each host until ctx ends, then writes the last line and
@@ -67,7 +93,8 @@ type watchOptions struct {
 func runAgentsWatch(ctx context.Context, w io.Writer, jobs []agentJob, query agentQuery, o watchOptions) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	out := &watchWriter{w: w, format: o.format, last: map[string]string{}}
+	// A write that fails stops every look: the reader is gone.
+	out := &watchWriter{w: w, format: o.format, last: map[string]string{}, cancel: cancel}
 	labels := make([]string, len(jobs))
 	for i, j := range jobs {
 		labels[i] = lookLabel(j)
@@ -75,6 +102,13 @@ func runAgentsWatch(ctx context.Context, w io.Writer, jobs []agentJob, query age
 	out.write(agents.Start{Schema: agents.WatchSchema, Type: agents.LineStart, At: o.clock.now().UTC(),
 		IntervalS: int64(o.interval / time.Second), TimeoutS: int64(o.timeout / time.Second), Hosts: labels})
 
+	watched := 0
+	for _, job := range jobs {
+		if watchSkip(job) == "" {
+			watched++
+		}
+	}
+	margin := o.staleMargin(watched)
 	sem := make(chan struct{}, max(o.parallel, 1))
 	var wg sync.WaitGroup
 	for i, job := range jobs {
@@ -87,18 +121,18 @@ func runAgentsWatch(ctx context.Context, w io.Writer, jobs []agentJob, query age
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			watchHost(ctx, job, labels[i], query, o, sem, out)
+			watchHost(ctx, job, labels[i], query, o, margin, sem, out)
 		}()
 	}
 	wg.Wait()
 	if err := out.error(); err != nil {
-		return err
+		return fmt.Errorf("%w: %v", errWatchOutput, err)
 	}
 	out.write(agents.Stopped{Schema: agents.WatchSchema, Type: agents.LineStopped, At: o.clock.now().UTC()})
 	return out.error()
 }
 
-func watchHost(ctx context.Context, job agentJob, label string, query agentQuery, o watchOptions, sem chan struct{}, out *watchWriter) {
+func watchHost(ctx context.Context, job agentJob, label string, query agentQuery, o watchOptions, margin time.Duration, sem chan struct{}, out *watchWriter) {
 	tr := agents.NewTracker()
 	delay := agents.FirstDelay(o.interval, o.clock.rand())
 	for {
@@ -124,9 +158,23 @@ func watchHost(ctx context.Context, job agentJob, label string, query agentQuery
 			// network, so not "unreachable" either.
 			look.Result = agents.ResultError
 		}
+		if h.Error == agentsWatcherRefused {
+			// Asking again would only add failed logins, and enough of those get an
+			// address banned (fail2ban). It takes someone fixing the key.
+			look.StoppedAsking = true
+			for _, c := range changes {
+				out.write(c)
+			}
+			out.write(look)
+			// And the watch keeps running until it's stopped, even with nothing left to
+			// ask: a seat that starts it again whenever it ends would otherwise bring
+			// the failed logins straight back.
+			<-ctx.Done()
+			return
+		}
 		delay = agents.NextDelay(o.interval, tr.Failing(), o.clock.rand())
 		next := at.Add(delay).UTC()
-		stale := next.Add(o.timeout + agentsWatchGrace)
+		stale := next.Add(margin)
 		look.NextLookAt, look.StaleAfter = &next, &stale
 		for _, c := range changes {
 			out.write(c)
@@ -180,6 +228,7 @@ type watchWriter struct {
 	err     error
 	last    map[string]string // text: what was last said of each host
 	started time.Time
+	cancel  context.CancelFunc
 }
 
 func (o *watchWriter) error() error {
@@ -208,7 +257,9 @@ func (o *watchWriter) write(v any) {
 	if len(b) == 0 {
 		return
 	}
-	_, o.err = o.w.Write(b)
+	if _, o.err = o.w.Write(b); o.err != nil && o.cancel != nil {
+		o.cancel()
+	}
 }
 
 // text is the readable form: every change, and a host's line only when what it says
@@ -259,7 +310,10 @@ func (o *watchWriter) text(v any) string {
 			when = *l.LookedAt
 		}
 		line := fmt.Sprintf("%s  %s  %s", clock(when), l.Host, s)
-		if l.Result != agents.ResultOK && l.NextLookAt != nil {
+		switch {
+		case l.StoppedAsking:
+			line += "; not asking it again until the watch is started again"
+		case l.Result != agents.ResultOK && l.NextLookAt != nil:
 			line += "; next look " + clock(*l.NextLookAt)
 		}
 		return line + "\n"
