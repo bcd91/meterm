@@ -44,6 +44,16 @@ func TestMain(m *testing.M) {
 		}
 		os.Exit(0)
 	}
+	// Helper processes that end on their own terms (TestHelperExit, TestHelperHang)
+	// do it here, before the setup below makes temp directories that an os.Exit or a
+	// kill would leave behind.
+	if s := os.Getenv("METERM_TEST_EXIT"); s != "" {
+		os.Exit(len(s))
+	}
+	if os.Getenv("METERM_TEST_HANG") != "" {
+		time.Sleep(time.Minute)
+		os.Exit(0)
+	}
 	if args := os.Getenv(runAgentsWatchEnv); args != "" {
 		c := newAgentsCmd()
 		c.SetArgs(strings.Split(args, "\x1f"))
