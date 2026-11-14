@@ -164,6 +164,12 @@ func TestAgentsMissingWatcherKeyIsNotAsked(t *testing.T) {
 	if got.Reachable || got.Agents != nil || !strings.Contains(got.Error, "agents_identity") || strings.Contains(got.Error, "\x1b") {
 		t.Errorf("%+v", got)
 	}
+	plain := agentJob{label: "x", resolve: func(context.Context) config.Resolved {
+		return config.Resolved{Address: "192.0.2.1", AgentsIdentity: filepath.Join(t.TempDir(), "gone")}
+	}}
+	if got := askAgents(context.Background(), plain, nil, time.Second); !strings.Contains(got.Error, "isn't a file here") {
+		t.Errorf("%+v", got)
+	}
 	if lookUnreachable(got.Error) {
 		t.Errorf("reads as unreachable: %q", got.Error)
 	}
@@ -591,9 +597,15 @@ func TestWatcherKeyRefusedIsNotAFallback(t *testing.T) {
 
 const prohibited = `echo 'channel 0: open failed: administratively prohibited: open failed' >&2; echo 'stdio forwarding failed' >&2; exit 255`
 
-// fwd is a fake ssh's answer to -W, ahead of what it does otherwise.
-func fwd(onW string) string {
-	return `for a; do [ "$a" = -W ] && { ` + onW + `; }; done; `
+const remoteRefused = `echo 'Error: remote port forwarding failed for listen port 0' >&2; exit 255`
+
+// fwd is a fake ssh's answer to -W, and a refusal of -R, ahead of what it does
+// otherwise.
+func fwd(onW string) string { return fwd2(onW, remoteRefused) }
+
+// fwd2 is fwd with an answer to -R too.
+func fwd2(onW, onR string) string {
+	return `for a; do [ "$a" = -W ] && { ` + onW + `; }; [ "$a" = -R ] && { ` + onR + `; }; done; `
 }
 
 // --check: the key ran what was sent, so it isn't limited (2); the host ran something
@@ -615,6 +627,11 @@ func TestCheckWatcherKey(t *testing.T) {
 		{"forced, but forwards", fwd(`echo SSH-2.0-OpenSSH_10.0; exec sleep 30`) + `echo '[]'`, keyCheckUnlimited, "port forwarding is allowed"},
 		{"forced, forward tried", fwd(`echo 'channel 0: open failed: connect failed: Connection refused' >&2; echo 'stdio forwarding failed' >&2; exit 255`) + `echo '[]'`, keyCheckUnlimited, "port forwarding is allowed"},
 		{"forced, forward unclear", fwd(`echo 'stdio forwarding failed' >&2; exit 255`) + `echo '[]'`, keyCheckUnsure, "couldn't be told"},
+		{"forced, remote forward allocated", fwd2(prohibited, `echo 'Allocated port 40123 for remote forward to 127.0.0.1:1' >&2; exec sleep 30`) + `echo '[]'`, keyCheckUnlimited, "remote (-R)"},
+		{"forced, remote forward unclear", fwd2(prohibited, `exit 255`) + `echo '[]'`, keyCheckUnsure, "couldn't be told"},
+		{"a shell as the forced command", fwd(prohibited) + `exec sh`, keyCheckUnlimited, "NOT LIMITED"},
+		{"something else, not a shell", fwd(prohibited) + `echo hello`, keyCheckUnsure, "not what meterm's forced command gives"},
+		{"claude failed", fwd(prohibited) + `exit 1`, keyCheckLimited, "refuses port forwarding"},
 		{"refused", `echo 'agent@192.0.2.1: Permission denied (publickey).' >&2; exit 255`, keyCheckUnsure, "refused the watcher key"},
 		{"down", `echo 'ssh: connect to host 192.0.2.1 port 22: Connection refused' >&2; exit 255`, keyCheckUnsure, "couldn't log in"},
 	} {

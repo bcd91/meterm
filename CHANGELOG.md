@@ -21,12 +21,17 @@ What changed between releases that you'd notice in use. Newest first.
 - A host that doesn't answer is asked half as often after each failure in a row from the
   second on, down to every 10 minutes, and as often as before once it answers. Its last answer stays in the stream,
   marked with its age; it's never shown as having nothing running.
-- A session with no process that says it's waiting is raised only when two looks in a row say
+- A session with no process that says it's waiting is raised only when two answers from the host in a row (a look that fails in between doesn't count) say
   so: that's what a background session's row says for a few seconds after its worker died.
 - `agents_watch: false` on a host or group keeps `--watch` away from it; `agents HOST` still asks.
 - Looks aren't in the activity log, as before; each is an sshd login on the host, not in wtmp.
 - `stale_after` allows for the wait behind `-j` when more hosts are watched than that.
 - A watch started with stdout closed, on `/dev/null` or read-only refuses to start (exit 3).
+- A host that refuses the key (the host, not a jump host) is an `error` and is asked from every
+  minute up, doubling to 10, whatever `--interval` is; `-q` in its `extra_args` is left out of
+  looks, as it hid the refusal.
+- A reader that holds stdout open without reading can't keep a signal from ending the watch:
+  it exits 3 within about 2 seconds, without the last lines.
 - A closed stdout stops the watch cleanly, looks in flight included, with exit 3, in the text
   form too, which writes only on changes: stdout is polled once a second.
 - Restarted, it raises the waits still going on again: it keeps nothing between runs.
@@ -45,8 +50,9 @@ What changed between releases that you'd notice in use. Newest first.
   the host. It refuses a key an ordinary login could use too: the host's `identity_file`, an
   `IdentityFile` `ssh -G` names for it (ssh's defaults included, `~`, `${VAR}` and `%` tokens
   expanded), or one in ssh-agent or in the agent an `IdentityAgent` names.
-  `--check` logs in with the watcher key and asks for something else, then for a port forward:
-  exit 2, loudly, if either works, as the key isn't limited. A host named `key` is now `meterm agents -- key`.
+  `--check` logs in with the watcher key and asks for something else (as the command and on
+  stdin), checks what came back looks like meterm's forced command, then asks for a forward
+  both ways (`-W` and `-R`): exit 2, loudly, if any of it works, as the key isn't limited. A host named `key` is now `meterm agents -- key`.
 - A watcher look keeps what your ssh config says about where the host is, how to get there and
   which host keys count (`HostName`, `User`, `Port`, `ProxyJump`, known-hosts files,
   `HostKeyAlias`, `AddressFamily`, `BindAddress`, `BindInterface`), read with `ssh -G`, but none

@@ -55,8 +55,7 @@ One function does this, `Classify` in `internal/agents/event.go`, with a table t
 A row with no `pid` whose `event` is `working` or `needs_input` has `confidence: low`. That's
 what a background session's row reads like for 6 to 10 seconds after its worker died, until the
 supervisor starts another (seen on Claude Code 2.1.323): `state: blocked` and no process.
-`meterm agents --watch` raises such a row only when two looks in a row say so
-([agents-watch.md](agents-watch.md)).
+`meterm agents --watch` raises such a row only when two answers from the host in a row (a look that fails in between doesn't count) say so ([agents-watch.md](agents-watch.md)).
 
 `state` goes before `status`, as a finished background agent says `state: done, status: idle`.
 Matching is exact, so `IDLE` is `unknown`. `stopped` is `unknown` on purpose: it says neither

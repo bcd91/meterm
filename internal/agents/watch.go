@@ -138,7 +138,7 @@ type Tracker struct {
 
 type track struct {
 	needsSince *time.Time
-	pending    int // looks in a row with needs_input and no pid, while not raised
+	pending    int // answers in a row with needs_input and no pid, while not raised; failed looks don't count
 	last       WatchSession
 }
 

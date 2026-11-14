@@ -31,6 +31,17 @@ a tag or group, it's listed once as `refused` and never asked.
   routes dialled first, as every meterm command does (a TCP connection and the SSH greeting,
   no login). Whether a sleeping host wakes for an ssh attempt is the host's setting; set
   `agents_watch: false` on one that mustn't be woken (below).
+- **A host that refuses the key is asked from every minute up.** When the host itself (not a
+  jump host) says "Permission denied", whatever key the look offered, the look is an `error`
+  ("not let in"), and the next one waits at least a minute, doubling to 10, whatever
+  `--interval` is: at most 4 failed logins in any 10 minutes, under fail2ban's default of 5.
+  OpenSSH 9.8 and later also turn an address away for a while after a failed login
+  (`PerSourcePenalties`, 5 seconds per failure by default), which has run out long before the
+  next try. It keeps being asked, as the key may be put back;
+  a watcher key that never got in is the exception (below). A `-q` in the host's `extra_args`
+  is left out of every look, as it would hide the refusal. If your ssh config gives the host
+  another name (`HostName`), an ordinary look's refusal names that, isn't recognised, and the
+  host is `unreachable` and backed off as one, from the interval up.
 - **It stops on SIGINT, SIGTERM or SIGHUP**, ends any look in flight, prints a `stopped` line
   and exits 0. If stdout is closed (the reader went away), it stops the same way, ending the
   looks in flight, says so on stderr and exits 3; it never dies of SIGPIPE halfway. As the
@@ -40,6 +51,10 @@ a tag or group, it's listed once as `refused` and never asked.
   start at all: exit 3, as it would log in to its hosts for nobody. It runs
   no daemon and leaves no file: each look's ssh config is a temp file removed when the look
   ends. The host list is read once, at the start; restart it to pick up changes.
+- **A reader that stops reading can't hold up a stop.** Lines go out through a queue; when it's
+  full, looks wait for it, and a signal still ends the watch. On the way out it gives stdout 2
+  seconds to take the last lines; if it doesn't, the watch says "stdout wasn't being read" and
+  exits 3 without them.
 - **It remembers nothing between runs.** Started again, it raises every wait that's still
   going on as new (`needs_input_started`), and its counts start at zero.
 
@@ -93,8 +108,8 @@ meaning; new fields don't need it to. Times are RFC 3339 in UTC.
 | `result` | Means |
 |---|---|
 | `ok` | The host answered. `sessions` is the list. |
-| `unreachable` | ssh didn't get in: no route, refused, timed out, a key it won't take, a host key that changed. Nothing is known. |
-| `error` | The host was reached and gave no list (no `claude`, or one too old for `--json`, or output that isn't one), it refused the watcher key, or it wasn't asked (an unsafe `extra_args`, a missing `agents_identity` file). Nothing is known. |
+| `unreachable` | ssh didn't get in: no route, connection refused, timed out, a host key that changed, or a jump host that refused its key. Nothing is known. |
+| `error` | The host was reached and gave no list (no `claude`, or one too old for `--json`, or output that isn't one), it refused the key ("not let in"), or it wasn't asked (an unsafe `extra_args`, a missing `agents_identity` file). Nothing is known. |
 | `refused` | Production, or reached through production, and not named. Said once, at the start. Never asked. |
 | `opted_out` | `agents_watch: false`. Said once, at the start. Never asked. |
 
@@ -118,7 +133,7 @@ Each session has the fields of `meterm agents` (see the README) and of
 | `change` | `why` | Means |
 |---|---|---|
 | `needs_input_started` | `pid` | A session with a process says it's waiting for someone. Tell them. |
-| `needs_input_started` | `seen_twice` | A session with no process has said so on two looks in a row. Its `confidence` is `low`. |
+| `needs_input_started` | `seen_twice` | A session with no process has said so in two answers from the host in a row (a look that fails in between doesn't count). Its `confidence` is `low`. |
 | `needs_input_ended` | `changed` | It's still there and says something else now: answered, or it moved on. |
 | `needs_input_ended` | `gone` | It's no longer listed. |
 
@@ -240,17 +255,29 @@ certificate with the key on its own, and a host that trusts the certificate's CA
 without reading `authorized_keys`, so without the line's limits.
 
 **Then check it.** `meterm agents key HOST --check` logs in with the watcher key alone, as a
-look does, but asks for `echo meterm-watcher-check-<random>` instead. If that word comes back,
-the key isn't limited: it says so, loudly, and exits 2. If ssh logged in, ran to its end and
-the word didn't come back, the host ran something else, its forced command. A forced command
-alone still lets a key forward ports, so it then asks, with the same key, for a forward to the
-host's own sshd (`ssh -W 127.0.0.1:PORT`). Refused as "administratively prohibited": the key
-runs only its forced command and refuses port forwarding, exit 0. Anything through the forward,
-or the host trying the connection for it: port forwarding is allowed, the key isn't limited,
-exit 2. Not tested: a pty, agent and X11 forwarding, `~/.ssh/rc`; the printed line's `restrict`
-turns all of those off. Anything else can't tell, exit 1: the host refusing the key, no answer,
-more than 64 KiB of output, ssh stopped by a signal, a forward that failed without saying why. Like a look, the check isn't in the activity
-log. Run it after installing the line, and after anything that changes `authorized_keys` there.
+look does, and asks for `echo meterm-watcher-check-<random>`, both as the command and on stdin.
+If that word comes back either way, the key isn't limited: it says so, loudly, and exits 2. (A
+forced command that's a shell, `command="/bin/sh"`, ignores the command and runs stdin.) If ssh
+logged in, ran to its end and the word didn't come back, the host ran its forced command, and
+what came back has to look like meterm's: claude's JSON list, or nothing with "no claude"
+(127) or "claude failed" (1). Anything else can't tell, exit 1.
+
+A forced command alone still lets a key forward ports, both ways, so it then tries both, with
+the same key:
+
+- `ssh -W 127.0.0.1:PORT`, to the host's own sshd (local forwarding);
+- `ssh -N -R 127.0.0.1:0:127.0.0.1:1 -o ExitOnForwardFailure=yes`, asking the host to listen on
+  a free port of its loopback (remote forwarding).
+
+If the host forwards either way (anything through `-W`, the host trying the connection for
+it, or "Allocated port" for `-R`), the key isn't limited: exit 2. If both are refused
+("administratively prohibited", "remote port forwarding failed"), the key runs only meterm's
+forced command and refuses port forwarding both ways: exit 0. Not tested: a pty, agent and X11
+forwarding, `~/.ssh/rc`; the printed line's `restrict` turns all of those off. Anything else
+can't tell, exit 1: the host refusing the key, no answer, more than 64 KiB of output, ssh
+stopped by a signal, a forward that failed without saying why. Each of the three logins is held
+to `--timeout`. Like a look, the check isn't in the activity log. Run it after installing the
+line, and after anything that changes `authorized_keys` or `sshd_config` there.
 
 **This machine has to be able to use it.** ssh passes over a key it can't open without a
 passphrase (a look can't type one) or one that others can read (mode `0644`, `0640`), and the

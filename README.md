@@ -990,7 +990,7 @@ per host per look, with `stale_after` so a reader can tell an old answer from a 
 a `change` line when a session starts or stops waiting for someone (`needs_input`). A host that
 can't be reached says `unreachable` with `sessions: null`, never an empty list, and is asked less
 and less often, down to every 10 minutes, until it answers. A session that says it's waiting but
-has no process is raised only if a second look still says so, as that's what a dead worker's row
+has no process is raised only if two answers from the host in a row (a look that fails in between doesn't count) say so, as that's what a dead worker's row
 looks like for a few seconds. `agents_watch: false` on a host or group keeps `--watch` away from
 it. If stdout is closed it stops, looks in flight included, and exits 3. Looks are counted in the stream and nowhere else: each one is an sshd login on the host, and
 isn't in wtmp, so `last` and `meterm logins` don't show them.
@@ -1001,7 +1001,7 @@ only `claude agents --json`, for you to put on the host: the limit has to be the
 running as you on this machine can read your keys. It installs nothing, and refuses a key you
 also log in with (sshd takes the first line a key matches). After installing the line,
 `meterm agents key HOST --check` logs in with the key and asks for something else, then for a
-port forward: exit 2 if it got either, so the key isn't limited. A look with a watcher key offers that key and no other,
+forward both ways: exit 2 if it got any of it, so the key isn't limited. A look with a watcher key offers that key and no other,
 none from your ssh config, and isn't made for a host your config reaches through a
 `ProxyCommand`. If the host refuses it the look fails rather than trying another; `--watch`
 stops asking a host the key never got in to, and backs off from a minute on one it did. A

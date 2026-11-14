@@ -32,7 +32,11 @@ import (
 func sshAgentQuery(sshConfig string, timeout time.Duration) agentQuery {
 	return func(ctx context.Context, r config.Resolved) ([]byte, string, bool, error) {
 		if r.AgentsIdentity == "" {
-			return sshLookQuery(sshConfig, timeout, agents.RemoteCommand, agents.MaxOutput)(ctx, r)
+			stdout, stderr, overflow, err := sshLookQuery(sshConfig, timeout, agents.RemoteCommand, agents.MaxOutput)(ctx, r)
+			if authRefusedBy(stderr, r.Address) {
+				err = errKeyRefused
+			}
+			return stdout, stderr, overflow, err
 		}
 		wr, wcfg, remove, err := watcherLook(ctx, r, timeout)
 		if err != nil {
@@ -47,11 +51,18 @@ func sshAgentQuery(sshConfig string, timeout time.Duration) agentQuery {
 	}
 }
 
+// agentsKeyRefused is a look's error when the host, not a jump host, refused the key
+// of an ordinary look (no agents_identity). It's asked again, but no faster than once a
+// minute (see watchHost): each try is a failed login there.
+const agentsKeyRefused = "not let in: the host refused the key ssh offered it"
+
 // agentsWatcherRefused is a look's error when the host refused the watcher key. The
 // watch stops asking a host that says this (see watchHost).
 const agentsWatcherRefused = "not let in: the host refused the watcher key (agents_identity); put the line from `meterm agents key` on it, check it with `meterm agents key --check`, and start again"
 
 var (
+	// errKeyRefused is the host saying no to an ordinary look's key.
+	errKeyRefused = errors.New("key refused")
 	// errWatcherKeyRefused is the host saying no to the watcher key. There's no second
 	// try with another key: that would be the look the key was meant to rule out.
 	errWatcherKeyRefused = errors.New("watcher key refused")
@@ -165,6 +176,12 @@ type watcherResolved struct {
 // hop. ssh names it "user@host" with the user it logged in as, whoever chose it, and
 // the host as it connected to it.
 func (w watcherResolved) refused(stderr string) bool {
+	return authRefusedBy(stderr, w.Address, w.hostname)
+}
+
+// authRefusedBy says whether stderr is one of hosts refusing the login, as ssh names
+// it: "user@host: Permission denied", whatever the user.
+func authRefusedBy(stderr string, hosts ...string) bool {
 	if sshrun.ClassifyFailure(stderr) != sshrun.FailureAuth {
 		return false
 	}
@@ -177,8 +194,10 @@ func (w watcherResolved) refused(stderr string) bool {
 		if i := strings.LastIndex(head, "@"); i >= 0 {
 			head = head[i+1:]
 		}
-		if head == w.Address || head == w.hostname {
-			return true
+		for _, h := range hosts {
+			if h != "" && head == h {
+				return true
+			}
 		}
 	}
 	return false

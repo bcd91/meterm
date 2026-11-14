@@ -43,11 +43,12 @@ func newAgentsKeyCmd() *cobra.Command {
 			"included), or a key ssh-agent holds. sshd uses the first line a key matches, so\n" +
 			"such a key would either stay unlimited, or limit your own logins.\n\n" +
 			"--check, after the line is in, logs in with the watcher key alone and asks for\n" +
-			"something else (echo of a random word), then for a port forward to the host's own\n" +
-			"sshd. If either works, the key isn't limited: exit 2. If the host ran its forced\n" +
-			"command and refused the forward, it is: exit 0 (a pty, agent and X11 forwarding\n" +
-			"and ~/.ssh/rc aren't tried). Anything else, such as the host refusing the key or\n" +
-			"not answering, is exit 1.\n\n" +
+			"something else (echo of a random word, as the command and on stdin), then for a\n" +
+			"port forward both ways (-W to the host's own sshd, -R on its loopback). If any of\n" +
+			"it works, the key isn't limited: exit 2. If the host ran meterm's forced command\n" +
+			"and refused both forwards, it is: exit 0 (a pty, agent and X11 forwarding and\n" +
+			"~/.ssh/rc aren't tried). Anything else, such as the host refusing the key or not\n" +
+			"answering, is exit 1.\n\n" +
 			"The limit is on the host's side because nothing on this machine can be: anything\n" +
 			"running as you here, an agent included, can read the key and use it as it likes.\n\n" +
 			"To set one up:\n" +
@@ -123,7 +124,8 @@ const (
 // its forced command instead, and the word doesn't come back. Like a look, it isn't in
 // the activity log: it runs nothing but that echo.
 func checkWatcherKey(ctx context.Context, job agentJob, timeout time.Duration) (string, int) {
-	ctx, cancel := context.WithTimeout(ctx, timeout)
+	// Three logins, each held to timeout.
+	ctx, cancel := context.WithTimeout(ctx, 3*timeout+agentsLookSlack)
 	defer cancel()
 	r, refused := prepareLook(ctx, job, timeout)
 	if refused == "" {
@@ -145,7 +147,9 @@ func checkWatcherKey(ctx context.Context, job agentJob, timeout time.Duration) (
 		return "not checked: no random word", keyCheckUnsure
 	}
 	word := "meterm-watcher-check-" + hex.EncodeToString(nonce[:])
-	stdout, stderr, overflow, err := sshLookQuery(sshConfig, timeout, "echo "+word, 64<<10)(ctx, wr.Resolved)
+	// The word goes in the command and on stdin: a forced command that's a shell
+	// (command="/bin/sh") ignores the one and runs the other.
+	stdout, stderr, overflow, err := lookWithStdin(ctx, sshConfig, timeout, "echo "+word, "echo "+word+"\nexit\n", 64<<10, wr.Resolved)
 	var exit *exec.ExitError
 	exited := errors.As(err, &exit)
 	switch {
@@ -168,20 +172,132 @@ func checkWatcherKey(ctx context.Context, job agentJob, timeout time.Duration) (
 		return "couldn't run ssh: " + termsafe.Text(err.Error()), keyCheckUnsure
 	}
 	// ssh ran to its end, logged in (not 255), and the word didn't come back: the host
-	// ran something else. A forced command alone still lets the key forward ports, so
-	// that's tried too.
-	switch forwarding(ctx, wr, sshConfig, timeout) {
-	case forwardAllowed:
+	// ran something else. It has to look like what meterm's forced command gives: the
+	// JSON list, or nothing with "no claude" (127) or "claude failed" (1).
+	if !looksLikeForcedCommand(stdout, err) {
+		return "the host ran something else than what was sent, but not what meterm's forced command gives, so it can't tell which command it is", keyCheckUnsure
+	}
+	// A forced command alone still lets the key forward ports, both ways, so both are
+	// tried.
+	local := forwarding(ctx, wr, sshConfig, timeout)
+	remote := remoteForwarding(ctx, wr, sshConfig, timeout)
+	switch {
+	case local == forwardAllowed || remote == forwardAllowed:
+		way := "local (-L, -W)"
+		if remote == forwardAllowed {
+			way = "remote (-R)"
+		}
 		return "NOT LIMITED: the watcher key runs only its forced command on " + lbl(r.Name) +
-			", but port forwarding is allowed for it, so anything that can read the key can reach " +
-			"whatever that host can. Use the line from `meterm agents key` as it is (restrict, no-port-forwarding), " +
-			"and check again.", keyCheckUnlimited
-	case forwardUnknown:
+			", but " + way + " port forwarding is allowed for it, so anything that can read the key can reach " +
+			"whatever that host can, or be reached from it. Use the line from `meterm agents key` as it is " +
+			"(restrict, no-port-forwarding), and check again.", keyCheckUnlimited
+	case local == forwardUnknown || remote == forwardUnknown:
 		return "it runs only its forced command, but whether it refuses port forwarding couldn't be told", keyCheckUnsure
 	}
-	return "limited: the watcher key runs only its forced command and refuses port forwarding " +
+	return "limited: the watcher key runs only meterm's forced command and refuses port forwarding both ways " +
 		"(not tested: a pty, agent and X11 forwarding, ~/.ssh/rc)", keyCheckLimited
 }
+
+// looksLikeForcedCommand: agents.RemoteCommand prints claude's JSON list, or nothing
+// and exits 127 (no claude there) or 1 (claude failed).
+func looksLikeForcedCommand(stdout []byte, err error) bool {
+	var exit *exec.ExitError
+	switch {
+	case err == nil:
+		_, perr := agents.Parse(stdout)
+		return perr == nil
+	case errors.As(err, &exit) && (exit.ExitCode() == agents.ExitNoClaude || exit.ExitCode() == 1):
+		return len(bytes.TrimSpace(stdout)) == 0
+	}
+	return false
+}
+
+// lookWithStdin is sshLookQuery with stdin given rather than /dev/null.
+func lookWithStdin(ctx context.Context, sshConfig string, timeout time.Duration, command, stdin string, maxOut int, r config.Resolved) ([]byte, string, bool, error) {
+	r.Forwards = nil
+	var args []string
+	for i, a := range agentSSHArgs(r, sshConfig, timeout) {
+		if a == "-n" && i == 0 {
+			continue
+		}
+		args = append(args, a)
+	}
+	r.ExtraArgs = args
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	c := sshrun.SSHContext(ctx, r, command)
+	noPrompts(c)
+	c.Stdin = strings.NewReader(stdin)
+	stdout := &cappedBuffer{max: maxOut, over: cancel}
+	stderr := &sshrun.Tail{Max: 16 << 10}
+	c.Stdout, c.Stderr = stdout, stderr
+	c.WaitDelay = time.Second
+	err := c.Run()
+	return stdout.b, stderr.String(), stdout.overflow, err
+}
+
+// remoteForwarding asks the host, with the watcher key alone, to listen on a port of
+// its own for this side (ssh -R, port 0: any free one, on its loopback). "Allocated
+// port" means it did. "remote port forwarding failed" is a refusal.
+func remoteForwarding(ctx context.Context, wr watcherResolved, sshConfig string, timeout time.Duration) forwardResult {
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	r := wr.Resolved
+	r.Forwards = nil
+	var args []string
+	for _, a := range agentSSHArgs(r, sshConfig, timeout) {
+		switch a {
+		case "LogLevel=ERROR":
+			a = "LogLevel=INFO" // where ssh says it allocated a port
+		case "ClearAllForwardings=yes":
+			a = "ClearAllForwardings=no" // or -R is dropped before it's asked
+		}
+		args = append(args, a)
+	}
+	r.ExtraArgs = append(args, "-o", "ExitOnForwardFailure=yes", "-N", "-R", "127.0.0.1:0:127.0.0.1:1")
+	c := sshrun.SSHContext(ctx, r)
+	noPrompts(c)
+	errs := &watchFor{word: "Allocated port", found: cancel}
+	c.Stdout, c.Stderr = io.Discard, errs
+	c.WaitDelay = time.Second
+	_ = c.Run()
+	switch {
+	case errs.seen():
+		return forwardAllowed
+	case strings.Contains(errs.String(), "remote port forwarding failed"):
+		return forwardRefused
+	}
+	return forwardUnknown
+}
+
+// watchFor keeps what's written, and calls found once word is in it.
+type watchFor struct {
+	mu    sync.Mutex
+	b     []byte
+	word  string
+	hit   bool
+	found func()
+}
+
+func (w *watchFor) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	if len(w.b) < 16<<10 {
+		w.b = append(w.b, p...)
+	}
+	hit := !w.hit && bytes.Contains(w.b, []byte(w.word))
+	if hit {
+		w.hit = true
+	}
+	w.mu.Unlock()
+	if hit {
+		w.found()
+	}
+	return len(p), nil
+}
+
+func (w *watchFor) seen() bool { w.mu.Lock(); defer w.mu.Unlock(); return w.hit }
+
+func (w *watchFor) String() string { w.mu.Lock(); defer w.mu.Unlock(); return string(w.b) }
 
 type forwardResult int
 

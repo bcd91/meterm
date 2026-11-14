@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -15,6 +16,8 @@ import (
 
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/agent"
+
+	"meterm/internal/sshrun"
 
 	"meterm/internal/agents"
 	"meterm/internal/config"
@@ -445,5 +448,157 @@ func TestAgentsTextMatchesTheWatch(t *testing.T) {
 		if f := strings.Fields(row); len(f) < 2 || f[1] != want {
 			t.Errorf("%q: %q", msg, row)
 		}
+	}
+}
+
+// A reader that keeps the pipe open and never reads: writes block, and a stop still
+// ends the watch within the flush grace, with errWatchBlocked.
+func TestWatchStopsWithAReaderThatNeverReads(t *testing.T) {
+	w := &blockingWriter{release: make(chan struct{})}
+	t.Cleanup(func() { close(w.release) })
+	var jobs []agentJob
+	for i := 0; i < 5; i++ {
+		jobs = append(jobs, agentJobFor(strings.Repeat("h", i+1)))
+	}
+	q := func(context.Context, config.Resolved) ([]byte, string, bool, error) {
+		return []byte("[]"), "", false, nil
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- runAgentsWatch(ctx, w, jobs, q, watchOptions{interval: 5 * time.Millisecond, timeout: time.Second,
+			parallel: 2, format: "json", clock: realWatchClock})
+	}()
+	for !w.blocked() {
+		time.Sleep(10 * time.Millisecond)
+	}
+	time.Sleep(200 * time.Millisecond) // and the queue fills behind it
+	start := time.Now()
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, errWatchBlocked) {
+			t.Errorf("err %v", err)
+		}
+		if d := time.Since(start); d > agentsWatchFlush+2*time.Second {
+			t.Errorf("took %s", d)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("a stop didn't end the watch")
+	}
+}
+
+// blockingWriter takes nothing until release is closed.
+type blockingWriter struct {
+	mu      sync.Mutex
+	waiting bool
+	release chan struct{}
+}
+
+func (b *blockingWriter) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	b.waiting = true
+	b.mu.Unlock()
+	<-b.release
+	return 0, errors.New("released")
+}
+
+func (b *blockingWriter) blocked() bool { b.mu.Lock(); defer b.mu.Unlock(); return b.waiting }
+
+// -q in a host's extra_args would silence "Permission denied", and a refused key would
+// read as a host that isn't there. A look leaves it out, and real ssh keeps ERROR.
+func TestLooksLeaveOutDashQ(t *testing.T) {
+	args := agentSSHArgs(config.Resolved{ExtraArgs: []string{"-q", "-p", "2222"}}, "", time.Second)
+	for _, a := range args {
+		if a == "-q" {
+			t.Fatalf("-q kept: %q", args)
+		}
+	}
+	if runtime.GOOS == "windows" {
+		return
+	}
+	realSSHForG(t)
+	r := config.Resolved{Address: "192.0.2.1", ExtraArgs: isolatedSSHArgs(t, agentSSHArgs(config.Resolved{ExtraArgs: []string{"-q"}}, "", time.Second))}
+	out, err := exec.Command("ssh", append([]string{"-G"}, sshrun.BuildArgs(r)...)...).Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(out), "\nloglevel ERROR\n") {
+		t.Errorf("loglevel:\n%s", out)
+	}
+}
+
+// An ordinary look whose key the host refuses (no agents_identity) is an error, not
+// unreachable, and is asked again no faster than once a minute, whatever --interval
+// is; it never stops being asked. A jump host refusing is still unreachable.
+func TestOrdinaryKeyRefused(t *testing.T) {
+	fakeSSHScript(t, `echo 'bcd@192.0.2.1: Permission denied (publickey).' >&2; exit 255`)
+	got := askAgents(context.Background(), agentJobFor("h"), sshAgentQuery("", 5*time.Second), 5*time.Second)
+	if got.Error != agentsKeyRefused || lookUnreachable(got.Error) {
+		t.Errorf("%+v", got)
+	}
+	fakeSSHScript(t, `echo 'bcd@192.0.2.50: Permission denied (publickey).' >&2; exit 255`)
+	if got := askAgents(context.Background(), agentJobFor("h"), sshAgentQuery("", 5*time.Second), 5*time.Second); !lookUnreachable(got.Error) {
+		t.Errorf("hop: %+v", got)
+	}
+	// In the watch.
+	q := func(context.Context, config.Resolved) ([]byte, string, bool, error) {
+		return nil, "bcd@192.0.2.1: Permission denied (publickey).", false, errKeyRefused
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	fc := &fakeClock{t: time.Date(2026, 11, 14, 8, 0, 0, 0, time.UTC), max: 5, r: 0, cancel: cancel}
+	var out bytes.Buffer
+	if err := runAgentsWatch(ctx, &out, []agentJob{agentJobFor("devbox")}, q,
+		watchOptions{interval: 15 * time.Second, timeout: 8 * time.Second, parallel: 1, format: "json", clock: fc.clock()}); err != nil {
+		t.Fatal(err)
+	}
+	looks := ofType(watchLines(t, out.String()), "look")
+	if len(looks) != 5 {
+		t.Fatalf("%d looks", len(looks))
+	}
+	for _, l := range looks {
+		if l["result"] != "error" || l["stopped_asking"] != nil || l["next_look_at"] == nil {
+			t.Errorf("%v", l)
+		}
+	}
+	want := []time.Duration{0, time.Minute, 2 * time.Minute, 4 * time.Minute, 8 * time.Minute}
+	for i, w := range want {
+		if fc.slept[i] != w {
+			t.Errorf("sleeps %v, want %v", fc.slept[:len(want)], want)
+			break
+		}
+	}
+}
+
+// The same with the queue far from full: the writer is stuck on the first line, and
+// the stop still doesn't wait for it past the grace.
+func TestWatchStopsWithAStuckWriteAndRoomInTheQueue(t *testing.T) {
+	w := &blockingWriter{release: make(chan struct{})}
+	t.Cleanup(func() { close(w.release) })
+	q := func(context.Context, config.Resolved) ([]byte, string, bool, error) {
+		return []byte("[]"), "", false, nil
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- runAgentsWatch(ctx, w, []agentJob{agentJobFor("a")}, q, watchOptions{interval: time.Hour, timeout: time.Second,
+			parallel: 1, format: "json", clock: realWatchClock})
+	}()
+	for !w.blocked() {
+		time.Sleep(10 * time.Millisecond)
+	}
+	start := time.Now()
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, errWatchBlocked) {
+			t.Errorf("err %v", err)
+		}
+		if d := time.Since(start); d > agentsWatchFlush+2*time.Second {
+			t.Errorf("took %s", d)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("a stop didn't end the watch")
 	}
 }

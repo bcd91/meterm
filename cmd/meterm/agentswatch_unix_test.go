@@ -201,3 +201,56 @@ func TestAgentsWatchRefusesStdoutNowhere(t *testing.T) {
 		t.Error("ssh ran")
 	}
 }
+
+// The real command with a reader that holds the pipe and never reads, as a seat that
+// hung would: 300 hosts fill it, and SIGTERM still ends the watch in seconds.
+func TestAgentsWatchProcessStopsWithAReaderThatNeverReads(t *testing.T) {
+	dir := t.TempDir()
+	fakeSSHScript(t, `echo '[]'`)
+	var b strings.Builder
+	b.WriteString("version: 1\nhosts:\n")
+	for i := 0; i < 300; i++ {
+		n := "h" + strconv.Itoa(i)
+		b.WriteString("- {name: " + n + ", address: " + n + ".invalid, tags: [many]}\n")
+	}
+	cfgFile := filepath.Join(dir, "hosts.yaml")
+	if err := os.WriteFile(cfgFile, []byte(b.String()), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	pr, pw, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pr.Close() // held open, never read
+	cmd := exec.Command(os.Args[0])
+	cmd.Env = append(os.Environ(), runAgentsWatchEnv+"=--tag\x1fmany\x1f--watch\x1f--interval\x1f15s\x1f-j\x1f32\x1f--format\x1fjson",
+		"METERM_CONFIG="+cfgFile, "TMPDIR="+t.TempDir())
+	cmd.Stdout = pw
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	pw.Close()
+	time.Sleep(4 * time.Second) // every host looked at once: far more than the pipe holds
+	start := time.Now()
+	if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+	select {
+	case err := <-done:
+		var exit *exec.ExitError
+		if !errors.As(err, &exit) || exit.ExitCode() != agentsWatchOutputGone || !strings.Contains(stderr.String(), "wasn't being read") {
+			t.Errorf("exit %v, stderr %q", err, stderr.String())
+		}
+		if d := time.Since(start); d > 6*time.Second {
+			t.Errorf("took %s", d)
+		}
+	case <-time.After(15 * time.Second):
+		_ = cmd.Process.Kill()
+		<-done
+		t.Fatal("SIGTERM didn't stop it")
+	}
+}

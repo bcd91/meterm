@@ -34,7 +34,7 @@ type localSSHD struct {
 	watch, main   string // private keys
 }
 
-func startLocalSSHD(t *testing.T) *localSSHD {
+func startLocalSSHD(t *testing.T, extraConfig ...string) *localSSHD {
 	t.Helper()
 	if os.Getenv("METERM_TEST_SSHD") != "1" {
 		t.Skip("set METERM_TEST_SSHD=1 to run against a local sshd")
@@ -60,6 +60,8 @@ func startLocalSSHD(t *testing.T) *localSSHD {
 		t.Fatal(err)
 	}
 	dir := t.TempDir()
+	// PerSourcePenalties off: the test's own failed logins on purpose would otherwise
+	// have sshd turn 127.0.0.1 away for a while (OpenSSH 9.8 and later).
 	s := &localSSHD{dir: dir, me: me.Username, authorized: filepath.Join(dir, "authorized_keys")}
 	keygen := func(name string) string {
 		p := filepath.Join(dir, name)
@@ -101,7 +103,8 @@ PubkeyAuthentication yes
 AllowUsers %s
 SetEnv HOME=%s PATH=/usr/bin:/bin
 LogLevel VERBOSE
-`, s.port, hostKey, s.authorized, filepath.Join(dir, "sshd.pid"), s.me, home)), 0o600); err != nil {
+PerSourcePenalties no
+%s`, s.port, hostKey, s.authorized, filepath.Join(dir, "sshd.pid"), s.me, home, strings.Join(append(extraConfig, ""), "\n"))), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	s.setAuthorized(t)
@@ -163,6 +166,12 @@ func (s *localSSHD) setAuthorized(t *testing.T, entries ...string) {
 		case "watch-cmdonly": // a forced command and nothing else
 			b.WriteString(`command="` + strings.ReplaceAll(agents.RemoteCommand, `"`, `\"`) + `" `)
 			b.Write(mustRead(t, s.watch+".pub"))
+		case "watch-permitopen": // a forced command, and forwarding only to one place
+			b.WriteString(`command="` + strings.ReplaceAll(agents.RemoteCommand, `"`, `\"`) + `",permitopen="127.0.0.1:1" `)
+			b.Write(mustRead(t, s.watch+".pub"))
+		case "watch-shell": // restrict, with a shell as its command
+			b.WriteString(`restrict,command="/bin/sh" `)
+			b.Write(mustRead(t, s.watch+".pub"))
 		case "watch-pf": // restrict, then forwarding let back in
 			b.WriteString(`restrict,port-forwarding,command="` + strings.ReplaceAll(agents.RemoteCommand, `"`, `\"`) + `" `)
 			b.Write(mustRead(t, s.watch+".pub"))
@@ -216,9 +225,17 @@ func TestLocalSSHDWatcherKey(t *testing.T) {
 			t.Errorf("%s: %d %s", entry, code, msg)
 		}
 	}
+	// Forwarding only to one place still lets the key listen on the host (-R); a shell
+	// as the forced command runs what comes on stdin.
+	for entry, want := range map[string]string{"watch-permitopen": "remote (-R)", "watch-shell": "NOT LIMITED"} {
+		s.setAuthorized(t, entry, "main")
+		if msg, code := checkWatcherKey(ctx, s.job(), 10*time.Second); code != keyCheckUnlimited || !strings.Contains(msg, want) {
+			t.Errorf("%s: %d %s", entry, code, msg)
+		}
+	}
 	// The line as printed: limited, forwarding refused.
 	s.setAuthorized(t, "watch-limited", "main")
-	if msg, code := checkWatcherKey(ctx, s.job(), 10*time.Second); code != keyCheckLimited || !strings.Contains(msg, "refuses port forwarding") {
+	if msg, code := checkWatcherKey(ctx, s.job(), 10*time.Second); code != keyCheckLimited || !strings.Contains(msg, "refuses port forwarding both ways") {
 		t.Errorf("printed line: %d %s", code, msg)
 	}
 	// After it, the limited line wins.
@@ -238,6 +255,28 @@ func TestLocalSSHDWatcherKey(t *testing.T) {
 	}
 	if msg, code := checkWatcherKey(ctx, s.job(), 10*time.Second); code != keyCheckUnsure || !strings.Contains(msg, "refused the watcher key") {
 		t.Errorf("check with no line: %d %s", code, msg)
+	}
+	// With -q in the host's extra_args too: still read as a refused watcher key.
+	quiet := agentJob{label: "local", resolve: func(context.Context) config.Resolved {
+		return config.Resolved{Name: "local", Address: "127.0.0.1", AgentsIdentity: s.watch, ExtraArgs: []string{"-q"}}
+	}}
+	if got := askAgents(ctx, quiet, sshAgentQuery("", 10*time.Second), 10*time.Second); got.Error != agentsWatcherRefused {
+		t.Errorf("-q: %+v", got)
+	}
+	// And an ordinary look that no key gets into: refused, not unreachable.
+	s.setAuthorized(t)
+	ordinary := agentJob{label: "local", resolve: func(context.Context) config.Resolved {
+		return config.Resolved{Name: "local", Address: "127.0.0.1", ExtraArgs: []string{"-q"}}
+	}}
+	// An ordinary look gets its -F from the run, as `meterm agents` gives it: this
+	// test's config only.
+	cfgFile, removeCfg, err := writeAgentSSHConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer removeCfg()
+	if got := askAgents(ctx, ordinary, sshAgentQuery(cfgFile, 10*time.Second), 10*time.Second); got.Error != agentsKeyRefused {
+		t.Errorf("ordinary: %+v", got)
 	}
 
 	// The watch: one try, then it stops asking.
@@ -291,4 +330,18 @@ func writeUserSSHConfig(t *testing.T, content string) {
 	old := agentSSHIncludes
 	agentSSHIncludes = []string{p}
 	t.Cleanup(func() { agentSSHIncludes = old })
+}
+
+// An sshd that allows only remote forwarding: a forced command alone, refused -W, still
+// listens for -R. --check says it isn't limited.
+func TestLocalSSHDRemoteForwardingOnly(t *testing.T) {
+	s := startLocalSSHD(t, "AllowTcpForwarding remote")
+	s.setAuthorized(t, "watch-cmdonly", "main")
+	if msg, code := checkWatcherKey(context.Background(), s.job(), 10*time.Second); code != keyCheckUnlimited || !strings.Contains(msg, "remote (-R)") {
+		t.Errorf("%d %s", code, msg)
+	}
+	s.setAuthorized(t, "watch-limited", "main")
+	if msg, code := checkWatcherKey(context.Background(), s.job(), 10*time.Second); code != keyCheckLimited {
+		t.Errorf("printed line: %d %s", code, msg)
+	}
 }

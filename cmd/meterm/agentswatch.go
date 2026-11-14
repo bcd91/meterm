@@ -39,6 +39,9 @@ const (
 	// agentsRefusedMinInterval is the least wait after a refused watcher key that had
 	// got in before.
 	agentsRefusedMinInterval = time.Minute
+	// agentsWatchFlush is how long a stopping watch waits for stdout to take its last
+	// lines.
+	agentsWatchFlush = 2 * time.Second
 )
 
 // errWatchOutput is a write to stdout failing: the reader is gone.
@@ -99,7 +102,7 @@ func runAgentsWatch(ctx context.Context, w io.Writer, jobs []agentJob, query age
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	// A write that fails stops every look: the reader is gone.
-	out := &watchWriter{w: w, format: o.format, last: map[string]string{}, cancel: cancel}
+	out := newWatchWriter(ctx, w, o.format, cancel)
 	labels := make([]string, len(jobs))
 	for i, j := range jobs {
 		labels[i] = lookLabel(j)
@@ -149,14 +152,7 @@ func runAgentsWatch(ctx context.Context, w io.Writer, jobs []agentJob, query age
 		}()
 	}
 	wg.Wait()
-	if err := out.error(); err != nil {
-		return fmt.Errorf("%w: %v", errWatchOutput, err)
-	}
-	out.write(agents.Stopped{Schema: agents.WatchSchema, Type: agents.LineStopped, At: o.clock.now().UTC()})
-	if err := out.error(); err != nil {
-		return fmt.Errorf("%w: %v", errWatchOutput, err)
-	}
-	return nil
+	return out.close(agents.Stopped{Schema: agents.WatchSchema, Type: agents.LineStopped, At: o.clock.now().UTC()}, agentsWatchFlush)
 }
 
 func watchHost(ctx context.Context, job agentJob, label string, query agentQuery, o watchOptions, margin time.Duration, sem chan struct{}, out *watchWriter) {
@@ -201,10 +197,11 @@ func watchHost(ctx context.Context, job agentJob, label string, query agentQuery
 			return
 		}
 		base := o.interval
-		if h.Error == agentsWatcherRefused {
-			// It got in before, so this may pass (a host restarting, a file being
-			// edited), and it's asked again; but no faster than every minute, doubling,
-			// so a refusing host sees at most 4 tries in any 10 minutes (see the doc).
+		if h.Error == agentsWatcherRefused || h.Error == agentsKeyRefused {
+			// A watcher key that got in before, or an ordinary key: this may pass (a
+			// host restarting, a file being edited), and it's asked again; but no faster
+			// than every minute, doubling, so a refusing host sees at most 4 tries in
+			// any 10 minutes (see the doc).
 			base = max(base, agentsRefusedMinInterval)
 		}
 		delay = agents.NextDelay(base, tr.Failing(), o.clock.rand())
@@ -254,8 +251,11 @@ func watchSkipText(job agentJob, why string) string {
 // lookLabel is the host as every line names it, cleaned as askAgents cleans it.
 func lookLabel(j agentJob) string { return termsafe.Text(j.label) }
 
-// watchWriter writes lines from every host's goroutine, one whole line at a time.
-// The first write that fails is kept, and nothing more is written after it.
+// watchWriter writes lines from every host's goroutine, one whole line at a time, in
+// the order they're given. The writing itself is done by a goroutine of its own, so
+// that a reader that keeps the pipe open and never reads can't hold up a stop: a
+// line waiting to go out gives way to the watch ending (stop). The first write that
+// fails is kept, stops the watch, and nothing more is written after it.
 type watchWriter struct {
 	mu      sync.Mutex
 	w       io.Writer
@@ -264,6 +264,26 @@ type watchWriter struct {
 	last    map[string]string // text: what was last said of each host
 	started time.Time
 	cancel  context.CancelFunc
+	stop    <-chan struct{}
+	lines   chan []byte
+	done    chan struct{}
+}
+
+func newWatchWriter(ctx context.Context, w io.Writer, format string, cancel context.CancelFunc) *watchWriter {
+	o := &watchWriter{w: w, format: format, last: map[string]string{}, cancel: cancel, stop: ctx.Done(),
+		lines: make(chan []byte, 64), done: make(chan struct{})}
+	go func() {
+		defer close(o.done)
+		for b := range o.lines {
+			if o.error() != nil {
+				continue
+			}
+			if _, err := o.w.Write(b); err != nil {
+				o.fail(err)
+			}
+		}
+	}()
+	return o
 }
 
 // fail stops the watch as a failed write would.
@@ -284,29 +304,67 @@ func (o *watchWriter) error() error {
 	return o.err
 }
 
-func (o *watchWriter) write(v any) {
+// line is v as it's written, or nil for nothing to write.
+func (o *watchWriter) line(v any) []byte {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	if o.err != nil {
-		return
+		return nil
 	}
-	var b []byte
 	if o.format == "json" {
 		var buf bytes.Buffer
 		if err := json.NewEncoder(&buf).Encode(v); err != nil {
 			o.err = err
-			return
+			return nil
 		}
-		b = buf.Bytes()
-	} else {
-		b = []byte(o.text(v))
+		return buf.Bytes()
 	}
+	return []byte(o.text(v))
+}
+
+// write queues v, unless the watch is ending first.
+func (o *watchWriter) write(v any) {
+	b := o.line(v)
 	if len(b) == 0 {
 		return
 	}
-	if _, o.err = o.w.Write(b); o.err != nil && o.cancel != nil {
-		o.cancel()
+	// Into the queue if there's room, stopping or not; only a full one gives way.
+	select {
+	case o.lines <- b:
+		return
+	default:
 	}
+	select {
+	case o.lines <- b:
+	case <-o.stop:
+	}
+}
+
+// errWatchBlocked is stdout not taking the last lines within the grace a stop allows.
+var errWatchBlocked = fmt.Errorf("%w: stdout isn't being read", errWatchOutput)
+
+// close writes the last line, and waits up to grace for everything to be written.
+// Called once, after every other write.
+func (o *watchWriter) close(last any, grace time.Duration) error {
+	t := time.NewTimer(grace)
+	defer t.Stop()
+	if b := o.line(last); len(b) > 0 {
+		select {
+		case o.lines <- b:
+		case <-t.C:
+			return errWatchBlocked
+		}
+	}
+	close(o.lines)
+	select {
+	case <-o.done:
+	case <-t.C:
+		return errWatchBlocked
+	}
+	if err := o.error(); err != nil {
+		return fmt.Errorf("%w: %v", errWatchOutput, err)
+	}
+	return nil
 }
 
 // text is the readable form: every change, and a host's line only when what it says

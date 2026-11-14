@@ -157,7 +157,11 @@ func agentsWatchMain(jobs []agentJob, flags lookFlags, interval time.Duration) e
 		interval: interval, timeout: flags.timeout, parallel: flags.parallel, format: flags.format, clock: realWatchClock,
 		grace: agentsWatchGrace, slack: agentsLookSlack, outputGone: stdoutGone,
 	})
-	if errors.Is(err, errWatchOutput) {
+	switch {
+	case errors.Is(err, errWatchBlocked):
+		fmt.Fprintln(os.Stderr, "meterm: stdout wasn't being read, so the watch stopped without its last lines")
+		finish(agentsWatchOutputGone)
+	case errors.Is(err, errWatchOutput):
 		fmt.Fprintln(os.Stderr, "meterm: stdout was closed, so the watch stopped")
 		finish(agentsWatchOutputGone)
 	}
@@ -309,6 +313,9 @@ func askAgents(ctx context.Context, job agentJob, query agentQuery, timeout time
 		return out
 	case errors.Is(err, errWatcherKeyRefused):
 		out.Error = agentsWatcherRefused
+		return out
+	case errors.Is(err, errKeyRefused):
+		out.Error = agentsKeyRefused
 		return out
 	case errors.Is(err, errWatcherSettings):
 		out.Error = "not asked: " + watcherSettingsText(err)
@@ -482,7 +489,14 @@ func agentSSHArgs(r config.Resolved, sshConfig string, timeout time.Duration) []
 		args = append(args, "-o", o)
 	}
 	args = append(args, "-o", "ConnectTimeout="+strconv.Itoa(int(math.Ceil(timeout.Seconds()))), "-o", "ConnectionAttempts=1")
-	args = append(args, r.ExtraArgs...)
+	for _, a := range r.ExtraArgs {
+		// -q would silence the lines a look reads to tell a refused key from a host
+		// that isn't there; as a flag it beats the LogLevel set above.
+		if a == "-q" {
+			continue
+		}
+		args = append(args, a)
+	}
 	return append(args, "-T")
 }
 
