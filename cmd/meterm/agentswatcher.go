@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"os/user"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -440,7 +441,11 @@ func expandIdentityPath(p string, set sshSettings) (string, bool) {
 		}
 		b.WriteString(v)
 	}
-	return b.String(), true
+	// One kind of separator, and no "a/./b": ~ and %d bring in a home with the
+	// system's separators, and the config's own part has /. It's only opened, never
+	// compared as text (keys are compared by what they are), but it should be the
+	// path the system would give.
+	return filepath.Clean(filepath.FromSlash(b.String())), true
 }
 
 var envVarRE = regexp.MustCompile(`\$\{[A-Za-z_][A-Za-z0-9_]*\}`)

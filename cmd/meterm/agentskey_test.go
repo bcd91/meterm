@@ -780,7 +780,9 @@ func TestAgentsIdentityWithHiddenCharacters(t *testing.T) {
 	if !strings.Contains(got.Error, "don't show") {
 		t.Errorf("%+v", got)
 	}
-	cfg := hostsForAgents(t, "version: 1\ndefaults: {agents_identity: \""+strings.ReplaceAll(key, "\u200b", "\\u200b")+"\"}\nhosts:\n- {name: a, address: 192.0.2.1}\n")
+	// Single quotes: in YAML they take a Windows path's \ as it is, and the hidden
+	// character in the name is in the file as itself.
+	cfg := hostsForAgents(t, "version: 1\ndefaults: {agents_identity: '"+strings.ReplaceAll(key, "'", "''")+"'}\nhosts:\n- {name: a, address: 192.0.2.1}\n")
 	h, _ := cfg.Find("a")
 	if r := cfg.Resolve(*h); checkAgentsIdentity(r) == "" {
 		t.Errorf("from defaults: %q", r.AgentsIdentity)

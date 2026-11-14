@@ -74,15 +74,25 @@ type reply struct {
 
 // scripted answers one host's looks in order, and repeats the last one.
 func scripted(t *testing.T, replies ...reply) (agentQuery, func() int) {
+	t.Helper()
+	// The exit errors are made here, on the test's goroutine: exitErr may skip the test
+	// (no sh on Windows), and a skip has to come from there, not from a look's.
+	errs := make([]error, len(replies))
+	for i, rep := range replies {
+		if rep.code != 0 {
+			errs[i] = exitErr(t, rep.code)
+		}
+	}
 	var mu sync.Mutex
 	n := 0
 	q := func(ctx context.Context, r config.Resolved) ([]byte, string, bool, error) {
 		mu.Lock()
-		rep := replies[min(n, len(replies)-1)]
+		i := min(n, len(replies)-1)
+		rep := replies[i]
 		n++
 		mu.Unlock()
 		if rep.code != 0 {
-			return nil, rep.stderr, false, exitErr(t, rep.code)
+			return nil, rep.stderr, false, errs[i]
 		}
 		return []byte(rep.stdout), "", false, nil
 	}

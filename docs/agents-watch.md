@@ -48,8 +48,9 @@ a tag or group, it's listed once as `refused` and never asked.
   and exits 0. If stdout is closed (the reader went away), it stops the same way, ending the
   looks in flight, says so on stderr and exits 3; it never dies of SIGPIPE halfway. As the
   text form writes only when something changes, it doesn't wait for a write to find out: it
-  polls stdout once a second for the reader having gone (on Linux and macOS; `agents` doesn't
-  run on Windows). Started with stdout closed (`>&-`), on `/dev/null` or read-only, it doesn't
+  checks once a second whether the reader has gone: with poll on Linux, with kqueue on macOS
+  (whose poll doesn't say so for a pipe). If that check ever misses it, the next line written
+  fails and ends the watch the same way. `agents` doesn't run on Windows. Started with stdout closed (`>&-`), on `/dev/null` or read-only, it doesn't
   start at all: exit 3, as it would log in to its hosts for nobody. It runs
   no daemon and leaves no file: each look's ssh config is a temp file removed when the look
   ends. The host list is read once, at the start; restart it to pick up changes.
