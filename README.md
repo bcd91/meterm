@@ -247,7 +247,8 @@ meterm keys revoke --comment bob@laptop take a key away from every host (preview
 meterm stats <name>             CPU/memory/disk/network snapshot from a host (Linux + macOS/BSD)
 meterm agents [host...] [--tag t] [--group g] [--format text|json] [--timeout 8s] [-j N]   Claude Code sessions on hosts; read-only, not logged
 meterm agents [host...] --watch [--interval 60s] [--format json]   keep looking; a line per look, and when a session starts or stops waiting
-meterm agents key <name> [--check]   print the authorized_keys line that limits a watcher key to that one look; --check: does it hold?
+meterm agents key <name> [--check]   print the authorized_keys line that limits a watcher key
+                                     to that one look; --check: does the host hold it to that?
 
 meterm logs <name> [path...] [-f] [-n N]        tail log files (no path: list /var/log)
 meterm logs list <name> [dir]                   see what log files actually exist (default dir: /var/log)
@@ -999,8 +1000,8 @@ A host's `agents_identity` is a key that `agents` and `--watch` use instead of i
 only `claude agents --json`, for you to put on the host: the limit has to be there, as anything
 running as you on this machine can read your keys. It installs nothing, and refuses a key you
 also log in with (sshd takes the first line a key matches). After installing the line,
-`meterm agents key HOST --check` logs in with the key and asks for something else: exit 2 if
-it got it, so the key isn't limited. A look with a watcher key offers that key and no other,
+`meterm agents key HOST --check` logs in with the key and asks for something else, then for a
+port forward: exit 2 if it got either, so the key isn't limited. A look with a watcher key offers that key and no other,
 none from your ssh config, and isn't made for a host your config reaches through a
 `ProxyCommand`. If the host refuses it the look fails rather than trying another; `--watch`
 stops asking a host the key never got in to, and backs off from a minute on one it did. A

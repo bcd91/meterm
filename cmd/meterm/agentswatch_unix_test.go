@@ -158,3 +158,46 @@ func TestAgentsWatchProcessHeadOne(t *testing.T) {
 		})
 	}
 }
+
+// Started with nowhere to write: stdout closed (>&-), /dev/null, or read-only. It
+// refuses at once, exit 3, without logging in to anything.
+func TestAgentsWatchRefusesStdoutNowhere(t *testing.T) {
+	dir := t.TempDir()
+	argvFile := fakeSSHScript(t, `echo '[]'`)
+	cfgFile := filepath.Join(dir, "hosts.yaml")
+	if err := os.WriteFile(cfgFile, []byte("version: 1\nhosts:\n- {name: a, address: 192.0.2.1}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	args := runAgentsWatchEnv + "=a\x1f--watch\x1f--interval\x1f15s"
+	ro := filepath.Join(dir, "ro")
+	if err := os.WriteFile(ro, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for name, redirect := range map[string]string{"closed": ">&-", "dev null": ">/dev/null", "read-only": "1<" + ro} {
+		t.Run(name, func(t *testing.T) {
+			cmd := exec.Command("sh", "-c", `exec "$0" `+redirect, os.Args[0])
+			cmd.Env = append(os.Environ(), args, "METERM_CONFIG="+cfgFile, "TMPDIR="+t.TempDir())
+			var stderr bytes.Buffer
+			cmd.Stderr = &stderr
+			done := make(chan error, 1)
+			if err := cmd.Start(); err != nil {
+				t.Fatal(err)
+			}
+			go func() { done <- cmd.Wait() }()
+			var err error
+			select {
+			case err = <-done:
+			case <-time.After(5 * time.Second):
+				_ = cmd.Process.Kill()
+				t.Fatal("it started watching")
+			}
+			var exit *exec.ExitError
+			if !errors.As(err, &exit) || exit.ExitCode() != agentsWatchOutputGone || !strings.Contains(stderr.String(), "didn't start") {
+				t.Errorf("exit %v, stderr %q", err, stderr.String())
+			}
+		})
+	}
+	if _, err := os.Stat(argvFile); !os.IsNotExist(err) {
+		t.Error("ssh ran")
+	}
+}

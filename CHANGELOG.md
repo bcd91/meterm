@@ -26,6 +26,7 @@ What changed between releases that you'd notice in use. Newest first.
 - `agents_watch: false` on a host or group keeps `--watch` away from it; `agents HOST` still asks.
 - Looks aren't in the activity log, as before; each is an sshd login on the host, not in wtmp.
 - `stale_after` allows for the wait behind `-j` when more hosts are watched than that.
+- A watch started with stdout closed, on `/dev/null` or read-only refuses to start (exit 3).
 - A closed stdout stops the watch cleanly, looks in flight included, with exit 3, in the text
   form too, which writes only on changes: stdout is polled once a second.
 - Restarted, it raises the waits still going on again: it keeps nothing between runs.
@@ -44,8 +45,8 @@ What changed between releases that you'd notice in use. Newest first.
   the host. It refuses a key an ordinary login could use too: the host's `identity_file`, an
   `IdentityFile` `ssh -G` names for it (ssh's defaults included, `~`, `${VAR}` and `%` tokens
   expanded), or one in ssh-agent or in the agent an `IdentityAgent` names.
-  `--check` logs in with the watcher key and asks for something else: exit 2, loudly, if the
-  key isn't limited. A host named `key` is now `meterm agents -- key`.
+  `--check` logs in with the watcher key and asks for something else, then for a port forward:
+  exit 2, loudly, if either works, as the key isn't limited. A host named `key` is now `meterm agents -- key`.
 - A watcher look keeps what your ssh config says about where the host is, how to get there and
   which host keys count (`HostName`, `User`, `Port`, `ProxyJump`, known-hosts files,
   `HostKeyAlias`, `AddressFamily`, `BindAddress`, `BindInterface`), read with `ssh -G`, but none

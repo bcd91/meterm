@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -21,6 +22,7 @@ import (
 	"meterm/internal/agents"
 	"meterm/internal/config"
 	"meterm/internal/sshkey"
+	"meterm/internal/sshrun"
 	"meterm/internal/termsafe"
 )
 
@@ -41,9 +43,11 @@ func newAgentsKeyCmd() *cobra.Command {
 			"included), or a key ssh-agent holds. sshd uses the first line a key matches, so\n" +
 			"such a key would either stay unlimited, or limit your own logins.\n\n" +
 			"--check, after the line is in, logs in with the watcher key alone and asks for\n" +
-			"something else (echo of a random word). If that comes back, the key isn't limited:\n" +
-			"exit 2. If the host ran its forced command instead, it is: exit 0. Anything else,\n" +
-			"such as the host refusing the key or not answering, is exit 1.\n\n" +
+			"something else (echo of a random word), then for a port forward to the host's own\n" +
+			"sshd. If either works, the key isn't limited: exit 2. If the host ran its forced\n" +
+			"command and refused the forward, it is: exit 0 (a pty, agent and X11 forwarding\n" +
+			"and ~/.ssh/rc aren't tried). Anything else, such as the host refusing the key or\n" +
+			"not answering, is exit 1.\n\n" +
 			"The limit is on the host's side because nothing on this machine can be: anything\n" +
 			"running as you here, an agent included, can read the key and use it as it likes.\n\n" +
 			"To set one up:\n" +
@@ -102,7 +106,7 @@ func newAgentsKeyCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&identity, "identity", "", "the watcher key (private or .pub), instead of the host's agents_identity")
-	cmd.Flags().BoolVar(&check, "check", false, "log in with the watcher key and see whether the host limits it (exit 0 yes, 2 no, 1 can't tell)")
+	cmd.Flags().BoolVar(&check, "check", false, "log in with the watcher key and see whether the host limits it to its command, with no forwarding (exit 0 yes, 2 no, 1 can't tell)")
 	cmd.Flags().DurationVar(&timeout, "timeout", agentsDefaultTimeout, "give up on the host after this long")
 	return cmd
 }
@@ -133,7 +137,7 @@ func checkWatcherKey(ctx context.Context, job agentJob, timeout time.Duration) (
 	}
 	wr, sshConfig, remove, err := watcherLook(ctx, r, timeout)
 	if err != nil {
-		return "not checked: " + strings.TrimPrefix(err.Error(), errWatcherSettings.Error()+": "), keyCheckUnsure
+		return "not checked: " + watcherSettingsText(err), keyCheckUnsure
 	}
 	defer remove()
 	var nonce [8]byte
@@ -164,8 +168,103 @@ func checkWatcherKey(ctx context.Context, job agentJob, timeout time.Duration) (
 		return "couldn't run ssh: " + termsafe.Text(err.Error()), keyCheckUnsure
 	}
 	// ssh ran to its end, logged in (not 255), and the word didn't come back: the host
-	// ran something else.
-	return "limited: the host ran its own command for the watcher key, not the one sent", keyCheckLimited
+	// ran something else. A forced command alone still lets the key forward ports, so
+	// that's tried too.
+	switch forwarding(ctx, wr, sshConfig, timeout) {
+	case forwardAllowed:
+		return "NOT LIMITED: the watcher key runs only its forced command on " + lbl(r.Name) +
+			", but port forwarding is allowed for it, so anything that can read the key can reach " +
+			"whatever that host can. Use the line from `meterm agents key` as it is (restrict, no-port-forwarding), " +
+			"and check again.", keyCheckUnlimited
+	case forwardUnknown:
+		return "it runs only its forced command, but whether it refuses port forwarding couldn't be told", keyCheckUnsure
+	}
+	return "limited: the watcher key runs only its forced command and refuses port forwarding " +
+		"(not tested: a pty, agent and X11 forwarding, ~/.ssh/rc)", keyCheckLimited
+}
+
+type forwardResult int
+
+const (
+	forwardUnknown forwardResult = iota
+	forwardRefused
+	forwardAllowed
+)
+
+// forwarding asks the host, with the watcher key alone, for a stdio forward to its own
+// sshd (ssh -W). "administratively prohibited" is the key's options, or the server's,
+// saying no. Any answer through the forward, or a failure of the connection the host
+// tried to make for it, means forwarding is allowed.
+func forwarding(ctx context.Context, wr watcherResolved, sshConfig string, timeout time.Duration) forwardResult {
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	port := wr.port
+	if port == "" {
+		port = "22"
+	}
+	r := wr.Resolved
+	r.Forwards = nil
+	var args []string
+	for i, a := range agentSSHArgs(r, sshConfig, timeout) {
+		// Not -n: stdin is the forward's. ClearAllForwardings doesn't touch -W.
+		if a == "-n" && i == 0 {
+			continue
+		}
+		// ssh tells why a channel failed to open at INFO; the first LogLevel wins.
+		if a == "LogLevel=ERROR" {
+			a = "LogLevel=INFO"
+		}
+		args = append(args, a)
+	}
+	r.ExtraArgs = append(args, "-W", "127.0.0.1:"+port)
+	c := sshrun.SSHContext(ctx, r)
+	noPrompts(c)
+	// stdin held open, so ssh waits for the other side. An *os.File, so that no
+	// goroutine copies it, which Wait would wait for.
+	pr, pw, err := os.Pipe()
+	if err != nil {
+		return forwardUnknown
+	}
+	defer pw.Close()
+	defer pr.Close()
+	c.Stdin = pr
+	got := &firstBytes{seen: cancel}
+	stderr := &sshrun.Tail{Max: 16 << 10}
+	c.Stdout, c.Stderr = got, stderr
+	c.WaitDelay = time.Second
+	_ = c.Run()
+	switch {
+	case got.any():
+		return forwardAllowed
+	case strings.Contains(stderr.String(), "administratively prohibited"):
+		return forwardRefused
+	case strings.Contains(stderr.String(), "open failed"):
+		return forwardAllowed // permitted; only the connection the host made failed
+	}
+	return forwardUnknown
+}
+
+// firstBytes notes that something came, and calls seen.
+type firstBytes struct {
+	mu   sync.Mutex
+	n    int
+	seen func()
+}
+
+func (f *firstBytes) Write(p []byte) (int, error) {
+	f.mu.Lock()
+	f.n += len(p)
+	f.mu.Unlock()
+	if len(p) > 0 {
+		f.seen()
+	}
+	return len(p), nil
+}
+
+func (f *firstBytes) any() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.n > 0
 }
 
 // watcherKeyLine is the authorized_keys line for r's watcher key, and the account a
@@ -198,7 +297,11 @@ func watcherKeyLine(ctx context.Context, r config.Resolved, identity string, tim
 	// look sends anyway.
 	set, err := lookSettings(ctx, r, timeout)
 	if err != nil {
-		return "", "", fmt.Errorf("can't tell which keys an ordinary login to %s uses: %s", exactName(r.Name), strings.TrimPrefix(err.Error(), errWatcherSettings.Error()+": "))
+		return "", "", fmt.Errorf("can't tell which keys an ordinary login to %s uses: %s", exactName(r.Name), watcherSettingsText(err))
+	}
+	// A host a watcher look can't reach (a ProxyCommand) gets no line: it would never be used.
+	if _, err := carry(set); err != nil {
+		return "", "", fmt.Errorf("%s: %s", exactName(r.Name), watcherSettingsText(err))
 	}
 	others, unchecked := otherLoginKeys(ctx, set)
 	// ssh -G leaves out an -i whose file isn't there, so the host's own is read here too.
@@ -214,7 +317,11 @@ func watcherKeyLine(ctx context.Context, r config.Resolved, identity string, tim
 		}
 	}
 	for _, u := range unchecked {
-		fmt.Fprintf(os.Stderr, "meterm: couldn't read the public key of %s to check it isn't the same key; run --check once the line is in\n", termsafe.Quote(u))
+		what := u
+		if !strings.HasPrefix(u, "ssh-agent") && !strings.HasPrefix(u, "the agent at ") {
+			what = termsafe.Quote(u)
+		}
+		fmt.Fprintf(os.Stderr, "meterm: unchecked: %s, so it couldn't be compared with the watcher key; run --check once the line is in\n", what)
 	}
 	opts, err := agents.KeyOptions()
 	if err != nil {

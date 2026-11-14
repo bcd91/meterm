@@ -100,7 +100,7 @@ func withAgentKeys(t *testing.T, keys ...string) {
 		}
 		pks = append(pks, pk)
 	}
-	agentKeys = func(context.Context, string) []ssh.PublicKey { return pks }
+	agentKeys = func(context.Context, string) ([]ssh.PublicKey, string) { return pks, "" }
 	t.Cleanup(func() { agentKeys = old })
 }
 
@@ -589,6 +589,13 @@ func TestWatcherKeyRefusedIsNotAFallback(t *testing.T) {
 	}
 }
 
+const prohibited = `echo 'channel 0: open failed: administratively prohibited: open failed' >&2; echo 'stdio forwarding failed' >&2; exit 255`
+
+// fwd is a fake ssh's answer to -W, ahead of what it does otherwise.
+func fwd(onW string) string {
+	return `for a; do [ "$a" = -W ] && { ` + onW + `; }; done; `
+}
+
 // --check: the key ran what was sent, so it isn't limited (2); the host ran something
 // else, so it is (0); refused or no answer, can't tell (1).
 func TestCheckWatcherKey(t *testing.T) {
@@ -603,8 +610,11 @@ func TestCheckWatcherKey(t *testing.T) {
 		want         string
 	}{
 		{"unlimited", `for a; do last=$a; done; eval "$last"`, keyCheckUnlimited, "NOT LIMITED"},
-		{"forced command", `echo '[]'`, keyCheckLimited, "limited"},
-		{"forced, no claude", `exit 127`, keyCheckLimited, "limited"},
+		{"forced command", fwd(prohibited) + `echo '[]'`, keyCheckLimited, "refuses port forwarding"},
+		{"forced, no claude", fwd(prohibited) + `exit 127`, keyCheckLimited, "refuses port forwarding"},
+		{"forced, but forwards", fwd(`echo SSH-2.0-OpenSSH_10.0; exec sleep 30`) + `echo '[]'`, keyCheckUnlimited, "port forwarding is allowed"},
+		{"forced, forward tried", fwd(`echo 'channel 0: open failed: connect failed: Connection refused' >&2; echo 'stdio forwarding failed' >&2; exit 255`) + `echo '[]'`, keyCheckUnlimited, "port forwarding is allowed"},
+		{"forced, forward unclear", fwd(`echo 'stdio forwarding failed' >&2; exit 255`) + `echo '[]'`, keyCheckUnsure, "couldn't be told"},
 		{"refused", `echo 'agent@192.0.2.1: Permission denied (publickey).' >&2; exit 255`, keyCheckUnsure, "refused the watcher key"},
 		{"down", `echo 'ssh: connect to host 192.0.2.1 port 22: Connection refused' >&2; exit 255`, keyCheckUnsure, "couldn't log in"},
 	} {
@@ -617,8 +627,13 @@ func TestCheckWatcherKey(t *testing.T) {
 			}
 			b, _ := os.ReadFile(argvFile)
 			argv := strings.Split(strings.TrimSpace(string(b)), "\n")
-			if last := argv[len(argv)-1]; !strings.HasPrefix(last, "echo meterm-watcher-check-") || !slices.Contains(argv, key) {
+			hasEcho := slices.ContainsFunc(argv, func(a string) bool { return strings.HasPrefix(a, "echo meterm-watcher-check-") })
+			if !hasEcho || !slices.Contains(argv, key) {
 				t.Errorf("argv %q", argv)
+			}
+			// The forward goes to the host's own sshd, with the watcher key only.
+			if i := slices.Index(argv, "-W"); i >= 0 && argv[i+1] != "127.0.0.1:22" {
+				t.Errorf("-W %q", argv[i+1])
 			}
 		})
 	}

@@ -109,6 +109,7 @@ LogLevel VERBOSE
 	s.log = log
 	cmd := exec.Command(sshd, "-D", "-e", "-f", conf)
 	cmd.Stderr = log
+	dieWithTest(cmd) // a test killed by its timeout mustn't leave sshd running
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
@@ -159,6 +160,12 @@ func (s *localSSHD) setAuthorized(t *testing.T, entries ...string) {
 		case "watch-limited":
 			b.WriteString(opts + " ")
 			b.Write(mustRead(t, s.watch+".pub"))
+		case "watch-cmdonly": // a forced command and nothing else
+			b.WriteString(`command="` + strings.ReplaceAll(agents.RemoteCommand, `"`, `\"`) + `" `)
+			b.Write(mustRead(t, s.watch+".pub"))
+		case "watch-pf": // restrict, then forwarding let back in
+			b.WriteString(`restrict,port-forwarding,command="` + strings.ReplaceAll(agents.RemoteCommand, `"`, `\"`) + `" `)
+			b.Write(mustRead(t, s.watch+".pub"))
 		case "main":
 			b.Write(mustRead(t, s.main+".pub"))
 		}
@@ -200,6 +207,19 @@ func TestLocalSSHDWatcherKey(t *testing.T) {
 	s.setAuthorized(t, "watch", "watch-limited", "main")
 	if msg, code := checkWatcherKey(ctx, s.job(), 10*time.Second); code != keyCheckUnlimited || !strings.Contains(msg, "NOT LIMITED") {
 		t.Errorf("plain line first: %d %s", code, msg)
+	}
+	// A forced command alone, or restrict with port-forwarding let back in: the key
+	// runs nothing else, but it forwards, so it isn't limited.
+	for _, entry := range []string{"watch-cmdonly", "watch-pf"} {
+		s.setAuthorized(t, entry, "main")
+		if msg, code := checkWatcherKey(ctx, s.job(), 10*time.Second); code != keyCheckUnlimited || !strings.Contains(msg, "port forwarding is allowed") {
+			t.Errorf("%s: %d %s", entry, code, msg)
+		}
+	}
+	// The line as printed: limited, forwarding refused.
+	s.setAuthorized(t, "watch-limited", "main")
+	if msg, code := checkWatcherKey(ctx, s.job(), 10*time.Second); code != keyCheckLimited || !strings.Contains(msg, "refuses port forwarding") {
+		t.Errorf("printed line: %d %s", code, msg)
 	}
 	// After it, the limited line wins.
 	s.setAuthorized(t, "watch-limited", "watch", "main")

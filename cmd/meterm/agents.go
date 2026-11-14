@@ -144,6 +144,10 @@ func agentsWatchMain(jobs []agentJob, flags lookFlags, interval time.Duration) e
 	if watched == 0 {
 		return fmt.Errorf("nothing to watch: every host chosen is production that wasn't named, or has agents_watch: false")
 	}
+	if why := stdoutUnusable(); why != "" {
+		fmt.Fprintf(os.Stderr, "meterm: %s, so the watch didn't start: it would log in to its hosts for nobody\n", why)
+		finish(agentsWatchOutputGone)
+	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
 	defer stop()
 	// A reader that goes away is a write error, not SIGPIPE: that would end the process
@@ -300,7 +304,7 @@ func askAgents(ctx context.Context, job agentJob, query agentQuery, timeout time
 		out.Error = agentsWatcherRefused
 		return out
 	case errors.Is(err, errWatcherSettings):
-		out.Error = "not asked: " + err.Error()
+		out.Error = "not asked: " + watcherSettingsText(err)
 		return out
 	case errors.As(err, &exit):
 		switch exit.ExitCode() {
@@ -660,8 +664,9 @@ func writeAgents(w io.Writer, rep agents.Report, format string) error {
 	for _, h := range rep.Hosts {
 		switch {
 		case h.Error != "":
+			// As the watch says it: unreachable only when ssh didn't get in.
 			word := "error"
-			if !h.Reachable {
+			if lookUnreachable(h.Error) {
 				word = "unreachable"
 			}
 			if h.Error == agentsRefusedProduction {

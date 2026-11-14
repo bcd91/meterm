@@ -40,8 +40,13 @@ func TestWatcherLookRefusesProxyCommand(t *testing.T) {
 		return config.Resolved{Address: "192.0.2.1", AgentsIdentity: key}
 	}}
 	got := askAgents(context.Background(), job, sshAgentQuery("", 5*time.Second), 5*time.Second)
-	if !strings.Contains(got.Error, "ProxyCommand") || got.Agents != nil || lookUnreachable(got.Error) {
+	if !strings.Contains(got.Error, "ProxyCommand") || got.Agents != nil || lookUnreachable(got.Error) || strings.Contains(got.Error, "watcher look:") {
 		t.Errorf("%+v", got)
+	}
+	// agents key gives no line for it either: no look could use it.
+	withAgentKeys(t)
+	if _, _, err := watcherKeyLine(context.Background(), job.resolve(context.Background()), "", 5*time.Second); err == nil || !strings.Contains(err.Error(), "ProxyCommand") || strings.Contains(err.Error(), "watcher look:") {
+		t.Errorf("agents key: %v", err)
 	}
 	if _, err := os.Stat(argvFile); !os.IsNotExist(err) {
 		t.Error("ssh ran")
@@ -369,4 +374,76 @@ func TestCheckWatcherKeyCantTell(t *testing.T) {
 	}
 }
 
-var _ = agents.RemoteCommand
+// An agent that's there but can't be asked isn't taken for one with no keys: it's named
+// as unchecked. No agent at all, or one with no keys, is fine.
+func TestOtherLoginKeysNameAnAgentThatCantBeAsked(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("unix socket")
+	}
+	old := agentKeys
+	agentKeys = realAgentKeys
+	t.Cleanup(func() { agentKeys = old })
+	dir := t.TempDir()
+	dead := filepath.Join(dir, "dead.sock")
+	if err := os.WriteFile(dead, nil, 0o600); err != nil { // there, and not a socket
+		t.Fatal(err)
+	}
+	empty := filepath.Join(dir, "empty.sock")
+	l, err := net.Listen("unix", empty)
+	if err != nil {
+		t.Skip(err)
+	}
+	defer l.Close()
+	ring := agent.NewKeyring()
+	go func() {
+		for {
+			c, err := l.Accept()
+			if err != nil {
+				return
+			}
+			go func() { _ = agent.ServeAgent(ring, c); c.Close() }()
+		}
+	}()
+	for name, tc := range map[string]struct {
+		env, identityAgent, want string
+	}{
+		"no agent":               {"", "", ""},
+		"an empty agent":         {empty, "", ""},
+		"a dead SSH_AUTH_SOCK":   {dead, "", "ssh-agent"},
+		"a dead IdentityAgent":   {"", dead, "the agent at"},
+		"an empty IdentityAgent": {"", empty, ""},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Setenv("SSH_AUTH_SOCK", tc.env)
+			set := sshSettings{}
+			if tc.identityAgent != "" {
+				set["identityagent"] = []string{tc.identityAgent}
+			}
+			_, unchecked := otherLoginKeys(context.Background(), set)
+			got := strings.Join(unchecked, "|")
+			if tc.want == "" && got != "" || tc.want != "" && !strings.Contains(got, tc.want) {
+				t.Errorf("unchecked %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// A single agents says what the watch says: a refused watcher key, or a host that
+// wasn't asked, is an error; only ssh not getting in is unreachable.
+func TestAgentsTextMatchesTheWatch(t *testing.T) {
+	for msg, want := range map[string]string{
+		agentsWatcherRefused:                   "error",
+		"not asked: this machine can't use it": "error",
+		"unreachable: connection refused":      "unreachable",
+		"timed out after 8s":                   "unreachable",
+	} {
+		var b bytes.Buffer
+		if err := writeAgents(&b, agents.Report{Schema: 1, Hosts: []agents.Host{{Host: "h", Error: msg}}}, "text"); err != nil {
+			t.Fatal(err)
+		}
+		row := strings.Split(b.String(), "\n")[1]
+		if f := strings.Fields(row); len(f) < 2 || f[1] != want {
+			t.Errorf("%q: %q", msg, row)
+		}
+	}
+}

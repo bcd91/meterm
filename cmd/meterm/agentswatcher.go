@@ -64,6 +64,11 @@ func watcherSettingsError(format string, a ...any) error {
 	return fmt.Errorf("%w: "+format, append([]any{errWatcherSettings}, a...)...)
 }
 
+// watcherSettingsText is a watcherSettingsError's own words, without the marker.
+func watcherSettingsText(err error) string {
+	return strings.TrimPrefix(err.Error(), errWatcherSettings.Error()+": ")
+}
+
 // sshG runs `ssh -G` with these arguments: what ssh would use, read from the config,
 // with nothing contacted. A test can stand in for it.
 var sshG = func(ctx context.Context, args []string) ([]byte, error) {
@@ -153,7 +158,7 @@ func carry(set sshSettings) ([]string, error) {
 // watcherResolved is r for a watcher look, and who ssh will say it is.
 type watcherResolved struct {
 	config.Resolved
-	user, hostname string
+	user, hostname, port string
 }
 
 // refused says whether stderr is the host at the end refusing the login, not a jump
@@ -219,7 +224,7 @@ func watcherLook(ctx context.Context, r config.Resolved, timeout time.Duration) 
 		extra = append(extra, a)
 	}
 	r.ExtraArgs = extra
-	return watcherResolved{Resolved: r, user: set.one("user"), hostname: set.one("hostname")}, sshConfig, remove, nil
+	return watcherResolved{Resolved: r, user: set.one("user"), hostname: set.one("hostname"), port: set.one("port")}, sshConfig, remove, nil
 }
 
 // identityOption is an -o value that names a key or how keys are chosen.
@@ -294,23 +299,36 @@ func watcherKeyUnusable(path string) string {
 }
 
 // agentKeys lists the keys the ssh-agent at sock holds ("" for $SSH_AUTH_SOCK), as
-// `ssh-add -L` says: none when there's no agent. A test can stand in for it.
-var agentKeys = func(ctx context.Context, sock string) []ssh.PublicKey {
+// `ssh-add -L` says. With no agent there at all (no $SSH_AUTH_SOCK) it's none, and
+// fine. An agent that's there but can't be asked (a dead socket, a broken agent) comes
+// back as unchecked, so it isn't taken for one with no keys. A locked agent answers as
+// one with no keys, and can't be told apart. A test can stand in for it.
+var agentKeys = func(ctx context.Context, sock string) (keys []ssh.PublicKey, unchecked string) {
+	if sock == "" && os.Getenv("SSH_AUTH_SOCK") == "" {
+		return nil, ""
+	}
 	c := exec.CommandContext(ctx, "ssh-add", "-L")
 	if sock != "" {
 		c.Env = append(os.Environ(), "SSH_AUTH_SOCK="+sock)
 	}
-	out, err := c.Output()
-	if err != nil {
-		return nil
+	where := "ssh-agent"
+	if sock != "" {
+		where = "the agent at " + termsafe.Quote(sock)
 	}
-	var keys []ssh.PublicKey
+	out, err := c.Output()
+	var exit *exec.ExitError
+	switch {
+	case errors.As(err, &exit) && exit.ExitCode() == 1:
+		return nil, "" // "The agent has no identities."
+	case err != nil:
+		return nil, where + " (it couldn't be asked)"
+	}
 	for _, l := range strings.Split(string(out), "\n") {
 		if k, _, _, _, err := ssh.ParseAuthorizedKey([]byte(l)); err == nil {
 			keys = append(keys, k)
 		}
 	}
-	return keys
+	return keys, ""
 }
 
 // sshHome is the home directory ssh expands ~ and %d to: the password database's, not
@@ -420,13 +438,21 @@ func otherLoginKeys(ctx context.Context, set sshSettings) (keys []ssh.PublicKey,
 			unchecked = append(unchecked, f)
 		}
 	}
-	keys = append(keys, agentKeys(ctx, "")...)
+	ak, bad := agentKeys(ctx, "")
+	keys = append(keys, ak...)
+	if bad != "" {
+		unchecked = append(unchecked, bad)
+	}
 	if a := set.one("identityagent"); a != "" && a != "none" && a != "SSH_AUTH_SOCK" {
 		if strings.HasPrefix(a, "$") {
 			a = os.Getenv(strings.Trim(a, "${}"))
 		}
 		if a != "" {
-			keys = append(keys, agentKeys(ctx, a)...)
+			ak, bad := agentKeys(ctx, a)
+			keys = append(keys, ak...)
+			if bad != "" {
+				unchecked = append(unchecked, bad)
+			}
 		}
 	}
 	return keys, unchecked

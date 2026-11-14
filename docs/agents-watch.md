@@ -36,7 +36,8 @@ a tag or group, it's listed once as `refused` and never asked.
   looks in flight, says so on stderr and exits 3; it never dies of SIGPIPE halfway. As the
   text form writes only when something changes, it doesn't wait for a write to find out: it
   polls stdout once a second for the reader having gone (on Linux and macOS; `agents` doesn't
-  run on Windows). It runs
+  run on Windows). Started with stdout closed (`>&-`), on `/dev/null` or read-only, it doesn't
+  start at all: exit 3, as it would log in to its hosts for nobody. It runs
   no daemon and leaves no file: each look's ssh config is a temp file removed when the look
   ends. The host list is read once, at the start; restart it to pick up changes.
 - **It remembers nothing between runs.** Started again, it raises every wait that's still
@@ -85,7 +86,7 @@ meaning; new fields don't need it to. Times are RFC 3339 in UTC.
 | `next_look_at` | When the next look is due. |
 | `stale_after` | The latest the next `look` for this host can come: `next_look_at`, plus the wait for a slot when more hosts are watched than `-j` (at most ⌈(hosts − j) / j⌉ other looks), plus a look's own run (timeout + 2 s) for each, plus 15 s. With no newer `look` for this host by then, the watch has stopped or is stuck: show what you have as stale, not as current. |
 | `looks`, `failures` | Looks at this host in this run, and how many failed. Each look is an sshd login there. |
-| `stopped_asking` | `true` when the host won't be asked again in this run; `next_look_at` and `stale_after` are `null` then. Only for a refused watcher key, so far: see below. Left out otherwise. |
+| `stopped_asking` | `true` when the host won't be asked again in this run; `next_look_at` and `stale_after` are `null` then. Only for a refused watcher key, so far: see below. Left out otherwise. **A seat should show it prominently**, not as one more error: nothing about that host will change until someone fixes the key and restarts the watch. |
 
 `result`:
 
@@ -227,7 +228,12 @@ that's also:
   unset variable, `~user`), and a key whose public half it can't read (no `.pub`, and a
   passphrase on the key), are named on stderr as unchecked;
 - in ssh-agent (`ssh-add -L`), or in the agent an `IdentityAgent` in your config names, such
-  as 1Password's or Secretive's: take it out with `ssh-add -d`.
+  as 1Password's or Secretive's: take it out with `ssh-add -d`. An agent that's there but can't
+  be asked is named as unchecked; a locked agent answers as one with no keys, and can't be
+  told apart from one.
+
+It gives no line for a host your ssh config reaches through a `ProxyCommand`: no watcher look
+could use it (below).
 
 It also refuses a watcher key with a certificate beside it (`KEY-cert.pub`): ssh offers the
 certificate with the key on its own, and a host that trusts the certificate's CA lets it in
@@ -236,9 +242,14 @@ without reading `authorized_keys`, so without the line's limits.
 **Then check it.** `meterm agents key HOST --check` logs in with the watcher key alone, as a
 look does, but asks for `echo meterm-watcher-check-<random>` instead. If that word comes back,
 the key isn't limited: it says so, loudly, and exits 2. If ssh logged in, ran to its end and
-the word didn't come back, the host ran something else, its forced command, and the key is
-limited: exit 0. Anything else can't tell, exit 1: the host refusing the key, no answer, more
-than 64 KiB of output, ssh stopped by a signal. Like a look, the check isn't in the activity
+the word didn't come back, the host ran something else, its forced command. A forced command
+alone still lets a key forward ports, so it then asks, with the same key, for a forward to the
+host's own sshd (`ssh -W 127.0.0.1:PORT`). Refused as "administratively prohibited": the key
+runs only its forced command and refuses port forwarding, exit 0. Anything through the forward,
+or the host trying the connection for it: port forwarding is allowed, the key isn't limited,
+exit 2. Not tested: a pty, agent and X11 forwarding, `~/.ssh/rc`; the printed line's `restrict`
+turns all of those off. Anything else can't tell, exit 1: the host refusing the key, no answer,
+more than 64 KiB of output, ssh stopped by a signal, a forward that failed without saying why. Like a look, the check isn't in the activity
 log. Run it after installing the line, and after anything that changes `authorized_keys` there.
 
 **This machine has to be able to use it.** ssh passes over a key it can't open without a
