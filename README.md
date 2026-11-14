@@ -958,7 +958,7 @@ destination, and `-o ProxyCommand`, `-A` or `-M` would make this more than one f
 | 0 | Every host answered. Having no agents is an answer. | the report |
 | 1 | Nothing was asked: bad flags, no selection, an unknown host, or a tag or group that matched nothing | nothing |
 | 2 | At least one host has an `error`, a refused production host included | the report, complete |
-| 3 | `--watch` only: stdout was closed or `/dev/null`, or wasn't being read when the watch stopped | what got through |
+| 3 | `--watch` only: stdout was closed or `/dev/null`, or wasn't being read when the watch stopped (a terminal that closes is a hangup instead: 0) | what got through |
 
 **It isn't in the activity log.** That log is kept for good and shared with the team, so
 nothing can be taken out later, and a status bar asking every 30 seconds would bury
@@ -1006,7 +1006,8 @@ running as you on this machine can read your keys. It installs nothing, and refu
 also log in with (sshd takes the first line a key matches). After installing the line,
 `meterm agents key HOST --check` probes the key and reads its line in `authorized_keys` with
 your ordinary login: exit 0 only if that line is exactly meterm's and nothing got through, 2 if
-something did or the line differs, 1 if it can't tell. It doesn't read sshd's own settings,
+something did or the line clearly grants more than meterm's, 1 if it can't tell (a line
+that isn't meterm's but doesn't clearly grant more included). It doesn't read sshd's own settings,
 other key files or the account's shell startup files, so 0 covers those two files only. A look with a watcher key offers that key and no other,
 none from your ssh config, and isn't made for a host your config reaches through a
 `ProxyCommand`. If the host refuses it the look fails rather than trying another; `--watch`

@@ -53,9 +53,10 @@ func newAgentsKeyCmd() *cobra.Command {
 			"authorized_keys2 there for the watcher key's line. A probe can't prove a key is\n" +
 			"limited; only the line can. Exit 0: the installed line for this key is exactly\n" +
 			"meterm's line, and the probes found no way through. Exit 2: a probe got through,\n" +
-			"or the line has other options (it says which). Exit 1: anything that can't tell,\n" +
-			"such as the key not being in those files (sshd may read keys from elsewhere), a\n" +
-			"file over 256 KiB, a line meterm can't read, or the host not answering.\n" +
+			"or the line clearly grants more than meterm's (it says how). Exit 1: anything that\n" +
+			"can't tell, such as the key not being in those files (sshd may read keys from\n" +
+			"elsewhere), a file over 256 KiB, a line meterm can't read, or the host not\n" +
+			"answering.\n" +
 			"Exit 0 covers those two files and no more: sshd's own settings and other key\n" +
 			"files (AuthorizedKeysFile set elsewhere, AuthorizedKeysCommand, Match,\n" +
 			"ForceCommand) aren't read, nor the account's shell startup files, which run\n" +
@@ -292,16 +293,23 @@ func installedLine(ctx context.Context, r config.Resolved, timeout time.Duration
 		return "couldn't read the host's authorized_keys with your ordinary login (" + termsafe.Text(why) + "), so it can't tell", keyCheckUnsure
 	}
 	entries, problems := watcherEntries(string(stdout), key, nonce)
+	// With one line for the key, it's the one sshd uses. With more, any could be,
+	// depending on which comes first after the file next changes: say "could be".
+	which := "the authorized_keys line for the watcher key on " + lbl(r.Name) + " isn't meterm's"
+	if len(entries) > 1 {
+		which = "there's more than one authorized_keys line for the watcher key on " + lbl(r.Name) +
+			", and another line for this key could be used and isn't meterm's"
+	}
 	for _, e := range entries {
 		if e != want && grantsMore(e, want) {
-			return "NOT LIMITED: the authorized_keys line for the watcher key on " + lbl(r.Name) +
-				" isn't meterm's and lets the key do more: " + optionsDiff(e, want) + ". Replace it with the line from `meterm agents key`, and check again.", keyCheckUnlimited
+			return "NOT LIMITED: " + which + ", and it lets the key do more: " + optionsDiff(e, want) +
+				". Replace it with the line from `meterm agents key`, and check again.", keyCheckUnlimited
 		}
 	}
 	for _, e := range entries {
 		if e != want {
-			return "the authorized_keys line for the watcher key on " + lbl(r.Name) + " isn't meterm's line, so meterm can't vouch for it (" +
-				optionsDiff(e, want) + "). It may be as limited or more; to have it checked, use the line from `meterm agents key` as it is", keyCheckUnsure
+			return which + ", so meterm can't vouch for it (" + optionsDiff(e, want) +
+				"). It may be as limited or more; to have it checked, use the line from `meterm agents key` as it is", keyCheckUnsure
 		}
 	}
 	switch {
@@ -396,16 +404,13 @@ func watcherEntries(out string, key ssh.PublicKey, nonce string) (entries, probl
 			problems = append(problems, where+" has a control character: a line meterm can't read, and sshd might")
 			continue
 		}
-		pk, _, opts, _, err := ssh.ParseAuthorizedKey([]byte(t))
-		if err != nil {
-			pk, _, opts, _, err = ssh.ParseAuthorizedKey([]byte(rsaSHA2RE.ReplaceAllString(t, "${1}ssh-rsa${3}")))
-		}
+		pk, opts, err := parseKeyLine(t)
 		if err != nil {
 			problems = append(problems, where+" is a line meterm can't read, and sshd might")
 			continue
 		}
 		if sameKey(pk, key) {
-			entries = append(entries, strings.Join(opts, ","))
+			entries = append(entries, opts)
 		}
 	}
 	if files != 2 || inFile {
@@ -484,7 +489,46 @@ func grantsMore(got, want string) bool {
 	return g["command"] != w["command"]
 }
 
-// splitOptions splits an authorized_keys options string at commas outside quotes.
+// parseKeyLine reads an authorized_keys line as sshd does (authfile.c): a key at the
+// start, or else options and then a key. The options end at the first space or tab
+// outside quotes, and inside quotes only \" escapes a quote; a backslash before
+// anything else is just a backslash (sshkey_advance_past_options). Go's own parser
+// takes a backslash as escaping whatever follows, and so can end the options in
+// another place than sshd, and hide an option; it's only used here for the key.
+func parseKeyLine(t string) (ssh.PublicKey, string, error) {
+	if pk, err := parseBareKey(t); err == nil {
+		return pk, "", nil
+	}
+	quoted := false
+	i := 0
+	for ; i < len(t) && (quoted || (t[i] != ' ' && t[i] != '\t')); i++ {
+		if t[i] == '\\' && i+1 < len(t) && t[i+1] == '"' {
+			i++
+			continue
+		}
+		if t[i] == '"' {
+			quoted = !quoted
+		}
+	}
+	pk, err := parseBareKey(strings.TrimLeft(t[i:], " \t"))
+	return pk, t[:i], err
+}
+
+// parseBareKey reads "type base64 [comment]", with no options. An RSA key written
+// under a signature algorithm's name (rsa-sha2-256, -512) is read as the ssh-rsa key
+// sshd takes it for.
+func parseBareKey(s string) (ssh.PublicKey, error) {
+	for _, try := range []string{s, rsaSHA2RE.ReplaceAllString(s, "${1}ssh-rsa${3}")} {
+		pk, _, opts, _, err := ssh.ParseAuthorizedKey([]byte(try))
+		if err == nil && len(opts) == 0 && strings.HasPrefix(try, pk.Type()) {
+			return pk, nil
+		}
+	}
+	return nil, errors.New("not a key")
+}
+
+// splitOptions splits an authorized_keys options string at commas outside quotes, as
+// sshd does: inside quotes only \" escapes.
 func splitOptions(s string) []string {
 	var out []string
 	var cur strings.Builder
@@ -492,7 +536,7 @@ func splitOptions(s string) []string {
 	for i := 0; i < len(s); i++ {
 		c := s[i]
 		switch {
-		case c == '\\' && quoted && i+1 < len(s):
+		case c == '\\' && quoted && i+1 < len(s) && s[i+1] == '"':
 			cur.WriteByte(c)
 			i++
 			cur.WriteByte(s[i])

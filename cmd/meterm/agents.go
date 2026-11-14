@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"golang.org/x/term"
 
 	"meterm/internal/agents"
 	"meterm/internal/config"
@@ -144,6 +145,10 @@ func agentsWatchMain(jobs []agentJob, flags lookFlags, interval time.Duration) e
 	if watched == 0 {
 		return fmt.Errorf("nothing to watch: every host chosen is production that wasn't named, or has agents_watch: false")
 	}
+	// A terminal that goes away is a hangup (SIGHUP, and writes to it failing): the
+	// ordinary end of a watch run in a terminal, and exit 0 as a signal is. Exit 3 is
+	// for a reader that was a program.
+	toTerminal := term.IsTerminal(int(os.Stdout.Fd()))
 	if why := stdoutUnusable(); why != "" {
 		fmt.Fprintf(os.Stderr, "meterm: %s, so the watch didn't start: it would log in to its hosts for nobody\n", why)
 		os.Exit(agentsWatchOutputGone) // not finish: a watch never pauses for a key
@@ -158,6 +163,8 @@ func agentsWatchMain(jobs []agentJob, flags lookFlags, interval time.Duration) e
 		grace: agentsWatchGrace, slack: agentsLookSlack, outputGone: stdoutGone,
 	})
 	switch {
+	case toTerminal && errors.Is(err, errWatchOutput):
+		return nil
 	case errors.Is(err, errWatchBlocked):
 		fmt.Fprintln(os.Stderr, "meterm: stdout wasn't being read, so the watch stopped without its last lines")
 		os.Exit(agentsWatchOutputGone)

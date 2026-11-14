@@ -260,12 +260,16 @@ func TestLocalSSHDWatcherKey(t *testing.T) {
 	// that run what's sent and then answer as meterm's would, and forwarding let back
 	// in only to other ports. The line on the host says what they are.
 	esc := strings.ReplaceAll(agents.RemoteCommand, `"`, `\"`)
+	mopts, _ := agents.KeyOptions()
 	for name, o := range map[string]string{
 		"python":          `restrict,command="python3"`,
 		"cat to a file":   `restrict,command="sh -c 'cat > ` + filepath.Join(s.dir, "taken") + `; exit 1'"`,
 		"a shell, quiet":  `restrict,command="sh -c 'sh >/dev/null 2>&1; echo []'"`,
 		"eval, then ours": `restrict,command="eval \"$SSH_ORIGINAL_COMMAND\" >/dev/null; ` + esc + `"`,
 		"other ports":     `restrict,port-forwarding,permitlisten="127.0.0.1:18080",permitopen="127.0.0.1:5432",command="` + esc + `"`,
+		// sshd: only \" escapes, so pty here is an option of its own.
+		"pty behind a backslash":        mopts + `,from="127.0.0.1,a\\",127.0.0.1",pty`,
+		"pty behind a backslash, globs": mopts + `,from="*.x\\",*",pty`,
 	} {
 		s.setAuthorized(t, "opts:"+o, "main")
 		if msg, code := checkWatcherKey(ctx, s.job(), 10*time.Second, nil); code != keyCheckUnlimited || !strings.Contains(msg, "options differ") {

@@ -57,6 +57,9 @@ a tag or group, it's listed once as `refused` and never asked.
   stdout to take the last lines for as long as it keeps taking them, up to 10 seconds; once
   2 seconds pass with none taken, or at 10, it says "stdout wasn't being read" and exits 3
   without them.
+- **A terminal that closes is a hangup.** Run in a terminal, the watch ends with exit 0 when
+  the terminal goes (SIGHUP, and writes to it failing), as it does on any signal. Exit 3 is
+  for a reader that's a program: a pipe or a socket.
 - **It never pauses.** Started from meterm's picker, other commands wait for Enter before
   going back; a watch doesn't, whatever it ends with.
 - **It remembers nothing between runs.** Started again, it raises every wait that's still

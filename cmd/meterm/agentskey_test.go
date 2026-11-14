@@ -673,7 +673,7 @@ func TestCheckWatcherKey(t *testing.T) {
 		{"a shell as the forced command", meterms, fwd(prohibited) + `exec sh`, keyCheckUnlimited, "NOT LIMITED"},
 		{"python: exit 1, nothing out", `restrict,command="python3" ` + pub + "\n", fwd(prohibited) + `exit 1`, keyCheckUnlimited, "a different command"},
 		{"forwarding let back in", `restrict,port-forwarding,permitopen="127.0.0.1:5432",command="x" ` + pub + "\n", fwd(prohibited) + `echo '[]'`, keyCheckUnlimited, "has permitopen"},
-		{"meterm's line and another", meterms + "no-pty " + pub + "\n", fwd(prohibited) + `echo '[]'`, keyCheckUnlimited, "lacks"},
+		{"meterm's line and another", meterms + "no-pty " + pub + "\n", fwd(prohibited) + `echo '[]'`, keyCheckUnlimited, "another line for this key could be used and isn't meterm's"},
 		{"meterm's line twice", meterms + meterms, fwd(prohibited) + `echo '[]'`, keyCheckUnsure, "more than once"},
 		{"not in those files", other, fwd(prohibited) + `echo '[]'`, keyCheckUnsure, "AuthorizedKeysCommand"},
 		{"refused", meterms, `echo 'agent@192.0.2.1: Permission denied (publickey).' >&2; exit 255`, keyCheckUnsure, "refused the watcher key"},
@@ -957,6 +957,7 @@ func TestCheckWatcherKeyAnswerHasToBeWhole(t *testing.T) {
 		{"BSD wc's padding", "     " + size, "", 2, true, 0, keyCheckLimited, "exactly meterm's"},
 		{"BusyBox", size, "", 2, true, 0, keyCheckLimited, "exactly meterm's"},
 		{"not a number", "abc", "", 2, true, 0, keyCheckUnsure, "size couldn't be read"},
+		{"a negative size", "-5", "", 2, true, 0, keyCheckUnsure, "size couldn't be read"},
 		{"no size", " ", "", 2, true, 0, keyCheckUnsure, "size couldn't be read"},
 		{"shrank while read", "5000", "", 2, true, 0, keyCheckUnsure, "changed while it was read"},
 		{"grew while read", strconv.Itoa(len(meterms) - 5), "", 2, true, 0, keyCheckUnsure, "changed while it was read"},
@@ -999,10 +1000,23 @@ func TestCheckWatcherKeyVouchesOnlyForItsOwnLine(t *testing.T) {
 		{"another order", strings.Join(reordered, ","), keyCheckUnsure, "can't vouch"},
 		{"another case", strings.Replace(opts, "restrict", "RESTRICT", 1), keyCheckUnsure, "can't vouch"},
 		{"no restrict", strings.Replace(opts, "restrict,", "", 1), keyCheckUnlimited, "lets the key do more"},
+		{"restrict, X11 forwarding back", "restrict,x11-forwarding," + cmd, keyCheckUnlimited, "lets the key do more"},
+		{"restrict, user-rc back", "restrict,user-rc," + cmd, keyCheckUnlimited, "lets the key do more"},
+		{"restrict, a tunnel", `restrict,tunnel="0",` + cmd, keyCheckUnlimited, "lets the key do more"},
+		{"restrict, no-touch-required", "restrict,no-touch-required," + cmd, keyCheckUnlimited, "lets the key do more"},
+		{"restrict, principals", `restrict,principals="root",` + cmd, keyCheckUnlimited, "lets the key do more"},
+		{"restrict, permitopen", `restrict,permitopen="127.0.0.1:22",` + cmd, keyCheckUnlimited, "lets the key do more"},
+		{"restrict, permitlisten", `restrict,permitlisten="127.0.0.1:2222",` + cmd, keyCheckUnlimited, "lets the key do more"},
+		{"restrict, port-forwarding", "restrict,port-forwarding," + cmd, keyCheckUnlimited, "lets the key do more"},
+		{"restrict, cert-authority", "restrict,cert-authority," + cmd, keyCheckUnlimited, "lets the key do more"},
 		{"restrict, pty back", "restrict,pty," + cmd, keyCheckUnlimited, "lets the key do more"},
 		{"restrict, agent forwarding back", "restrict,agent-forwarding," + cmd, keyCheckUnlimited, "lets the key do more"},
 		{"restrict, environment", `restrict,environment="A=b",` + cmd, keyCheckUnlimited, "lets the key do more"},
 		{"another command", `restrict,command="id"`, keyCheckUnlimited, "lets the key do more"},
+		// sshd takes only \" as an escape inside quotes: a backslash before anything
+		// else is itself, so the quote after it ends the value and pty is an option.
+		{"pty behind a backslash", opts + `,from="127.0.0.1,a\\",127.0.0.1",pty`, keyCheckUnlimited, "lets the key do more"},
+		{"pty behind a backslash, globs", opts + `,from="*.x\\",*",pty`, keyCheckUnlimited, "lets the key do more"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			p := filepath.Join(t.TempDir(), "ak")
@@ -1044,5 +1058,25 @@ func TestWordFinder(t *testing.T) {
 	w.Write([]byte("ck-0123456789abcdef\n"))
 	if !w.found() {
 		t.Error("not found across two writes")
+	}
+}
+
+// The echo probe has its own share of the time: one that hangs fails in about
+// --timeout, not in the whole check's budget.
+func TestCheckEchoProbeHasItsOwnTimeout(t *testing.T) {
+	dir := t.TempDir()
+	key := newWatcherKey(t, dir, "watch")
+	job := agentJob{label: "devbox", resolve: func(context.Context) config.Resolved {
+		return config.Resolved{Name: "devbox", Address: "192.0.2.1", AgentsIdentity: key}
+	}}
+	fakeSSHScript(t, `exec sleep 30`)
+	cannedSSHG(t, "user agent\nhostname 192.0.2.1\n")
+	start := time.Now()
+	msg, code := checkWatcherKey(context.Background(), job, 500*time.Millisecond, nil)
+	if code != keyCheckUnsure || !strings.Contains(msg, "no answer") {
+		t.Errorf("%d %q", code, msg)
+	}
+	if d := time.Since(start); d > 1500*time.Millisecond {
+		t.Errorf("took %s", d)
 	}
 }

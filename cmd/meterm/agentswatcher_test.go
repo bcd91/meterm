@@ -753,3 +753,15 @@ func TestOrdinaryRefusalNamesTheHostAsSSHDoes(t *testing.T) {
 		t.Error("watcher look, other case")
 	}
 }
+
+// The text form says how many lines were left out on the way out.
+func TestWatchTextSaysWhatWasDropped(t *testing.T) {
+	o := &watchWriter{format: "text", last: map[string]string{}}
+	at := time.Date(2026, 11, 14, 8, 0, 0, 0, time.UTC)
+	if s := o.text(agents.Stopped{At: at, Dropped: 3}); !strings.Contains(s, "stopped (3 line(s) not written") {
+		t.Errorf("%q", s)
+	}
+	if s := o.text(agents.Stopped{At: at}); strings.Contains(s, "not written") {
+		t.Errorf("%q", s)
+	}
+}
