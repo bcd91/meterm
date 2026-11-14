@@ -206,6 +206,9 @@ func (t *Tracker) Observe(h Host, at time.Time, took time.Duration) (Look, []Cha
 			tr.needsSince, tr.pending = ptr(at), 0
 			s.NeedsInputSince = tr.needsSince
 			changes = append(changes, t.change(h.Host, at, ChangeNeedsInputStarted, WhySeenTwice, s, nil))
+		case a.Event == EventUnknown:
+			// Can't say: a raised wait stays raised, and a pending one stays pending.
+			// Ending it would read as the prompt answered, which nothing here knows.
 		default:
 			tr.pending = 0
 			if tr.needsSince != nil {

@@ -32,6 +32,11 @@ What changed between releases that you'd notice in use. Newest first.
   looks, as it hid the refusal.
 - A reader that holds stdout open without reading can't keep a signal from ending the watch:
   it exits 3 within about 2 seconds, without the last lines.
+- A watcher key that never got in is given up on (`stopped_asking`) only after 3 refusals in a
+  row over at least 5 minutes, not after one.
+- A wait whose session then reads as `unknown` stays raised; it isn't reported as answered.
+- On a stop the watch waits for stdout as long as it keeps taking lines (up to 10 seconds, or
+  2 with none taken), and never pauses for Enter when started from the picker.
 - A closed stdout stops the watch cleanly, looks in flight included, with exit 3, in the text
   form too, which writes only on changes: stdout is polled once a second.
 - Restarted, it raises the waits still going on again: it keeps nothing between runs.
@@ -50,9 +55,11 @@ What changed between releases that you'd notice in use. Newest first.
   the host. It refuses a key an ordinary login could use too: the host's `identity_file`, an
   `IdentityFile` `ssh -G` names for it (ssh's defaults included, `~`, `${VAR}` and `%` tokens
   expanded), or one in ssh-agent or in the agent an `IdentityAgent` names.
-  `--check` logs in with the watcher key and asks for something else (as the command and on
-  stdin), checks what came back looks like meterm's forced command, then asks for a forward
-  both ways (`-W` and `-R`): exit 2, loudly, if any of it works, as the key isn't limited. A host named `key` is now `meterm agents -- key`.
+  `--check` probes the watcher key (a command, stdin, a forward both ways) and reads its
+  `authorized_keys` line with your ordinary login: exit 0 only if the installed line for the
+  key is exactly meterm's and the probes found no way through; exit 2, loudly, if a probe got
+  through or the line has other options (naming them); exit 1 if it can't tell. sshd-wide
+  settings aren't read. A host named `key` is now `meterm agents -- key`.
 - A watcher look keeps what your ssh config says about where the host is, how to get there and
   which host keys count (`HostName`, `User`, `Port`, `ProxyJump`, known-hosts files,
   `HostKeyAlias`, `AddressFamily`, `BindAddress`, `BindInterface`), read with `ssh -G`, but none

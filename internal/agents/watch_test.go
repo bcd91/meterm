@@ -276,3 +276,27 @@ func TestFirstDelayBounds(t *testing.T) {
 		t.Errorf("no spread: %s", FirstDelay(time.Minute, 0.5))
 	}
 }
+
+// A raised wait whose row says something nobody knows stays raised: unknown isn't an
+// answered prompt. It ends when the row says something known.
+func TestWatchUnknownDoesntEndAWait(t *testing.T) {
+	pid := func(n int64) *int64 { return &n }
+	row := func(state, status string) Host {
+		ev, conf := Classify(state, status, "")
+		return Host{Host: "h", Reachable: true, Agents: []Agent{{ID: "a", PID: pid(1), State: state, Status: status, Event: ev, Confidence: conf}}}
+	}
+	tr := NewTracker()
+	if _, ch := tr.Observe(row("blocked", "waiting"), at(0), 0); len(ch) != 1 {
+		t.Fatalf("%+v", ch)
+	}
+	look, ch := tr.Observe(row("frobnicating", ""), at(1), 0)
+	if len(ch) != 0 || look.Sessions[0].NeedsInputSince == nil || look.Sessions[0].Event != EventUnknown {
+		t.Errorf("unknown: %+v %+v", ch, look.Sessions[0])
+	}
+	if _, ch := tr.Observe(row("blocked", "waiting"), at(2), 0); len(ch) != 0 {
+		t.Errorf("raised again: %+v", ch)
+	}
+	if _, ch := tr.Observe(row("working", "busy"), at(3), 0); len(ch) != 1 || ch[0].Why != WhyChanged {
+		t.Errorf("known: %+v", ch)
+	}
+}

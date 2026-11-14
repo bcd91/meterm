@@ -33,8 +33,16 @@ func sshAgentQuery(sshConfig string, timeout time.Duration) agentQuery {
 	return func(ctx context.Context, r config.Resolved) ([]byte, string, bool, error) {
 		if r.AgentsIdentity == "" {
 			stdout, stderr, overflow, err := sshLookQuery(sshConfig, timeout, agents.RemoteCommand, agents.MaxOutput)(ctx, r)
-			if authRefusedBy(stderr, r.Address) {
-				err = errKeyRefused
+			if sshrun.ClassifyFailure(stderr) == sshrun.FailureAuth {
+				// ssh names the host as it connected to it, which the person's config may
+				// have renamed: ask ssh -G, only now that it matters.
+				hosts := []string{r.Address}
+				if set, gerr := lookSettings(ctx, r, timeout); gerr == nil {
+					hosts = append(hosts, set.one("hostname"))
+				}
+				if authRefusedBy(stderr, hosts...) {
+					err = errKeyRefused
+				}
 			}
 			return stdout, stderr, overflow, err
 		}
@@ -195,7 +203,7 @@ func authRefusedBy(stderr string, hosts ...string) bool {
 			head = head[i+1:]
 		}
 		for _, h := range hosts {
-			if h != "" && head == h {
+			if h != "" && strings.EqualFold(head, h) { // host names have no case
 				return true
 			}
 		}

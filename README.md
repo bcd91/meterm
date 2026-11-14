@@ -248,7 +248,7 @@ meterm stats <name>             CPU/memory/disk/network snapshot from a host (Li
 meterm agents [host...] [--tag t] [--group g] [--format text|json] [--timeout 8s] [-j N]   Claude Code sessions on hosts; read-only, not logged
 meterm agents [host...] --watch [--interval 60s] [--format json]   keep looking; a line per look, and when a session starts or stops waiting
 meterm agents key <name> [--check]   print the authorized_keys line that limits a watcher key
-                                     to that one look; --check: does the host hold it to that?
+                                     to that one look; --check: is that line what's installed?
 
 meterm logs <name> [path...] [-f] [-n N]        tail log files (no path: list /var/log)
 meterm logs list <name> [dir]                   see what log files actually exist (default dir: /var/log)
@@ -958,6 +958,7 @@ destination, and `-o ProxyCommand`, `-A` or `-M` would make this more than one f
 | 0 | Every host answered. Having no agents is an answer. | the report |
 | 1 | Nothing was asked: bad flags, no selection, an unknown host, or a tag or group that matched nothing | nothing |
 | 2 | At least one host has an `error`, a refused production host included | the report, complete |
+| 3 | `--watch` only: stdout was closed or `/dev/null`, or wasn't being read when the watch stopped | what got through |
 
 **It isn't in the activity log.** That log is kept for good and shared with the team, so
 nothing can be taken out later, and a status bar asking every 30 seconds would bury
@@ -992,16 +993,18 @@ can't be reached says `unreachable` with `sessions: null`, never an empty list, 
 and less often, down to every 10 minutes, until it answers. A session that says it's waiting but
 has no process is raised only if two answers from the host in a row (a look that fails in between doesn't count) say so, as that's what a dead worker's row
 looks like for a few seconds. `agents_watch: false` on a host or group keeps `--watch` away from
-it. If stdout is closed it stops, looks in flight included, and exits 3. Looks are counted in the stream and nowhere else: each one is an sshd login on the host, and
-isn't in wtmp, so `last` and `meterm logins` don't show them.
+it. If stdout is closed, or isn't being read when it stops, it ends anyway, looks in flight
+included, and exits 3. Looks are counted in the stream and nowhere else: each one is an sshd
+login on the host, and isn't in wtmp, so `last` and `meterm logins` don't show them.
 
 A host's `agents_identity` is a key that `agents` and `--watch` use instead of its
 `identity_file`. `meterm agents key HOST` prints the `authorized_keys` line that lets that key run
 only `claude agents --json`, for you to put on the host: the limit has to be there, as anything
 running as you on this machine can read your keys. It installs nothing, and refuses a key you
 also log in with (sshd takes the first line a key matches). After installing the line,
-`meterm agents key HOST --check` logs in with the key and asks for something else, then for a
-forward both ways: exit 2 if it got any of it, so the key isn't limited. A look with a watcher key offers that key and no other,
+`meterm agents key HOST --check` probes the key and reads its line in `authorized_keys` with
+your ordinary login: exit 0 only if that line is exactly meterm's and nothing got through, 2 if
+something did or the line differs, 1 if it can't tell. A look with a watcher key offers that key and no other,
 none from your ssh config, and isn't made for a host your config reaches through a
 `ProxyCommand`. If the host refuses it the look fails rather than trying another; `--watch`
 stops asking a host the key never got in to, and backs off from a minute on one it did. A

@@ -254,3 +254,44 @@ func TestAgentsWatchProcessStopsWithAReaderThatNeverReads(t *testing.T) {
 		t.Fatal("SIGTERM didn't stop it")
 	}
 }
+
+// Started from the picker (METERM_FROM_TUI set), a watch that ends on its own still
+// just ends: it never prints a "press enter" to the stdout that failed and waits on
+// stdin for an answer that won't come.
+func TestAgentsWatchNeverPauses(t *testing.T) {
+	dir := t.TempDir()
+	fakeSSHScript(t, `echo '[]'`)
+	cfgFile := filepath.Join(dir, "hosts.yaml")
+	if err := os.WriteFile(cfgFile, []byte("version: 1\nhosts:\n- {name: a, address: 192.0.2.1}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for name, redirect := range map[string]string{"stdout nowhere": ">/dev/null", "reader gone": "| head -c 1"} {
+		t.Run(name, func(t *testing.T) {
+			cmd := exec.Command("sh", "-c", `"$0" `+redirect, os.Args[0])
+			cmd.Env = append(os.Environ(), runAgentsWatchEnv+"=a\x1f--watch\x1f--interval\x1f15s\x1f--format\x1fjson",
+				"METERM_CONFIG="+cfgFile, "TMPDIR="+t.TempDir(), fromTUIEnv+"=1")
+			stdin, err := cmd.StdinPipe() // open, and never written to
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer stdin.Close()
+			var stderr bytes.Buffer
+			cmd.Stderr = &stderr
+			if err := cmd.Start(); err != nil {
+				t.Fatal(err)
+			}
+			done := make(chan error, 1)
+			go func() { done <- cmd.Wait() }()
+			select {
+			case <-done:
+			case <-time.After(10 * time.Second):
+				_ = cmd.Process.Kill()
+				<-done
+				t.Fatalf("it waited; stderr %q", stderr.String())
+			}
+			if strings.Contains(strings.ToLower(stderr.String()), "press") {
+				t.Errorf("a pause prompt: %q", stderr.String())
+			}
+		})
+	}
+}

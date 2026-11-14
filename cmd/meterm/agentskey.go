@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"slices"
 	"strings"
 	"sync"
 	"syscall"
@@ -44,11 +45,16 @@ func newAgentsKeyCmd() *cobra.Command {
 			"such a key would either stay unlimited, or limit your own logins.\n\n" +
 			"--check, after the line is in, logs in with the watcher key alone and asks for\n" +
 			"something else (echo of a random word, as the command and on stdin), then for a\n" +
-			"port forward both ways (-W to the host's own sshd, -R on its loopback). If any of\n" +
-			"it works, the key isn't limited: exit 2. If the host ran meterm's forced command\n" +
-			"and refused both forwards, it is: exit 0 (a pty, agent and X11 forwarding and\n" +
-			"~/.ssh/rc aren't tried). Anything else, such as the host refusing the key or not\n" +
-			"answering, is exit 1.\n\n" +
+			"port forward both ways (-W to the host's own sshd, -R on its loopback). Then it\n" +
+			"logs in a second way, with your ordinary login to the host (your own key, as\n" +
+			"`meterm agents` would without a watcher key), and reads ~/.ssh/authorized_keys and\n" +
+			"authorized_keys2 there for the watcher key's line. A probe can't prove a key is\n" +
+			"limited; only the line can. Exit 0: the installed line for this key is exactly\n" +
+			"meterm's line, and the probes found no way through. Exit 2: a probe got through,\n" +
+			"or the line has other options (it says which). Exit 1: anything that can't tell,\n" +
+			"such as the key not being in those files (sshd may read keys from elsewhere),\n" +
+			"the files or the host not answering. sshd-wide settings (Match blocks,\n" +
+			"AuthorizedKeysCommand, ForceCommand) aren't read.\n\n" +
 			"The limit is on the host's side because nothing on this machine can be: anything\n" +
 			"running as you here, an agent included, can read the key and use it as it likes.\n\n" +
 			"To set one up:\n" +
@@ -107,7 +113,7 @@ func newAgentsKeyCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&identity, "identity", "", "the watcher key (private or .pub), instead of the host's agents_identity")
-	cmd.Flags().BoolVar(&check, "check", false, "log in with the watcher key and see whether the host limits it to its command, with no forwarding (exit 0 yes, 2 no, 1 can't tell)")
+	cmd.Flags().BoolVar(&check, "check", false, "probe the watcher key, and read its authorized_keys line with your ordinary login (exit 0 meterm's line and no way through, 2 not limited, 1 can't tell)")
 	cmd.Flags().DurationVar(&timeout, "timeout", agentsDefaultTimeout, "give up on the host after this long")
 	return cmd
 }
@@ -171,45 +177,199 @@ func checkWatcherKey(ctx context.Context, job agentJob, timeout time.Duration) (
 	case err != nil && !exited:
 		return "couldn't run ssh: " + termsafe.Text(err.Error()), keyCheckUnsure
 	}
-	// ssh ran to its end, logged in (not 255), and the word didn't come back: the host
-	// ran something else. It has to look like what meterm's forced command gives: the
-	// JSON list, or nothing with "no claude" (127) or "claude failed" (1).
-	if !looksLikeForcedCommand(stdout, err) {
-		return "the host ran something else than what was sent, but not what meterm's forced command gives, so it can't tell which command it is", keyCheckUnsure
-	}
-	// A forced command alone still lets the key forward ports, both ways, so both are
-	// tried.
+	// ssh ran to its end, logged in (not 255), and the word didn't come back. That
+	// alone says nothing about which command the host ran, or what else the key may do:
+	// no probe can prove a key is limited. So the probes can only find a way through,
+	// and what decides "limited" is the line on the host, read below.
 	local := forwarding(ctx, wr, sshConfig, timeout)
 	remote := remoteForwarding(ctx, wr, sshConfig, timeout)
-	switch {
-	case local == forwardAllowed || remote == forwardAllowed:
+	if local == forwardAllowed || remote == forwardAllowed {
 		way := "local (-L, -W)"
 		if remote == forwardAllowed {
 			way = "remote (-R)"
 		}
-		return "NOT LIMITED: the watcher key runs only its forced command on " + lbl(r.Name) +
-			", but " + way + " port forwarding is allowed for it, so anything that can read the key can reach " +
-			"whatever that host can, or be reached from it. Use the line from `meterm agents key` as it is " +
-			"(restrict, no-port-forwarding), and check again.", keyCheckUnlimited
-	case local == forwardUnknown || remote == forwardUnknown:
-		return "it runs only its forced command, but whether it refuses port forwarding couldn't be told", keyCheckUnsure
+		return "NOT LIMITED: " + way + " port forwarding is allowed for the watcher key on " + lbl(r.Name) +
+			", so anything that can read the key can reach whatever that host can, or be reached from it. " +
+			"Use the line from `meterm agents key` as it is, and check again.", keyCheckUnlimited
 	}
-	return "limited: the watcher key runs only meterm's forced command and refuses port forwarding both ways " +
-		"(not tested: a pty, agent and X11 forwarding, ~/.ssh/rc)", keyCheckLimited
+	msg, code := installedLine(ctx, r, wr, timeout)
+	if code != keyCheckLimited {
+		return msg, code
+	}
+	if local == forwardUnknown || remote == forwardUnknown {
+		return "the line for the watcher key is meterm's, but whether the host refuses port forwarding couldn't be told", keyCheckUnsure
+	}
+	return "limited: the installed authorized_keys line for this key is exactly meterm's line, and the probes " +
+		"(a command, stdin, -W, -R) found no way through. Not read: sshd-wide settings (Match blocks, " +
+		"AuthorizedKeysCommand, ForceCommand, AuthorizedKeysFile elsewhere). The line's restrict is what turns " +
+		"off forwarding, a pty, agent and X11 forwarding and ~/.ssh/rc for this key", keyCheckLimited
 }
 
-// looksLikeForcedCommand: agents.RemoteCommand prints claude's JSON list, or nothing
-// and exits 127 (no claude there) or 1 (claude failed).
-func looksLikeForcedCommand(stdout []byte, err error) bool {
-	var exit *exec.ExitError
-	switch {
-	case err == nil:
-		_, perr := agents.Parse(stdout)
-		return perr == nil
-	case errors.As(err, &exit) && (exit.ExitCode() == agents.ExitNoClaude || exit.ExitCode() == 1):
-		return len(bytes.TrimSpace(stdout)) == 0
+// readAuthorizedKeys is the one command `--check` runs with the person's ordinary
+// login: the account's own authorized_keys files, each named in the command itself
+// (nothing from outside goes into it), cut at 256 KiB, each behind a header that says
+// whether it was there and readable.
+const readAuthorizedKeys = `sh -c 'for f in "$HOME/.ssh/authorized_keys" "$HOME/.ssh/authorized_keys2"; do ` +
+	`if [ ! -e "$f" ]; then echo "--meterm-missing-- $f"; ` +
+	`elif [ ! -r "$f" ]; then echo "--meterm-unreadable-- $f"; ` +
+	`else echo "--meterm-file-- $f"; head -c 262144 "$f"; echo; fi; done'`
+
+// installedLine reads the account's authorized_keys over an ordinary login (the
+// person's own key, as any meterm command would log in, not the watcher key) and
+// finds the lines for the watcher key. keyCheckLimited only for exactly one line,
+// with exactly meterm's options.
+func installedLine(ctx context.Context, r config.Resolved, wr watcherResolved, timeout time.Duration) (string, int) {
+	key, err := readPublicKey(r.AgentsIdentity)
+	if err != nil {
+		return "not checked: " + err.Error(), keyCheckUnsure
 	}
-	return false
+	want, err := agents.KeyOptions()
+	if err != nil {
+		return "not checked: " + err.Error(), keyCheckUnsure
+	}
+	sshConfig, remove, err := writeAgentSSHConfig()
+	if err != nil {
+		return "not checked: " + err.Error(), keyCheckUnsure
+	}
+	defer remove()
+	// r as resolved, not the watcher look's: its identity_file, the person's config,
+	// no IdentitiesOnly.
+	ordinary := r
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	stdout, stderr, overflow, err := sshLookQuery(sshConfig, timeout, readAuthorizedKeys, 1<<20)(ctx, ordinary)
+	switch {
+	case overflow:
+		return "couldn't read the host's authorized_keys: more than meterm reads", keyCheckUnsure
+	case err != nil:
+		why := "it failed"
+		var exit *exec.ExitError
+		if errors.As(err, &exit) && exit.ExitCode() == sshConnectionError {
+			why = sshFailureText(stderr)
+		}
+		return "couldn't read the host's authorized_keys with your ordinary login (" + termsafe.Text(why) + "), so it can't tell", keyCheckUnsure
+	}
+	entries, problems := watcherEntries(string(stdout), key)
+	for _, e := range entries {
+		if e != want {
+			return "NOT LIMITED: the authorized_keys line for the watcher key on " + lbl(r.Name) +
+				" isn't meterm's: " + optionsDiff(e, want) + ". Replace it with the line from `meterm agents key`, and check again.", keyCheckUnlimited
+		}
+	}
+	switch {
+	case len(problems) > 0:
+		return "couldn't read all of the host's authorized_keys (" + strings.Join(problems, "; ") + "), so it can't tell", keyCheckUnsure
+	case len(entries) == 0:
+		return "the watcher key isn't in ~/.ssh/authorized_keys or authorized_keys2 on " + lbl(r.Name) +
+			"; sshd may take keys from an AuthorizedKeysFile elsewhere or an AuthorizedKeysCommand, which meterm can't see, so it can't tell", keyCheckUnsure
+	case len(entries) > 1:
+		return "the watcher key is in authorized_keys more than once on " + lbl(r.Name) + "; keep one line, and check again", keyCheckUnsure
+	}
+	return "", keyCheckLimited
+}
+
+// watcherEntries is the options of every authorized_keys line for key, in the files
+// readAuthorizedKeys printed, and what couldn't be read.
+func watcherEntries(out string, key ssh.PublicKey) (entries, problems []string) {
+	files := 0
+	for _, line := range strings.Split(out, "\n") {
+		switch {
+		case strings.HasPrefix(line, "--meterm-file-- "):
+			files++
+			continue
+		case strings.HasPrefix(line, "--meterm-missing-- "):
+			files++
+			continue
+		case strings.HasPrefix(line, "--meterm-unreadable-- "):
+			files++
+			problems = append(problems, termsafe.Text(strings.TrimPrefix(line, "--meterm-unreadable-- "))+" can't be read")
+			continue
+		}
+		t := strings.TrimSpace(line)
+		if t == "" || strings.HasPrefix(t, "#") {
+			continue
+		}
+		pk, _, opts, _, err := ssh.ParseAuthorizedKey([]byte(t))
+		if err != nil || !sameKey(pk, key) {
+			continue
+		}
+		entries = append(entries, strings.Join(opts, ","))
+	}
+	if files != 2 {
+		problems = append(problems, "the answer wasn't what was asked for")
+	}
+	return entries, problems
+}
+
+// optionsDiff says how an installed line's options differ from meterm's, by option.
+func optionsDiff(got, want string) string {
+	split := func(s string) map[string]string {
+		m := map[string]string{}
+		for _, o := range splitOptions(s) {
+			k, _, _ := strings.Cut(o, "=")
+			m[strings.ToLower(k)] = o
+		}
+		return m
+	}
+	g, w := split(got), split(want)
+	var has, lacks, differ []string
+	for k, v := range g {
+		if wv, ok := w[k]; !ok {
+			has = append(has, termsafe.Text(v))
+		} else if wv != v {
+			differ = append(differ, k)
+		}
+	}
+	for k := range w {
+		if _, ok := g[k]; !ok {
+			lacks = append(lacks, k)
+		}
+	}
+	slices.Sort(has)
+	slices.Sort(lacks)
+	slices.Sort(differ)
+	var parts []string
+	if len(has) > 0 {
+		parts = append(parts, "has "+strings.Join(has, ", "))
+	}
+	if len(lacks) > 0 {
+		parts = append(parts, "lacks "+strings.Join(lacks, ", "))
+	}
+	if len(differ) > 0 {
+		parts = append(parts, "a different "+strings.Join(differ, ", "))
+	}
+	if len(parts) == 0 {
+		parts = append(parts, "the same options, written differently")
+	}
+	return "options differ from meterm's line: " + strings.Join(parts, "; ")
+}
+
+// splitOptions splits an authorized_keys options string at commas outside quotes.
+func splitOptions(s string) []string {
+	var out []string
+	var cur strings.Builder
+	quoted := false
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case c == '\\' && quoted && i+1 < len(s):
+			cur.WriteByte(c)
+			i++
+			cur.WriteByte(s[i])
+			continue
+		case c == '"':
+			quoted = !quoted
+		case c == ',' && !quoted:
+			out = append(out, cur.String())
+			cur.Reset()
+			continue
+		}
+		cur.WriteByte(c)
+	}
+	if cur.Len() > 0 {
+		out = append(out, cur.String())
+	}
+	return out
 }
 
 // lookWithStdin is sshLookQuery with stdin given rather than /dev/null.

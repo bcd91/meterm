@@ -611,7 +611,7 @@ func TestWatchStopsAskingWhenTheWatcherKeyIsRefused(t *testing.T) {
 		fc.until = func() bool {
 			mu.Lock()
 			defer mu.Unlock()
-			if mark < 0 && strings.Contains(out.String(), "watcher key") {
+			if mark < 0 && (strings.Contains(out.String(), `"stopped_asking":true`) || strings.Contains(out.String(), "not asking it again")) {
 				mark = asked["192.0.2.2"]
 			}
 			return mark >= 0 && asked["192.0.2.2"] >= mark+5
@@ -621,8 +621,10 @@ func TestWatchStopsAskingWhenTheWatcherKeyIsRefused(t *testing.T) {
 			t.Fatal(err)
 		}
 		cancel()
-		if asked["192.0.2.1"] != 1 {
-			t.Errorf("%s: devbox asked %d times", format, asked["192.0.2.1"])
+		// It stops once there have been 3 or more refusals in a row over 5 minutes or
+		// more. The clock here moves with both hosts' sleeps, so that's the 3rd or 4th.
+		if n := asked["192.0.2.1"]; n < agentsRefusedStopAfter || n > agentsRefusedStopAfter+1 {
+			t.Errorf("%s: devbox asked %d times", format, n)
 		}
 		if format == "text" {
 			if !strings.Contains(out.String(), "not asking it again") {
@@ -636,9 +638,23 @@ func TestWatchStopsAskingWhenTheWatcherKeyIsRefused(t *testing.T) {
 				mine = append(mine, l)
 			}
 		}
-		if len(mine) != 1 || mine[0]["stopped_asking"] != true || mine[0]["result"] != "error" ||
-			mine[0]["next_look_at"] != nil || mine[0]["stale_after"] != nil || !strings.Contains(mine[0]["error"].(string), "watcher key") {
-			t.Errorf("%v", mine)
+		if len(mine) < agentsRefusedStopAfter {
+			t.Fatalf("%d looks: %v", len(mine), mine)
+		}
+		for _, l := range mine[:len(mine)-1] {
+			if l["stopped_asking"] != nil || l["next_look_at"] == nil || l["result"] != "error" {
+				t.Errorf("before: %v", l)
+			}
+		}
+		last := mine[len(mine)-1]
+		first, _ := time.Parse(time.RFC3339, mine[0]["looked_at"].(string))
+		end, _ := time.Parse(time.RFC3339, last["looked_at"].(string))
+		if end.Sub(first) < agentsRefusedStopSpan {
+			t.Errorf("stopped after %s", end.Sub(first))
+		}
+		if last["stopped_asking"] != true || last["result"] != "error" ||
+			last["next_look_at"] != nil || last["stale_after"] != nil || !strings.Contains(last["error"].(string), "watcher key") {
+			t.Errorf("%v", last)
 		}
 	}
 }
@@ -646,20 +662,27 @@ func TestWatchStopsAskingWhenTheWatcherKeyIsRefused(t *testing.T) {
 // With every host stopped, the watch doesn't end by itself: a seat that starts it again
 // whenever it ends would bring the failed logins back.
 func TestWatchWithNothingLeftToAskKeepsRunning(t *testing.T) {
+	var mu sync.Mutex
 	tries := 0
 	q := func(context.Context, config.Resolved) ([]byte, string, bool, error) {
+		mu.Lock()
 		tries++
+		mu.Unlock()
 		return nil, "", false, errWatcherKeyRefused
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	// The clock runs on as fast as the watch sleeps; only the deadline ends it.
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	defer cancel()
+	fc := &fakeClock{t: time.Date(2026, 11, 14, 8, 0, 0, 0, time.UTC), max: 1 << 30, cancel: func() {}}
 	start := time.Now()
 	var out bytes.Buffer
 	if err := runAgentsWatch(ctx, &out, []agentJob{agentJobFor("devbox")}, q,
-		watchOptions{interval: 10 * time.Millisecond, timeout: 100 * time.Millisecond, parallel: 1, format: "json", clock: realWatchClock}); err != nil {
+		watchOptions{interval: time.Minute, timeout: time.Second, parallel: 1, format: "json", clock: fc.clock()}); err != nil {
 		t.Fatal(err)
 	}
-	if d := time.Since(start); d < 250*time.Millisecond || tries != 1 {
+	mu.Lock()
+	defer mu.Unlock()
+	if d := time.Since(start); d < 450*time.Millisecond || tries != agentsRefusedStopAfter+1 {
 		t.Errorf("returned after %s, %d tries", d, tries)
 	}
 }

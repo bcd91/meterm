@@ -480,7 +480,7 @@ func TestWatchStopsWithAReaderThatNeverReads(t *testing.T) {
 		if !errors.Is(err, errWatchBlocked) {
 			t.Errorf("err %v", err)
 		}
-		if d := time.Since(start); d > agentsWatchFlush+2*time.Second {
+		if d := time.Since(start); d > agentsWatchStall+2*time.Second {
 			t.Errorf("took %s", d)
 		}
 	case <-time.After(10 * time.Second):
@@ -595,10 +595,144 @@ func TestWatchStopsWithAStuckWriteAndRoomInTheQueue(t *testing.T) {
 		if !errors.Is(err, errWatchBlocked) {
 			t.Errorf("err %v", err)
 		}
-		if d := time.Since(start); d > agentsWatchFlush+2*time.Second {
+		if d := time.Since(start); d > agentsWatchStall+2*time.Second {
 			t.Errorf("took %s", d)
 		}
 	case <-time.After(10 * time.Second):
 		t.Fatal("a stop didn't end the watch")
+	}
+}
+
+// A watcher key that never got in is given up on only after 3 refusals in a row
+// spanning 5 minutes: one refusal can be a passing thing. Refused at 0, 1, 3 and 7
+// minutes, it stops at the fourth. Broken by anything else, the count starts again.
+func TestWatchGivesUpOnlyAfterRepeatedRefusals(t *testing.T) {
+	run := func(answers []error) []map[string]any {
+		t.Helper()
+		n := 0
+		q := func(context.Context, config.Resolved) ([]byte, string, bool, error) {
+			err := answers[min(n, len(answers)-1)]
+			n++
+			if err == nil {
+				return []byte("[]"), "", false, nil
+			}
+			return nil, "agent@192.0.2.1: Permission denied (publickey).", false, err
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		fc := &fakeClock{t: time.Date(2026, 11, 14, 8, 0, 0, 0, time.UTC), max: 12, r: 0, cancel: cancel}
+		var out bytes.Buffer
+		if err := runAgentsWatch(ctx, &out, []agentJob{agentJobFor("devbox")}, q,
+			watchOptions{interval: 15 * time.Second, timeout: time.Second, parallel: 1, format: "json", clock: fc.clock()}); err != nil {
+			t.Fatal(err)
+		}
+		return ofType(watchLines(t, out.String()), "look")
+	}
+	r := errWatcherKeyRefused
+	looks := run([]error{r})
+	if len(looks) != 4 || looks[3]["stopped_asking"] != true || looks[2]["stopped_asking"] != nil {
+		t.Errorf("steady refusal: %d looks, last %v", len(looks), looks[len(looks)-1])
+	}
+	// A look that doesn't refuse (here, a host that isn't there) starts the count again.
+	looks = run([]error{r, r, errors.New("not ssh"), r, r, r, r})
+	stopped := -1
+	for i, l := range looks {
+		if l["stopped_asking"] == true {
+			stopped = i
+		}
+	}
+	// Refusals 4, 5 and 6 are the three in a row (the backoff from earlier failures
+	// already spaces them past 5 minutes), so it stops at the sixth, not the third.
+	if stopped != 5 {
+		t.Errorf("stopped at look %d of %d", stopped+1, len(looks))
+	}
+	// Once it got in, it's never given up on.
+	looks = run([]error{nil, r})
+	for _, l := range looks {
+		if l["stopped_asking"] != nil {
+			t.Errorf("gave up on a key that got in: %v", l)
+		}
+	}
+	if len(looks) < 10 {
+		t.Errorf("%d looks", len(looks))
+	}
+}
+
+// slowWriter takes each line after a pause.
+type slowWriter struct {
+	mu    sync.Mutex
+	pause time.Duration
+	b     bytes.Buffer
+}
+
+func (w *slowWriter) Write(p []byte) (int, error) {
+	time.Sleep(w.pause)
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.b.Write(p)
+}
+
+func (w *slowWriter) String() string { w.mu.Lock(); defer w.mu.Unlock(); return w.b.String() }
+
+// A reader that's slow but keeps reading gets every queued line and the last one: a
+// stop gives up only when nothing has been taken for a while, not after a fixed time.
+// One that keeps taking lines, slowly enough, is cut off at the overall cap.
+func TestWatchStopWaitsForASlowReader(t *testing.T) {
+	var jobs []agentJob
+	for i := 0; i < 80; i++ {
+		jobs = append(jobs, agentJobFor("h"+strings.Repeat("x", i)))
+	}
+	q := func(context.Context, config.Resolved) ([]byte, string, bool, error) {
+		return []byte("[]"), "", false, nil
+	}
+	w := &slowWriter{pause: 40 * time.Millisecond}
+	ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
+	defer cancel()
+	err := runAgentsWatch(ctx, w, jobs, q, watchOptions{interval: 10 * time.Millisecond, timeout: time.Second,
+		parallel: 80, format: "json", clock: realWatchClock})
+	if err != nil {
+		t.Fatalf("a slow reader lost the end: %v", err)
+	}
+	lines := strings.Split(strings.TrimSpace(w.String()), "\n")
+	if !strings.Contains(lines[len(lines)-1], `"type":"stopped"`) || len(lines) < 64 {
+		t.Errorf("%d lines, last %q", len(lines), lines[len(lines)-1])
+	}
+
+	old := agentsWatchFlushCap
+	agentsWatchFlushCap = 2 * time.Second
+	t.Cleanup(func() { agentsWatchFlushCap = old })
+	w = &slowWriter{pause: time.Second} // a line a second: never 2s without one
+	ctx2, cancel2 := context.WithTimeout(context.Background(), 1500*time.Millisecond)
+	defer cancel2()
+	start := time.Now()
+	err = runAgentsWatch(ctx2, w, jobs, q, watchOptions{interval: 10 * time.Millisecond, timeout: time.Second,
+		parallel: 80, format: "json", clock: realWatchClock})
+	if !errors.Is(err, errWatchBlocked) {
+		t.Errorf("err %v", err)
+	}
+	if d := time.Since(start); d > 1500*time.Millisecond+agentsWatchFlushCap+2*time.Second {
+		t.Errorf("took %s", d)
+	}
+}
+
+// The host a refusal names is matched as ssh names it: in any case, and by the name the
+// person's ssh config gives it (ssh -G), for ordinary looks as for watcher looks.
+func TestOrdinaryRefusalNamesTheHostAsSSHDoes(t *testing.T) {
+	for name, tc := range map[string]struct{ address, g, stderr string }{
+		"other case": {"LocalHost", "hostname LocalHost\n", "bcd@localhost: Permission denied (publickey)."},
+		"HostName":   {"192.0.2.1", "hostname box.example.com\n", "bcd@box.example.com: Permission denied (publickey)."},
+	} {
+		t.Run(name, func(t *testing.T) {
+			fakeSSHScript(t, `echo '`+tc.stderr+`' >&2; exit 255`)
+			cannedSSHG(t, tc.g)
+			job := agentJob{label: "h", resolve: func(context.Context) config.Resolved { return config.Resolved{Address: tc.address} }}
+			if got := askAgents(context.Background(), job, sshAgentQuery("", 5*time.Second), 5*time.Second); got.Error != agentsKeyRefused {
+				t.Errorf("%+v", got)
+			}
+		})
+	}
+	// A watcher look too, in another case.
+	if !(watcherResolved{Resolved: config.Resolved{Address: "LOCALHOST"}}).refused("a@localhost: Permission denied (publickey).") {
+		t.Error("watcher look, other case")
 	}
 }

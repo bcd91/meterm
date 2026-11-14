@@ -85,7 +85,7 @@ func newAgentsCmd() *cobra.Command {
 			"  1  nothing was asked: bad flags, no selection, or an unknown host\n" +
 			"  2  the report is on stdout, and at least one host has an error in it\n" +
 			"With --watch it's 0 when stopped by a signal, 1 if it couldn't start, and 3 when\n" +
-			"stdout was closed (the reader went away).",
+			"stdout was closed or nowhere, or wasn't being read when it stopped.",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if !watch && cmd.Flags().Changed("interval") {
 				return fmt.Errorf("--interval goes with --watch")
@@ -146,7 +146,7 @@ func agentsWatchMain(jobs []agentJob, flags lookFlags, interval time.Duration) e
 	}
 	if why := stdoutUnusable(); why != "" {
 		fmt.Fprintf(os.Stderr, "meterm: %s, so the watch didn't start: it would log in to its hosts for nobody\n", why)
-		finish(agentsWatchOutputGone)
+		os.Exit(agentsWatchOutputGone) // not finish: a watch never pauses for a key
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
 	defer stop()
@@ -160,10 +160,10 @@ func agentsWatchMain(jobs []agentJob, flags lookFlags, interval time.Duration) e
 	switch {
 	case errors.Is(err, errWatchBlocked):
 		fmt.Fprintln(os.Stderr, "meterm: stdout wasn't being read, so the watch stopped without its last lines")
-		finish(agentsWatchOutputGone)
+		os.Exit(agentsWatchOutputGone)
 	case errors.Is(err, errWatchOutput):
 		fmt.Fprintln(os.Stderr, "meterm: stdout was closed, so the watch stopped")
-		finish(agentsWatchOutputGone)
+		os.Exit(agentsWatchOutputGone)
 	}
 	return err
 }

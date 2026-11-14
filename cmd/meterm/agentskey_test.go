@@ -599,6 +599,13 @@ const prohibited = `echo 'channel 0: open failed: administratively prohibited: o
 
 const remoteRefused = `echo 'Error: remote port forwarding failed for listen port 0' >&2; exit 255`
 
+// farSide is a fake ssh's answer to --check's ordinary read of authorized_keys: the
+// file at path, as readAuthorizedKeys prints it.
+func farSide(path string) string {
+	return `for a; do case "$a" in *authorized_keys2*) echo '--meterm-file-- /h/.ssh/authorized_keys'; cat '` + path +
+		`'; echo; echo '--meterm-missing-- /h/.ssh/authorized_keys2'; exit 0;; esac; done; `
+}
+
 // fwd is a fake ssh's answer to -W, and a refusal of -R, ahead of what it does
 // otherwise.
 func fwd(onW string) string { return fwd2(onW, remoteRefused) }
@@ -616,27 +623,41 @@ func TestCheckWatcherKey(t *testing.T) {
 	job := agentJob{label: "devbox", resolve: func(context.Context) config.Resolved {
 		return config.Resolved{Name: "devbox", Address: "192.0.2.1", AgentsIdentity: key}
 	}}
+	opts, err := agents.KeyOptions()
+	if err != nil {
+		t.Fatal(err)
+	}
+	pub := string(mustRead(t, key+".pub"))
+	meterms := opts + " " + pub + " meterm-agents-watcher\n"
+	other := string(mustRead(t, newWatcherKey(t, dir, "other")+".pub")) + "\n"
 	for _, tc := range []struct {
-		name, script string
-		code         int
-		want         string
+		name, far, script string
+		code              int
+		want              string
 	}{
-		{"unlimited", `for a; do last=$a; done; eval "$last"`, keyCheckUnlimited, "NOT LIMITED"},
-		{"forced command", fwd(prohibited) + `echo '[]'`, keyCheckLimited, "refuses port forwarding"},
-		{"forced, no claude", fwd(prohibited) + `exit 127`, keyCheckLimited, "refuses port forwarding"},
-		{"forced, but forwards", fwd(`echo SSH-2.0-OpenSSH_10.0; exec sleep 30`) + `echo '[]'`, keyCheckUnlimited, "port forwarding is allowed"},
-		{"forced, forward tried", fwd(`echo 'channel 0: open failed: connect failed: Connection refused' >&2; echo 'stdio forwarding failed' >&2; exit 255`) + `echo '[]'`, keyCheckUnlimited, "port forwarding is allowed"},
-		{"forced, forward unclear", fwd(`echo 'stdio forwarding failed' >&2; exit 255`) + `echo '[]'`, keyCheckUnsure, "couldn't be told"},
-		{"forced, remote forward allocated", fwd2(prohibited, `echo 'Allocated port 40123 for remote forward to 127.0.0.1:1' >&2; exec sleep 30`) + `echo '[]'`, keyCheckUnlimited, "remote (-R)"},
-		{"forced, remote forward unclear", fwd2(prohibited, `exit 255`) + `echo '[]'`, keyCheckUnsure, "couldn't be told"},
-		{"a shell as the forced command", fwd(prohibited) + `exec sh`, keyCheckUnlimited, "NOT LIMITED"},
-		{"something else, not a shell", fwd(prohibited) + `echo hello`, keyCheckUnsure, "not what meterm's forced command gives"},
-		{"claude failed", fwd(prohibited) + `exit 1`, keyCheckLimited, "refuses port forwarding"},
-		{"refused", `echo 'agent@192.0.2.1: Permission denied (publickey).' >&2; exit 255`, keyCheckUnsure, "refused the watcher key"},
-		{"down", `echo 'ssh: connect to host 192.0.2.1 port 22: Connection refused' >&2; exit 255`, keyCheckUnsure, "couldn't log in"},
+		{"unlimited", meterms, `for a; do last=$a; done; eval "$last"`, keyCheckUnlimited, "NOT LIMITED"},
+		{"meterm's line, nothing through", other + meterms, fwd(prohibited) + `echo '[]'`, keyCheckLimited, "exactly meterm's line"},
+		{"meterm's line, no claude", meterms, fwd(prohibited) + `exit 127`, keyCheckLimited, "exactly meterm's line"},
+		{"forwards", meterms, fwd(`echo SSH-2.0-OpenSSH_10.0; exec sleep 30`) + `echo '[]'`, keyCheckUnlimited, "port forwarding is allowed"},
+		{"forward tried", meterms, fwd(`echo 'channel 0: open failed: connect failed: Connection refused' >&2; echo 'stdio forwarding failed' >&2; exit 255`) + `echo '[]'`, keyCheckUnlimited, "port forwarding is allowed"},
+		{"forward unclear", meterms, fwd(`echo 'stdio forwarding failed' >&2; exit 255`) + `echo '[]'`, keyCheckUnsure, "couldn't be told"},
+		{"remote forward allocated", meterms, fwd2(prohibited, `echo 'Allocated port 40123 for remote forward to 127.0.0.1:1' >&2; exec sleep 30`) + `echo '[]'`, keyCheckUnlimited, "remote (-R)"},
+		{"remote forward unclear", meterms, fwd2(prohibited, `exit 255`) + `echo '[]'`, keyCheckUnsure, "couldn't be told"},
+		{"a shell as the forced command", meterms, fwd(prohibited) + `exec sh`, keyCheckUnlimited, "NOT LIMITED"},
+		{"python: exit 1, nothing out", `restrict,command="python3" ` + pub + "\n", fwd(prohibited) + `exit 1`, keyCheckUnlimited, "a different command"},
+		{"forwarding let back in", `restrict,port-forwarding,permitopen="127.0.0.1:5432",command="x" ` + pub + "\n", fwd(prohibited) + `echo '[]'`, keyCheckUnlimited, "has permitopen"},
+		{"meterm's line and another", meterms + "no-pty " + pub + "\n", fwd(prohibited) + `echo '[]'`, keyCheckUnlimited, "lacks"},
+		{"meterm's line twice", meterms + meterms, fwd(prohibited) + `echo '[]'`, keyCheckUnsure, "more than once"},
+		{"not in those files", other, fwd(prohibited) + `echo '[]'`, keyCheckUnsure, "AuthorizedKeysCommand"},
+		{"refused", meterms, `echo 'agent@192.0.2.1: Permission denied (publickey).' >&2; exit 255`, keyCheckUnsure, "refused the watcher key"},
+		{"down", meterms, `echo 'ssh: connect to host 192.0.2.1 port 22: Connection refused' >&2; exit 255`, keyCheckUnsure, "couldn't log in"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			argvFile := fakeSSHScript(t, tc.script)
+			far := filepath.Join(t.TempDir(), "authorized_keys")
+			if err := os.WriteFile(far, []byte(tc.far), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			argvFile := fakeSSHScript(t, farSide(far)+tc.script)
 			cannedSSHG(t, "user agent\nhostname 192.0.2.1\n")
 			msg, code := checkWatcherKey(context.Background(), job, 5*time.Second)
 			if code != tc.code || !strings.Contains(msg, tc.want) {
@@ -654,6 +675,43 @@ func TestCheckWatcherKey(t *testing.T) {
 			}
 		})
 	}
+	// The ordinary login fails, or a file can't be read: can't tell.
+	farFile := filepath.Join(t.TempDir(), "meterms")
+	if err := os.WriteFile(farFile, []byte(meterms), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for name, script := range map[string]string{
+		"ordinary login fails": `for a; do case "$a" in *authorized_keys2*) echo 'bcd@192.0.2.1: Permission denied (publickey).' >&2; exit 255;; esac; done; ` + fwd(prohibited) + `echo '[]'`,
+		"unreadable":           `for a; do case "$a" in *authorized_keys2*) echo '--meterm-unreadable-- /h/.ssh/authorized_keys'; echo '--meterm-missing-- /h/.ssh/authorized_keys2'; exit 0;; esac; done; ` + fwd(prohibited) + `echo '[]'`,
+		"garbled answer":       `for a; do case "$a" in *authorized_keys2*) echo '[]'; exit 0;; esac; done; ` + fwd(prohibited) + `echo '[]'`,
+		// meterm's line, but not the answer that was asked for: no file headers.
+		"no headers": `for a; do case "$a" in *authorized_keys2*) cat '` + farFile + `'; exit 0;; esac; done; ` + fwd(prohibited) + `echo '[]'`,
+		// meterm's line in one file, and the other can't be read.
+		"one file unreadable": `for a; do case "$a" in *authorized_keys2*) echo '--meterm-file-- /h/.ssh/authorized_keys'; cat '` + farFile +
+			`'; echo; echo '--meterm-unreadable-- /h/.ssh/authorized_keys2'; exit 0;; esac; done; ` + fwd(prohibited) + `echo '[]'`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			fakeSSHScript(t, script)
+			cannedSSHG(t, "user agent\nhostname 192.0.2.1\n")
+			if msg, code := checkWatcherKey(context.Background(), job, 5*time.Second); code != keyCheckUnsure {
+				t.Errorf("%d %q", code, msg)
+			}
+		})
+	}
+	// The ordinary read logs in without the watcher key, with the fixed command.
+	far := filepath.Join(t.TempDir(), "ak")
+	if err := os.WriteFile(far, []byte(meterms), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fakeSSHScript(t, `for a; do case "$a" in *authorized_keys2*) printf '%s\n' "$@" >'`+far+`.argv';; esac; done; `+farSide(far)+fwd(prohibited)+`echo '[]'`)
+	cannedSSHG(t, "user agent\nhostname 192.0.2.1\n")
+	checkWatcherKey(context.Background(), job, 5*time.Second)
+	readArgv, _ := os.ReadFile(far + ".argv")
+	argv := strings.Split(strings.TrimSpace(string(readArgv)), "\n")
+	if argv[len(argv)-1] != readAuthorizedKeys || slices.Contains(argv, key) || slices.Contains(argv, "IdentitiesOnly=yes") {
+		t.Errorf("ordinary read argv %q", argv)
+	}
+
 	// Two checks don't send the same word.
 	argvFile := fakeSSHScript(t, `echo '[]'`)
 	cannedSSHG(t, "user agent\n")

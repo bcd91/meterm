@@ -10,6 +10,7 @@ import (
 	"math/rand/v2"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"meterm/internal/agents"
@@ -39,9 +40,19 @@ const (
 	// agentsRefusedMinInterval is the least wait after a refused watcher key that had
 	// got in before.
 	agentsRefusedMinInterval = time.Minute
-	// agentsWatchFlush is how long a stopping watch waits for stdout to take its last
-	// lines.
-	agentsWatchFlush = 2 * time.Second
+	// agentsRefusedStopAfter and agentsRefusedStopSpan: a watcher key that has never
+	// got in during the run is given up on after this many refusals in a row, at least
+	// this far apart from first to last. One refusal can be a passing thing (a home on
+	// NFS, an LDAP hiccup, authorized_keys being rewritten).
+	agentsRefusedStopAfter = 3
+	agentsRefusedStopSpan  = 5 * time.Minute
+)
+
+// A stopping watch gives stdout until it has taken no line for agentsWatchStall, and
+// no more than agentsWatchFlushCap in all, to take its last lines. Variables, for tests.
+var (
+	agentsWatchStall    = 2 * time.Second
+	agentsWatchFlushCap = 10 * time.Second
 )
 
 // errWatchOutput is a write to stdout failing: the reader is gone.
@@ -152,12 +163,13 @@ func runAgentsWatch(ctx context.Context, w io.Writer, jobs []agentJob, query age
 		}()
 	}
 	wg.Wait()
-	return out.close(agents.Stopped{Schema: agents.WatchSchema, Type: agents.LineStopped, At: o.clock.now().UTC()}, agentsWatchFlush)
+	return out.close(agents.Stopped{Schema: agents.WatchSchema, Type: agents.LineStopped, At: o.clock.now().UTC()}, agentsWatchStall, agentsWatchFlushCap)
 }
 
 func watchHost(ctx context.Context, job agentJob, label string, query agentQuery, o watchOptions, margin time.Duration, sem chan struct{}, out *watchWriter) {
 	tr := agents.NewTracker()
 	delay := agents.FirstDelay(o.interval, o.clock.rand())
+	refusedRun, refusedSince := 0, time.Time{} // watcher-key refusals in a row
 	for {
 		if !o.clock.sleep(ctx, delay) {
 			return
@@ -181,10 +193,20 @@ func watchHost(ctx context.Context, job agentJob, label string, query agentQuery
 			// network, so not "unreachable" either.
 			look.Result = agents.ResultError
 		}
-		if h.Error == agentsWatcherRefused && look.LastOKAt == nil {
-			// The key has never got in during this run: it isn't set up there, and asking
-			// again would only add failed logins, enough of which get an address banned
-			// (fail2ban). It takes someone fixing the key.
+		if h.Error == agentsWatcherRefused {
+			if refusedRun == 0 {
+				refusedSince = at
+			}
+			refusedRun++
+		} else {
+			refusedRun = 0
+		}
+		if h.Error == agentsWatcherRefused && look.LastOKAt == nil &&
+			refusedRun >= agentsRefusedStopAfter && at.Sub(refusedSince) >= agentsRefusedStopSpan {
+			// The key has never got in during this run, and has been refused again and
+			// again for minutes: it isn't set up there, and asking again would only add
+			// failed logins, enough of which get an address banned (fail2ban). It takes
+			// someone fixing the key.
 			look.StoppedAsking = true
 			for _, c := range changes {
 				out.write(c)
@@ -198,7 +220,7 @@ func watchHost(ctx context.Context, job agentJob, label string, query agentQuery
 		}
 		base := o.interval
 		if h.Error == agentsWatcherRefused || h.Error == agentsKeyRefused {
-			// A watcher key that got in before, or an ordinary key: this may pass (a
+			// A refused key, watcher or ordinary, that isn't given up on: this may pass (a
 			// host restarting, a file being edited), and it's asked again; but no faster
 			// than every minute, doubling, so a refusing host sees at most 4 tries in
 			// any 10 minutes (see the doc).
@@ -267,6 +289,7 @@ type watchWriter struct {
 	stop    <-chan struct{}
 	lines   chan []byte
 	done    chan struct{}
+	taken   atomic.Int64 // when stdout last took a line, Unix nanoseconds
 }
 
 func newWatchWriter(ctx context.Context, w io.Writer, format string, cancel context.CancelFunc) *watchWriter {
@@ -281,6 +304,7 @@ func newWatchWriter(ctx context.Context, w io.Writer, format string, cancel cont
 			if _, err := o.w.Write(b); err != nil {
 				o.fail(err)
 			}
+			o.taken.Store(time.Now().UnixNano())
 		}
 	}()
 	return o
@@ -343,28 +367,44 @@ func (o *watchWriter) write(v any) {
 // errWatchBlocked is stdout not taking the last lines within the grace a stop allows.
 var errWatchBlocked = fmt.Errorf("%w: stdout isn't being read", errWatchOutput)
 
-// close writes the last line, and waits up to grace for everything to be written.
+// close writes the last line, and waits for everything to be written: as long as
+// stdout keeps taking lines, up to a stall of stall with none taken, and cap in all.
 // Called once, after every other write.
-func (o *watchWriter) close(last any, grace time.Duration) error {
-	t := time.NewTimer(grace)
-	defer t.Stop()
+func (o *watchWriter) close(last any, stall, capAll time.Duration) error {
+	start := time.Now()
+	o.taken.Store(start.UnixNano())
+	stuck := func() bool {
+		return time.Since(time.Unix(0, o.taken.Load())) > stall || time.Since(start) > capAll
+	}
+	tick := time.NewTicker(50 * time.Millisecond)
+	defer tick.Stop()
 	if b := o.line(last); len(b) > 0 {
-		select {
-		case o.lines <- b:
-		case <-t.C:
-			return errWatchBlocked
+	send:
+		for {
+			select {
+			case o.lines <- b:
+				break send
+			case <-tick.C:
+				if stuck() {
+					return errWatchBlocked
+				}
+			}
 		}
 	}
 	close(o.lines)
-	select {
-	case <-o.done:
-	case <-t.C:
-		return errWatchBlocked
+	for {
+		select {
+		case <-o.done:
+			if err := o.error(); err != nil {
+				return fmt.Errorf("%w: %v", errWatchOutput, err)
+			}
+			return nil
+		case <-tick.C:
+			if stuck() {
+				return errWatchBlocked
+			}
+		}
 	}
-	if err := o.error(); err != nil {
-		return fmt.Errorf("%w: %v", errWatchOutput, err)
-	}
-	return nil
 }
 
 // text is the readable form: every change, and a host's line only when what it says
@@ -406,6 +446,9 @@ func (o *watchWriter) text(v any) string {
 				s += "; last answer " + clock(*l.LastOKAt)
 			}
 		}
+		if l.StoppedAsking {
+			s += "; not asking it again until the watch is started again"
+		}
 		if o.last[l.Host] == s {
 			return ""
 		}
@@ -415,10 +458,7 @@ func (o *watchWriter) text(v any) string {
 			when = *l.LookedAt
 		}
 		line := fmt.Sprintf("%s  %s  %s", clock(when), l.Host, s)
-		switch {
-		case l.StoppedAsking:
-			line += "; not asking it again until the watch is started again"
-		case l.Result != agents.ResultOK && l.NextLookAt != nil:
+		if l.Result != agents.ResultOK && l.NextLookAt != nil && !l.StoppedAsking {
 			line += "; next look " + clock(*l.NextLookAt)
 		}
 		return line + "\n"

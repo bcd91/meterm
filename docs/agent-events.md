@@ -33,7 +33,8 @@ stays 1: it goes up when a field changes meaning, and new fields don't need it t
 | `idle` | It has nothing to do, and said so. | Nothing. |
 | `unknown` | Nothing here can say. | Show it as unknown. |
 
-`unknown` is never `idle`. An agent saying a word nobody has seen before could be stuck on
+`unknown` is never `idle`. In `meterm agents --watch`, a wait that was raised stays raised
+while its session reads as `unknown`. An agent saying a word nobody has seen before could be stuck on
 something. Treat it as "can't say", as you would a host that can't be reached.
 
 ## How Claude Code's words map

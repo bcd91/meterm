@@ -31,6 +31,7 @@ type localSSHD struct {
 	userConfig    string
 	dir, port, me string
 	authorized    string
+	elsewhere     string
 	watch, main   string // private keys
 }
 
@@ -62,7 +63,13 @@ func startLocalSSHD(t *testing.T, extraConfig ...string) *localSSHD {
 	dir := t.TempDir()
 	// PerSourcePenalties off: the test's own failed logins on purpose would otherwise
 	// have sshd turn 127.0.0.1 away for a while (OpenSSH 9.8 and later).
-	s := &localSSHD{dir: dir, me: me.Username, authorized: filepath.Join(dir, "authorized_keys")}
+	// authorized_keys where an ordinary login finds it, as --check reads it: under the
+	// session's HOME, the test's. elsewhere is another AuthorizedKeysFile, which it can't.
+	s := &localSSHD{dir: dir, me: me.Username, authorized: filepath.Join(dir, "home", ".ssh", "authorized_keys"),
+		elsewhere: filepath.Join(dir, "elsewhere_keys")}
+	if err := os.MkdirAll(filepath.Dir(s.authorized), 0o700); err != nil {
+		t.Fatal(err)
+	}
 	keygen := func(name string) string {
 		p := filepath.Join(dir, name)
 		if out, err := exec.Command("ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", name, "-f", p).CombinedOutput(); err != nil {
@@ -93,7 +100,7 @@ func startLocalSSHD(t *testing.T, extraConfig ...string) *localSSHD {
 	if err := os.WriteFile(conf, []byte(fmt.Sprintf(`Port %s
 ListenAddress 127.0.0.1
 HostKey %s
-AuthorizedKeysFile %s
+AuthorizedKeysFile %s %s
 PidFile %s
 UsePAM no
 StrictModes no
@@ -104,7 +111,7 @@ AllowUsers %s
 SetEnv HOME=%s PATH=/usr/bin:/bin
 LogLevel VERBOSE
 PerSourcePenalties no
-%s`, s.port, hostKey, s.authorized, filepath.Join(dir, "sshd.pid"), s.me, home, strings.Join(append(extraConfig, ""), "\n"))), 0o600); err != nil {
+%s`, s.port, hostKey, s.authorized, s.elsewhere, filepath.Join(dir, "sshd.pid"), s.me, home, strings.Join(append(extraConfig, ""), "\n"))), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	s.setAuthorized(t)
@@ -177,10 +184,18 @@ func (s *localSSHD) setAuthorized(t *testing.T, entries ...string) {
 			b.Write(mustRead(t, s.watch+".pub"))
 		case "main":
 			b.Write(mustRead(t, s.main+".pub"))
+		default:
+			if o, ok := strings.CutPrefix(e, "opts:"); ok { // these options, the watcher key
+				b.WriteString(o + " ")
+				b.Write(mustRead(t, s.watch+".pub"))
+			}
 		}
 		b.WriteString("\n")
 	}
 	if err := os.WriteFile(s.authorized, []byte(b.String()), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(s.elsewhere, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -235,12 +250,40 @@ func TestLocalSSHDWatcherKey(t *testing.T) {
 	}
 	// The line as printed: limited, forwarding refused.
 	s.setAuthorized(t, "watch-limited", "main")
-	if msg, code := checkWatcherKey(ctx, s.job(), 10*time.Second); code != keyCheckLimited || !strings.Contains(msg, "refuses port forwarding both ways") {
+	if msg, code := checkWatcherKey(ctx, s.job(), 10*time.Second); code != keyCheckLimited || !strings.Contains(msg, "exactly meterm's line") {
 		t.Errorf("printed line: %d %s", code, msg)
 	}
-	// After it, the limited line wins.
+
+	// What no probe can see: forced commands that take stdin and say nothing, wrappers
+	// that run what's sent and then answer as meterm's would, and forwarding let back
+	// in only to other ports. The line on the host says what they are.
+	esc := strings.ReplaceAll(agents.RemoteCommand, `"`, `\"`)
+	for name, o := range map[string]string{
+		"python":          `restrict,command="python3"`,
+		"cat to a file":   `restrict,command="sh -c 'cat > ` + filepath.Join(s.dir, "taken") + `; exit 1'"`,
+		"a shell, quiet":  `restrict,command="sh -c 'sh >/dev/null 2>&1; echo []'"`,
+		"eval, then ours": `restrict,command="eval \"$SSH_ORIGINAL_COMMAND\" >/dev/null; ` + esc + `"`,
+		"other ports":     `restrict,port-forwarding,permitlisten="127.0.0.1:18080",permitopen="127.0.0.1:5432",command="` + esc + `"`,
+	} {
+		s.setAuthorized(t, "opts:"+o, "main")
+		if msg, code := checkWatcherKey(ctx, s.job(), 10*time.Second); code != keyCheckUnlimited || !strings.Contains(msg, "options differ") {
+			t.Errorf("%s: %d %s", name, code, msg)
+		}
+	}
+	// meterm's line, but in a file sshd reads that an ordinary login doesn't look in:
+	// can't tell.
+	s.setAuthorized(t, "main")
+	opts, _ := agents.KeyOptions()
+	if err := os.WriteFile(s.elsewhere, []byte(opts+" "+string(mustRead(t, s.watch+".pub"))+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if msg, code := checkWatcherKey(ctx, s.job(), 10*time.Second); code != keyCheckUnsure || !strings.Contains(msg, "AuthorizedKeysFile") {
+		t.Errorf("elsewhere: %d %s", code, msg)
+	}
+	// After it, sshd uses the limited line; but another line for the key is there, and
+	// any change to the file can bring it first: not limited.
 	s.setAuthorized(t, "watch-limited", "watch", "main")
-	if msg, code := checkWatcherKey(ctx, s.job(), 10*time.Second); code != keyCheckLimited {
+	if msg, code := checkWatcherKey(ctx, s.job(), 10*time.Second); code != keyCheckUnlimited || !strings.Contains(msg, "options differ") {
 		t.Errorf("plain line second: %d %s", code, msg)
 	}
 
@@ -279,22 +322,24 @@ func TestLocalSSHDWatcherKey(t *testing.T) {
 		t.Errorf("ordinary: %+v", got)
 	}
 
-	// The watch: one try, then it stops asking.
+	// The watch, on a clock that moves only when it sleeps: real refused logins at 0, 1,
+	// 3 and 7 minutes of that clock, then it stops asking.
 	tries := 0
 	q := sshAgentQuery("", 10*time.Second)
 	counted := func(ctx context.Context, r config.Resolved) ([]byte, string, bool, error) {
 		tries++
 		return q(ctx, r)
 	}
-	wctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	wctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
+	fc := &fakeClock{t: time.Date(2026, 11, 14, 8, 0, 0, 0, time.UTC), max: 1 << 30, cancel: func() {}}
 	var buf bytes.Buffer
-	if err := runAgentsWatch(wctx, &buf, []agentJob{s.job()}, counted, watchOptions{interval: 50 * time.Millisecond,
-		timeout: 5 * time.Second, parallel: 1, format: "json", clock: realWatchClock}); err != nil {
+	if err := runAgentsWatch(wctx, &buf, []agentJob{s.job()}, counted, watchOptions{interval: 15 * time.Second,
+		timeout: 5 * time.Second, parallel: 1, format: "json", clock: fc.clock()}); err != nil {
 		t.Fatal(err)
 	}
 	looks := ofType(watchLines(t, buf.String()), "look")
-	if tries != 1 || len(looks) != 1 || looks[0]["stopped_asking"] != true {
+	if tries != 4 || len(looks) != 4 || looks[3]["stopped_asking"] != true || looks[2]["stopped_asking"] != nil {
 		t.Errorf("tries %d, looks %v", tries, looks)
 	}
 
