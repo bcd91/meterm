@@ -2,7 +2,90 @@
 
 What changed between releases that you'd notice in use. Newest first.
 
-## Unreleased (after v0.23.1)
+## v0.25.0
+
+### Watching agents
+
+- `meterm agents --watch` keeps looking at the hosts you choose, each about every
+  `--interval` (60s by default, 15s at least, plus up to a tenth at random so hosts aren't
+  logged in to at once), and stops on SIGINT, SIGTERM or SIGHUP with exit 0, leaving nothing
+  behind. Each look is a fresh login, as with `agents`: no connection is held or shared. The
+  same selection rules hold: named, `--tag` or `--group`, and production only when named.
+- With `--format json` it prints one line per host per look (`type: look`: `result` `ok`,
+  `unreachable`, `error`, `refused` or `opted_out`; `sessions` null unless `ok`; `last_ok_at`,
+  `age_s`, `failing_since`, `next_look_at`, `stale_after`, and `looks`/`failures` counted in
+  this run), and a `type: change` line when a session starts or stops waiting
+  (`needs_input_started`, `needs_input_ended`). Versioned with `schema: 1`; the contract is
+  [docs/agents-watch.md](docs/agents-watch.md). Without it, readable lines when something
+  changes.
+- A host that doesn't answer is asked half as often after each failure in a row from the
+  second on, down to every 10 minutes, and as often as before once it answers. Its last answer stays in the stream,
+  marked with its age; it's never shown as having nothing running.
+- A session with no process that says it's waiting is raised only when two answers from the host in a row (a look that fails in between doesn't count) say
+  so: that's what a background session's row says for a few seconds after its worker died.
+- `agents_watch: false` on a host or group keeps `--watch` away from it; `agents HOST` still asks.
+- Looks aren't in the activity log, as before; each is an sshd login on the host, not in wtmp.
+- `stale_after` allows for the wait behind `-j` when more hosts are watched than that.
+- A watch started with stdout closed, on `/dev/null` or read-only refuses to start (exit 3).
+- A host that refuses the key (the host, not a jump host) is an `error` and is asked from every
+  minute up, doubling to 10, whatever `--interval` is; `-q` in its `extra_args` is left out of
+  looks, as it hid the refusal.
+- A reader that holds stdout open without reading can't keep a signal from ending the watch:
+  it exits 3 within about 2 seconds, without the last lines.
+- A watcher key that never got in is given up on (`stopped_asking`) only after 3 refusals in a
+  row over at least 5 minutes, not after one.
+- A wait whose session then reads as `unknown` stays raised; it isn't reported as answered.
+- On a stop the watch waits for stdout as long as it keeps taking lines (up to 10 seconds, or
+  2 with none taken), and never pauses for Enter when started from the picker.
+- The `stopped` line counts the lines it couldn't write on the way out (`dropped`).
+- A closed stdout stops the watch cleanly, looks in flight included, with exit 3, in the text
+  form too, which writes only on changes: stdout is polled once a second.
+- Restarted, it raises the waits still going on again: it keeps nothing between runs.
+
+### Watcher key
+
+- `agents_identity` on a host, group or `defaults`: a key that `agents` and `agents --watch`
+  log in with, and the only one they offer that host: `IdentitiesOnly=yes`, no key from its
+  `identity_file` or `extra_args`, and none from your ssh config, which isn't read for that
+  host on such a look (jump hops still read it, and use their usual keys). A refused watcher
+  key fails the look, with no second try with another key. Nothing else uses it, and it isn't
+  shared with a team. A host whose `agents_identity` file is missing isn't asked.
+- `meterm agents key HOST` prints the `authorized_keys` line that limits that key to
+  `claude agents --json` (`restrict`, the `no-*` options and a forced command that ignores what
+  the client sends), and the account to put it in. It installs nothing; the limit belongs on
+  the host. It refuses a key an ordinary login could use too: the host's `identity_file`, an
+  `IdentityFile` `ssh -G` names for it (ssh's defaults included, `~`, `${VAR}` and `%` tokens
+  expanded), or one in ssh-agent or in the agent an `IdentityAgent` names.
+  `--check` probes the watcher key (a command, stdin, a forward both ways) and reads its
+  `authorized_keys` line with your ordinary login: exit 0 only if the installed line for the
+  key is exactly meterm's and the probes found no way through; exit 2, loudly, if a probe got
+  through or the line clearly grants more (naming how); exit 1 if it can't tell (a file over
+  256 KiB or changed while read, a line meterm can't read, a line that isn't meterm's but
+  doesn't clearly grant more, keys kept outside the account's home). It doesn't read sshd's own settings, other key files, the
+  account's shell startup files or which `claude` runs; it says so in its answer. The read is
+  in the activity log, as `exec` is. A host named `key` is now `meterm agents -- key`.
+- A watcher look keeps what your ssh config says about where the host is, how to get there and
+  which host keys count (`HostName`, `User`, `Port`, `ProxyJump`, known-hosts files,
+  `HostKeyAlias`, `AddressFamily`, `BindAddress`, `BindInterface`), read with `ssh -G`, but none
+  of its keys.
+- A refused watcher key that hasn't got in during the run stops `--watch` asking that host
+  (`stopped_asking: true`), so it doesn't pile up failed logins there; one that got in before is
+  asked again from every minute up, at most 4 times in 10 minutes.
+- A host reached through a `ProxyCommand` isn't looked at with a watcher key (an `error`),
+  rather than reached directly.
+- A watcher key this machine can't use (a passphrase, a mode others can read) or one with a
+  certificate beside it is refused here, before the host is asked.
+- A meterm before this one ignores both settings, and drops them if it saves `hosts.yaml`.
+
+### Agent events
+
+- `state: stopped` (a session someone stopped, or a cloud one paused) is `idle` now, not
+  `unknown`; a wait raised for it ends.
+
+- A session that's `working` or `needs_input` with no `pid` has `confidence: low`, in
+  `meterm agents` too: it isn't confirmed.
+
+## v0.24.0
 
 ### Keys that moved
 

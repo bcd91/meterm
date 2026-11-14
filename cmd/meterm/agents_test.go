@@ -12,6 +12,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -451,7 +452,23 @@ func TestAgentsDontRunWithHostileExtraArgs(t *testing.T) {
 func TestAgentsLookBoundedAndLeavesNoState(t *testing.T) {
 	dir := t.TempDir()
 	cfgFile := filepath.Join(dir, "hosts.yaml")
-	// Port 1 of a TEST-NET address never answers, so only the context ends the dial.
+	// Routes that never answer: only the context ends a dial. A fake dialer, so that a
+	// network that refuses at once (an ICMP unreachable, a busy machine) can't make the
+	// picker finish early and the test pass or fail for reasons of its own.
+	var mu sync.Mutex
+	var dialed []string
+	old := agentsRouteDial
+	agentsRouteDial = func(ctx context.Context, addr string) error {
+		if _, ok := ctx.Deadline(); !ok {
+			t.Errorf("dial of %s without a deadline", addr)
+		}
+		mu.Lock()
+		dialed = append(dialed, addr)
+		mu.Unlock()
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	t.Cleanup(func() { agentsRouteDial = old })
 	yaml := "version: 1\nhosts:\n- name: a\n  address: 192.0.2.1\n  routes:\n  - {name: r1, address: 192.0.2.2}\n  - {name: r2, address: 192.0.2.3}\n  - {name: r3, address: 192.0.2.4}\n"
 	if err := os.WriteFile(cfgFile, []byte(yaml), 0o600); err != nil {
 		t.Fatal(err)
@@ -477,6 +494,11 @@ func TestAgentsLookBoundedAndLeavesNoState(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(dir, "routes.json")); !os.IsNotExist(err) {
 		t.Errorf("routes.json: %v", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(dialed) == 0 {
+		t.Error("no route was dialled, so the deadline wasn't tested")
 	}
 }
 

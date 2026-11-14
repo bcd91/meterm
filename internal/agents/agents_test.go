@@ -19,7 +19,7 @@ func TestParseRealShape(t *testing.T) {
 		t.Errorf("got %+v", got)
 	}
 	b, _ := json.Marshal(got[1])
-	if string(b) != `{"id":"x","state":"working","waitingFor":"permission","event":"needs_input","agent_kind":"claude-code","source":"claude agents --json","confidence":"high"}` {
+	if string(b) != `{"id":"x","state":"working","waitingFor":"permission","event":"needs_input","agent_kind":"claude-code","source":"claude agents --json","confidence":"low"}` {
 		t.Errorf("unknown fields or empty ones got through: %s", b)
 	}
 }

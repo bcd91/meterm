@@ -30,7 +30,12 @@ func TestClassify(t *testing.T) {
 		// Anything else is unknown, and never idle.
 		{"", "", "", EventUnknown, ConfidenceLow},
 		{"", "paused", "", EventUnknown, ConfidenceLow},
-		{"stopped", "idle", "", EventUnknown, ConfidenceLow},
+		// stopped is a session someone stopped (or a cloud one paused, or out of
+		// contact): over, with nothing running to wait on. Idle, not unknown.
+		{"stopped", "idle", "", EventIdle, ConfidenceHigh},
+		{"stopped", "", "", EventIdle, ConfidenceHigh},
+		{"stopped", "busy", "", EventIdle, ConfidenceLow},
+		{"stopped", "idle", "permission prompt", EventIdle, ConfidenceLow},
 		{"weird", "idle", "", EventUnknown, ConfidenceLow},
 		{"done", "weird", "", EventUnknown, ConfidenceLow},
 		{"", "IDLE", "", EventUnknown, ConfidenceLow},
@@ -69,7 +74,7 @@ func TestNeutralFieldsNeverHoldHostText(t *testing.T) {
 }
 
 func TestParseFillsTheNeutralFields(t *testing.T) {
-	got, err := Parse([]byte(`[{"status":"busy"},{}]`))
+	got, err := Parse([]byte(`[{"status":"busy","pid":1},{}]`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -83,5 +88,21 @@ func TestParseFillsTheNeutralFields(t *testing.T) {
 	b, _ := json.Marshal(Agent{Status: "busy"})
 	if !strings.Contains(string(b), `"status":"busy"`) {
 		t.Errorf("%s", b)
+	}
+}
+
+// Busy or waiting with no process isn't confirmed: a dead worker's row reads like
+// that for a few seconds. Finished or idle with no process is just finished or idle.
+func TestParsePidlessIsLowWhereItMatters(t *testing.T) {
+	got, err := Parse([]byte(`[{"state":"blocked"},{"status":"busy"},{"state":"blocked","pid":3},{"state":"done"},{"status":"idle"},{"state":"failed"}]`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var s []string
+	for _, a := range got {
+		s = append(s, a.Event+"/"+a.Confidence)
+	}
+	if want := "needs_input/low working/low needs_input/high done/high idle/high failed/high"; strings.Join(s, " ") != want {
+		t.Errorf("%s, want %s", strings.Join(s, " "), want)
 	}
 }

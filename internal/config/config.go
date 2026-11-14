@@ -54,6 +54,8 @@ type Defaults struct {
 	User         string `yaml:"user,omitempty"`
 	Port         int    `yaml:"port,omitempty"`
 	IdentityFile string `yaml:"identity_file,omitempty"`
+	// AgentsIdentity is the key `meterm agents` logs in with, when set: see Host.
+	AgentsIdentity string `yaml:"agents_identity,omitempty"`
 }
 
 // Group is a named bundle of settings hosts can inherit from, so an entire
@@ -66,6 +68,9 @@ type Group struct {
 	Tags         []string `yaml:"tags,omitempty"`
 	// Env is the environment of the group's hosts, unless a host says its own.
 	Env string `yaml:"env,omitempty"`
+	// AgentsIdentity and AgentsWatch are the group's hosts', unless a host says its own.
+	AgentsIdentity string `yaml:"agents_identity,omitempty"`
+	AgentsWatch    *bool  `yaml:"agents_watch,omitempty"`
 }
 
 // Host is a single saved machine.
@@ -93,6 +98,14 @@ type Host struct {
 	// Team is the ID of the team this host is shared with, or empty for a
 	// personal host. Set by `meterm team` when pulling or sharing.
 	Team string `yaml:"team,omitempty"`
+	// AgentsIdentity is a key `meterm agents` (and --watch) logs in with instead of
+	// IdentityFile: a watcher key, meant to be limited on the host's side by a forced
+	// command (`meterm agents key`). Nothing else uses it. Personal, like IdentityFile:
+	// it isn't shared with a team.
+	AgentsIdentity string `yaml:"agents_identity,omitempty"`
+	// AgentsWatch false keeps `meterm agents --watch` from looking at this host at all,
+	// for a host that mustn't be woken or logged in to every minute. Unset is true.
+	AgentsWatch *bool `yaml:"agents_watch,omitempty"`
 }
 
 // ActivitySettings says what happens to the activity log beyond this machine's file.

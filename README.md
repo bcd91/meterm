@@ -246,6 +246,9 @@ meterm keys revoke --comment bob@laptop take a key away from every host (preview
 
 meterm stats <name>             CPU/memory/disk/network snapshot from a host (Linux + macOS/BSD)
 meterm agents [host...] [--tag t] [--group g] [--format text|json] [--timeout 8s] [-j N]   Claude Code sessions on hosts; read-only, not logged
+meterm agents [host...] --watch [--interval 60s] [--format json]   keep looking; a line per look, and when a session starts or stops waiting
+meterm agents key <name> [--check]   print the authorized_keys line that limits a watcher key
+                                     to that one look; --check: is that line what's installed?
 
 meterm logs <name> [path...] [-f] [-n N]        tail log files (no path: list /var/log)
 meterm logs list <name> [dir]                   see what log files actually exist (default dir: /var/log)
@@ -955,11 +958,14 @@ destination, and `-o ProxyCommand`, `-A` or `-M` would make this more than one f
 | 0 | Every host answered. Having no agents is an answer. | the report |
 | 1 | Nothing was asked: bad flags, no selection, an unknown host, or a tag or group that matched nothing | nothing |
 | 2 | At least one host has an `error`, a refused production host included | the report, complete |
+| 3 | `--watch` only: stdout was closed or `/dev/null`, or wasn't being read when the watch stopped (a terminal that closes is a hangup instead: 0) | what got through |
 
 **It isn't in the activity log.** That log is kept for good and shared with the team, so
 nothing can be taken out later, and a status bar asking every 30 seconds would bury
 everything else in it. So `agents` writes no activity entry and no history, and doesn't
-start a team sync. What shows instead is on each host: every look is a login of its own,
+start a team sync. The exception is `agents key --check`: its read of `authorized_keys` is a
+login with your own key that runs a command, so it's recorded as `exec` is, and that starts
+a sync. What shows instead is on each host: every look is a login of its own,
 which sshd logs. Sharing a connection between looks would have hidden those, and let a
 revoked key keep working, so none is shared, on any host. `meterm exec` remains the command
 that's recorded.
@@ -972,6 +978,46 @@ there's one file in a private temp directory, the ssh config behind `-F` that ha
 options (`BatchMode`, strict host keys, no forwarding, no shared connection) to jump hops,
 which get none of a command line's `-o`. It includes your own ssh config after them, so
 `ProxyCommand` or `IdentityFile` there still apply: that file is yours to trust.
+
+### Watching: who's waiting for you
+
+```sh
+meterm agents devbox buildbox --watch --format json   # for a status bar or a notifier
+meterm agents --tag agents --watch                    # readable lines, in a terminal
+```
+
+`--watch` keeps looking, at each host about every `--interval` (60 s, at least 15 s), each look
+a fresh login as above, until it gets SIGINT, SIGTERM or SIGHUP; then it says `stopped` and exits
+0, leaving nothing behind. A seat runs it as its own child. With `--format json` it prints a line
+per host per look, with `stale_after` so a reader can tell an old answer from a current one, and
+a `change` line when a session starts or stops waiting for someone (`needs_input`). A host that
+can't be reached says `unreachable` with `sessions: null`, never an empty list, and is asked less
+and less often, down to every 10 minutes, until it answers. A session that says it's waiting but
+has no process is raised only if two answers from the host in a row (a look that fails in between doesn't count) say so, as that's what a dead worker's row
+looks like for a few seconds. `agents_watch: false` on a host or group keeps `--watch` away from
+it. If stdout is closed, or isn't being read when it stops, it ends anyway, looks in flight
+included, and exits 3. Looks are counted in the stream and nowhere else: each one is an sshd
+login on the host, and isn't in wtmp, so `last` and `meterm logins` don't show them.
+
+A host's `agents_identity` is a key that `agents` and `--watch` use instead of its
+`identity_file`. `meterm agents key HOST` prints the `authorized_keys` line that lets that key run
+only `claude agents --json`, for you to put on the host: the limit has to be there, as anything
+running as you on this machine can read your keys. It installs nothing, and refuses a key you
+also log in with (sshd takes the first line a key matches). After installing the line,
+`meterm agents key HOST --check` probes the key and reads its line in `authorized_keys` with
+your ordinary login: exit 0 only if that line is exactly meterm's and nothing got through, 2 if
+something did or the line clearly grants more than meterm's, 1 if it can't tell (a line
+that isn't meterm's but doesn't clearly grant more included). It doesn't read sshd's own settings,
+other key files or the account's shell startup files, so 0 covers those two files only. A look with a watcher key offers that key and no other,
+none from your ssh config, and isn't made for a host your config reaches through a
+`ProxyCommand`. If the host refuses it the look fails rather than trying another; `--watch`
+stops asking a host the key never got in to, and backs off from a minute on one it did. A
+watcher key needs no passphrase and mode 0600, or it's refused here before the host is asked.
+
+The stream's format, what it costs and what it can't see are in
+[docs/agents-watch.md](docs/agents-watch.md).
+
+### Where it runs
 
 `agents` runs on Linux and macOS, and refuses to run on Windows, where nothing shows those
 options would reach a hop. A Windows server can't answer either: the command needs `sh`, so it
@@ -1062,6 +1108,8 @@ A few things make that reliable:
 - **`meterm agents --format json`** is safe to poll, and has its own exit codes: see
   [Claude Code sessions on your hosts](#claude-code-sessions-on-your-hosts). Each agent also
   has a neutral `event`, documented in [docs/agent-events.md](docs/agent-events.md).
+  `meterm agents --watch --format json` does the polling itself, one JSON line per look:
+  [docs/agents-watch.md](docs/agents-watch.md).
 - **For insights, read the export, not meterm's files:** `meterm activity --format json -n 0`,
   `meterm team log --format json --no-fetch` and `meterm facts --format json`, all described
   in [docs/export.md](docs/export.md).

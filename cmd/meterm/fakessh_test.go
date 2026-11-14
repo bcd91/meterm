@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
@@ -11,6 +12,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"golang.org/x/crypto/ssh"
 
 	"meterm/internal/testenv"
 )
@@ -23,6 +26,10 @@ const fakeSSHEnv = "METERM_TEST_FAKE_SSH"
 // runTunnelUpEnv makes the test binary act as `meterm tunnel up`, with the real exit.
 const runTunnelUpEnv = "METERM_TEST_TUNNEL_UP"
 
+// runAgentsWatchEnv makes the test binary act as `meterm agents` with these
+// arguments, split at \x1f, for a test that signals it as a seat would.
+const runAgentsWatchEnv = "METERM_TEST_AGENTS_WATCH"
+
 // fakeSSHExitEnv makes the test binary act as an ssh that logs its
 // arguments to $METERM_TEST_SSH_LOG and exits with the code this names.
 const fakeSSHExitEnv = "METERM_TEST_SSH_EXIT"
@@ -33,6 +40,26 @@ func TestMain(m *testing.M) {
 		c.SetArgs(strings.Split(args, "\x1f"))
 		c.SilenceUsage, c.SilenceErrors = true, true
 		if err := c.Execute(); err != nil {
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
+	// Helper processes that end on their own terms (TestHelperExit, TestHelperHang)
+	// do it here, before the setup below makes temp directories that an os.Exit or a
+	// kill would leave behind.
+	if s := os.Getenv("METERM_TEST_EXIT"); s != "" {
+		os.Exit(len(s))
+	}
+	if os.Getenv("METERM_TEST_HANG") != "" {
+		time.Sleep(time.Minute)
+		os.Exit(0)
+	}
+	if args := os.Getenv(runAgentsWatchEnv); args != "" {
+		c := newAgentsCmd()
+		c.SetArgs(strings.Split(args, "\x1f"))
+		c.SilenceUsage, c.SilenceErrors = true, true
+		if err := c.Execute(); err != nil {
+			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
 		}
 		os.Exit(0)
@@ -74,6 +101,9 @@ func TestMain(m *testing.M) {
 	os.Exit(code)
 }
 
+// realAgentKeys is agentKeys as meterm has it, for a test with an agent of its own.
+var realAgentKeys func(context.Context, string) ([]ssh.PublicKey, string)
+
 // realSSHDir is where ssh was found before guardSSH put its fake first.
 var realSSHDir string
 
@@ -102,6 +132,11 @@ func guardSSH(m *testing.M) int {
 		return 1
 	}
 	defer os.RemoveAll(state)
+	// A watcher look reads the person's ssh config and asks ssh-agent: in tests, neither
+	// is the real one unless a test says what they are.
+	agentSSHIncludes = []string{filepath.Join(state, "no-ssh-config")}
+	realAgentKeys = agentKeys
+	agentKeys = func(context.Context, string) ([]ssh.PublicKey, string) { return nil, "" }
 	os.Setenv("METERM_ACTIVITY_DIR", filepath.Join(state, "activity"))
 	os.Setenv("METERM_HISTORY", filepath.Join(state, "history.json"))
 	if runtime.GOOS == "windows" {

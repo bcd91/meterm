@@ -1,0 +1,1 @@
+[{ "pid": 4101, "id": "a1b2c3d4", "cwd": "/home/dev/src/api", "kind": "background", "startedAt": 1794590755329, "sessionId": "a1b2c3d4-0000-4000-8000-000000000001", "name": "fix-login", "status": "waiting", "waitingFor": "permission prompt", "state": "blocked" }]

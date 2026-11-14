@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"golang.org/x/term"
 
 	"meterm/internal/agents"
 	"meterm/internal/config"
@@ -54,8 +55,13 @@ const (
 
 func newAgentsCmd() *cobra.Command {
 	var flags lookFlags
+	var watch bool
+	var interval time.Duration
 	cmd := &cobra.Command{
-		Use:   "agents [host...] [--tag t] [--group g]",
+		Use: "agents [host...] [--tag t] [--group g] [--watch [--interval 60s]]",
+		// Said, so that cobra takes a host name for a host and not for an unknown
+		// subcommand. Only `key` is one; a host called key is `agents -- key`.
+		Args:  cobra.ArbitraryArgs,
 		Short: "List the Claude Code sessions running on hosts (read-only, not logged)",
 		Long: "Asks each selected host for `claude agents --json`, and nothing else: the\n" +
 			"command is fixed and read-only. Hosts have to be chosen, by name, --tag or\n" +
@@ -68,14 +74,37 @@ func newAgentsCmd() *cobra.Command {
 			"--format json prints {\"schema\":1,\"hosts\":[{\"host\",\"reachable\",\"error\",\"agents\"}]}.\n" +
 			"reachable says the command ran. agents is null when error is set: a host that\n" +
 			"couldn't say isn't a host with no agents.\n\n" +
+			"--watch keeps looking, at each host about every --interval (60s; 15s at least),\n" +
+			"each look a fresh login, until Ctrl-C or SIGTERM. A host that doesn't answer is\n" +
+			"asked less and less often, down to every 10 minutes, and a host with\n" +
+			"agents_watch: false isn't asked at all. With --format json it prints one line per\n" +
+			"host per look, and one when a session starts or stops waiting for someone: see\n" +
+			"docs/agents-watch.md. A host's agents_identity, if set, is the key every look\n" +
+			"uses: `meterm agents key HOST` prints the line that limits it on the host.\n\n" +
 			"Exit codes:\n" +
 			"  0  every host answered (having no agents is an answer)\n" +
 			"  1  nothing was asked: bad flags, no selection, or an unknown host\n" +
-			"  2  the report is on stdout, and at least one host has an error in it",
+			"  2  the report is on stdout, and at least one host has an error in it\n" +
+			"With --watch it's 0 when stopped by a signal, 1 if it couldn't start, and 3 when\n" +
+			"stdout was closed or nowhere, or wasn't being read when it stopped.",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if !watch && cmd.Flags().Changed("interval") {
+				return fmt.Errorf("--interval goes with --watch")
+			}
+			if watch {
+				if interval < agentsWatchMinInterval {
+					return fmt.Errorf("--interval must be %s or more: each look is a login on the host", agentsWatchMinInterval)
+				}
+				if flags.timeout >= interval {
+					return fmt.Errorf("--timeout must be shorter than --interval")
+				}
+			}
 			jobs, _, err := flags.jobs("agents", args)
 			if err != nil {
 				return err
+			}
+			if watch {
+				return agentsWatchMain(jobs, flags, interval)
 			}
 			sshConfig, removeSSHConfig, err := writeAgentSSHConfig()
 			if err != nil {
@@ -97,7 +126,72 @@ func newAgentsCmd() *cobra.Command {
 		},
 	}
 	flags.add(cmd)
+	cmd.Flags().BoolVar(&watch, "watch", false, "keep looking, and print a line per host per look (see docs/agents-watch.md)")
+	cmd.Flags().DurationVar(&interval, "interval", agentsWatchDefaultInterval, "with --watch: how often to look at each host")
+	cmd.AddCommand(newAgentsKeyCmd())
 	return cmd
+}
+
+// agentsWatchMain runs --watch until a signal. Each look writes its own ssh config
+// and removes it, so a stop at any moment leaves nothing behind but what a look in
+// flight had, and that look is stopped too.
+func agentsWatchMain(jobs []agentJob, flags lookFlags, interval time.Duration) error {
+	watched := 0
+	for _, j := range jobs {
+		if watchSkip(j) == "" {
+			watched++
+		}
+	}
+	if watched == 0 {
+		return fmt.Errorf("nothing to watch: every host chosen is production that wasn't named, or has agents_watch: false")
+	}
+	// A terminal that goes away is a hangup (SIGHUP, and writes to it failing): the
+	// ordinary end of a watch run in a terminal, and exit 0 as a signal is. Exit 3 is
+	// for a reader that was a program.
+	// stdout once, here: a test may swap os.Stdout around a run.
+	stdout := os.Stdout
+	toTerminal := term.IsTerminal(int(stdout.Fd()))
+	if why := stdoutUnusable(stdout); why != "" {
+		fmt.Fprintf(os.Stderr, "meterm: %s, so the watch didn't start: it would log in to its hosts for nobody\n", why)
+		os.Exit(agentsWatchOutputGone) // not finish: a watch never pauses for a key
+	}
+	ctx, stop := signal.NotifyContext(agentsWatchParent(), os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
+	defer stop()
+	// A reader that goes away is a write error, not SIGPIPE: that would end the process
+	// on the spot, with looks in flight and their ssh configs left behind.
+	signal.Ignore(syscall.SIGPIPE)
+	err := runAgentsWatch(ctx, stdout, jobs, perLookAgentQuery(flags.timeout), watchOptions{
+		interval: interval, timeout: flags.timeout, parallel: flags.parallel, format: flags.format, clock: realWatchClock,
+		grace: agentsWatchGrace, slack: agentsLookSlack, outputGone: func() bool { return stdoutGone(stdout) },
+	})
+	switch {
+	case toTerminal && errors.Is(err, errWatchOutput):
+		return nil
+	case errors.Is(err, errWatchBlocked):
+		fmt.Fprintln(os.Stderr, "meterm: stdout wasn't being read, so the watch stopped without its last lines")
+		os.Exit(agentsWatchOutputGone)
+	case errors.Is(err, errWatchOutput):
+		fmt.Fprintln(os.Stderr, "meterm: stdout was closed, so the watch stopped")
+		os.Exit(agentsWatchOutputGone)
+	}
+	return err
+}
+
+// agentsWatchParent is the context a watch runs under until a signal: a test bounds it,
+// so that a watch that should have refused to start can't run on for the test's whole
+// timeout (and leave its temp directories behind when it's killed).
+var agentsWatchParent = context.Background
+
+// perLookAgentQuery is sshAgentQuery with an ssh config of the look's own.
+func perLookAgentQuery(timeout time.Duration) agentQuery {
+	return func(ctx context.Context, r config.Resolved) ([]byte, string, bool, error) {
+		sshConfig, remove, err := writeAgentSSHConfig()
+		if err != nil {
+			return nil, "", false, err
+		}
+		defer remove()
+		return sshAgentQuery(sshConfig, timeout)(ctx, r)
+	}
 }
 
 // agentsGOOS is the machine `agents` runs on; tests set it.
@@ -122,7 +216,14 @@ type agentJob struct {
 	host    config.Host
 	resolve func(context.Context) config.Resolved
 	refused string
+	// watchOff: agents_watch is false, so --watch leaves it alone. A single
+	// `agents` still asks it: that's someone asking now.
+	watchOff bool
 }
+
+// agentsRouteDial, when a test sets it, is how a look's route picker dials a route,
+// instead of the network.
+var agentsRouteDial func(ctx context.Context, addr string) error
 
 const agentsRefusedProduction = "refused: production host or route; name it to include it"
 
@@ -144,6 +245,9 @@ func selectAgentHosts(cfg *config.Config, names, tags, groups []string) ([]agent
 		}
 	}
 	look := route.NewLook(cfg, filepath.Join(filepath.Dir(cfg.Path()), "routes.json"))
+	if agentsRouteDial != nil {
+		look.Dial = agentsRouteDial
+	}
 	jobs := make([]agentJob, 0, len(hosts))
 	for _, h := range hosts {
 		label := h.Name
@@ -153,6 +257,7 @@ func selectAgentHosts(cfg *config.Config, names, tags, groups []string) ([]agent
 		job := agentJob{label: label, host: h, resolve: func(ctx context.Context) config.Resolved {
 			return cfg.WithRoutePicker(look.Look(ctx)).Resolve(h)
 		}}
+		job.watchOff = cfg.Resolve(h).AgentsWatchOff
 		if cfg.TouchesProduction(h) && !named[h.User+"@"+h.Name] {
 			job.refused = agentsRefusedProduction
 		}
@@ -200,6 +305,9 @@ func askAgents(ctx context.Context, job agentJob, query agentQuery, timeout time
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	r, refused := prepareLook(ctx, job, timeout)
+	if refused == "" {
+		refused = checkAgentsIdentity(r)
+	}
 	if refused != "" {
 		out.Error = refused
 		return out
@@ -216,6 +324,15 @@ func askAgents(ctx context.Context, job agentJob, query agentQuery, timeout time
 		return out
 	case ctx.Err() != nil:
 		out.Error = "stopped before it answered"
+		return out
+	case errors.Is(err, errWatcherKeyRefused):
+		out.Error = agentsWatcherRefused
+		return out
+	case errors.Is(err, errKeyRefused):
+		out.Error = agentsKeyRefused
+		return out
+	case errors.Is(err, errWatcherSettings):
+		out.Error = "not asked: " + watcherSettingsText(err)
 		return out
 	case errors.As(err, &exit):
 		switch exit.ExitCode() {
@@ -331,12 +448,6 @@ func sshFailureText(stderr string) string {
 	return "unreachable: ssh couldn't connect"
 }
 
-// sshAgentQuery runs agents.RemoteCommand over ssh. r.ExtraArgs have passed
-// checkAgentExtraArgs by now.
-func sshAgentQuery(sshConfig string, timeout time.Duration) agentQuery {
-	return sshLookQuery(sshConfig, timeout, agents.RemoteCommand, agents.MaxOutput)
-}
-
 // sshLookQuery runs one fixed command as a look, keeping up to maxOut bytes of it. The
 // command is a constant at every call: nothing from a host or a flag reaches it.
 func sshLookQuery(sshConfig string, timeout time.Duration, command string, maxOut int) agentQuery {
@@ -392,22 +503,59 @@ func agentSSHArgs(r config.Resolved, sshConfig string, timeout time.Duration) []
 		args = append(args, "-o", o)
 	}
 	args = append(args, "-o", "ConnectTimeout="+strconv.Itoa(int(math.Ceil(timeout.Seconds()))), "-o", "ConnectionAttempts=1")
-	args = append(args, r.ExtraArgs...)
+	for _, a := range r.ExtraArgs {
+		// -q would silence the lines a look reads to tell a refused key from a host
+		// that isn't there; as a flag it beats the LogLevel set above.
+		if a == "-q" {
+			continue
+		}
+		args = append(args, a)
+	}
 	return append(args, "-T")
 }
 
 // writeAgentSSHConfig writes the file behind ssh's -F for this run, and returns how to
 // remove it. -J starts an ssh for each hop that gets none of the -o options, but it
 // does get -F, so this is how a hop comes to obey them. The first value of an option
-// wins here too, and the two Includes are what ssh would have read anyway. The path goes
+// wins here too, and the Includes are what ssh would have read anyway. The path goes
 // unquoted into the command ssh builds for a hop, so it has to be a plain one.
-func writeAgentSSHConfig() (string, func(), error) {
+func writeAgentSSHConfig() (string, func(), error) { return writeLookSSHConfig("", nil) }
+
+// agentSSHIncludes are the files a look's config reads after its own options: the ones
+// ssh reads when there's no -F. A test points them elsewhere, as ssh finds ~ through
+// the password database and not $HOME.
+var agentSSHIncludes = []string{"~/.ssh/config", "/etc/ssh/ssh_config"}
+
+// writeLookSSHConfig is writeAgentSSHConfig, except that with exceptHost set, the
+// person's ssh config isn't read for that host, only for the others: the jump hops.
+// For that host it has carried instead, lines already checked (watcherLook). That's
+// how a watcher-key look offers its one key and nothing from ssh_config (IdentityFile
+// adds up, and can't be taken back once read), keeps the rest of what the config
+// says about the host, and lets the hops get in with their usual keys. exceptHost is
+// matched as it's given to ssh.
+func writeLookSSHConfig(exceptHost string, carried []string) (string, func(), error) {
 	var b strings.Builder
 	for _, o := range agentFixedOptions {
 		key, val, _ := strings.Cut(o, "=")
 		fmt.Fprintf(&b, "%s %s\n", key, val)
 	}
-	b.WriteString("Include ~/.ssh/config\nInclude /etc/ssh/ssh_config\n")
+	indent := ""
+	if exceptHost != "" {
+		if !agentPlainHostRE.MatchString(exceptHost) {
+			return "", nil, errors.New("the host's address can't go in a Match line as it is")
+		}
+		if len(carried) > 0 {
+			fmt.Fprintf(&b, "Match originalhost %s\n", exceptHost)
+			for _, l := range carried {
+				fmt.Fprintf(&b, "  %s\n", l)
+			}
+		}
+		fmt.Fprintf(&b, "Match originalhost *,!%s\n", exceptHost)
+		indent = "  "
+	}
+	for _, inc := range agentSSHIncludes {
+		fmt.Fprintf(&b, "%sInclude %s\n", indent, inc)
+	}
 	for _, base := range []string{os.TempDir(), "/tmp"} {
 		if !agentPlainPathRE.MatchString(base) {
 			continue
@@ -426,6 +574,9 @@ func writeAgentSSHConfig() (string, func(), error) {
 	}
 	return "", nil, errors.New("no temp directory with a plain path to work in")
 }
+
+// agentPlainHostRE is an address that's one pattern in a Match line and nothing else.
+var agentPlainHostRE = regexp.MustCompile(`^[A-Za-z0-9._:-]+$`)
 
 var agentPlainPathRE = regexp.MustCompile(`^[A-Za-z0-9._/-]+$`)
 
@@ -548,8 +699,9 @@ func writeAgents(w io.Writer, rep agents.Report, format string) error {
 	for _, h := range rep.Hosts {
 		switch {
 		case h.Error != "":
+			// As the watch says it: unreachable only when ssh didn't get in.
 			word := "error"
-			if !h.Reachable {
+			if lookUnreachable(h.Error) {
 				word = "unreachable"
 			}
 			if h.Error == agentsRefusedProduction {
