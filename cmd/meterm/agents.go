@@ -151,7 +151,7 @@ func agentsWatchMain(jobs []agentJob, flags lookFlags, interval time.Duration) e
 	signal.Ignore(syscall.SIGPIPE)
 	err := runAgentsWatch(ctx, os.Stdout, jobs, perLookAgentQuery(flags.timeout), watchOptions{
 		interval: interval, timeout: flags.timeout, parallel: flags.parallel, format: flags.format, clock: realWatchClock,
-		grace: agentsWatchGrace, slack: agentsLookSlack,
+		grace: agentsWatchGrace, slack: agentsLookSlack, outputGone: stdoutGone,
 	})
 	if errors.Is(err, errWatchOutput) {
 		fmt.Fprintln(os.Stderr, "meterm: stdout was closed, so the watch stopped")

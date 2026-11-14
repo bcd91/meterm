@@ -91,6 +91,9 @@ func TestMain(m *testing.M) {
 	os.Exit(code)
 }
 
+// realAgentKeys is agentKeys as meterm has it, for a test with an agent of its own.
+var realAgentKeys func(context.Context, string) []ssh.PublicKey
+
 // realSSHDir is where ssh was found before guardSSH put its fake first.
 var realSSHDir string
 
@@ -122,7 +125,8 @@ func guardSSH(m *testing.M) int {
 	// A watcher look reads the person's ssh config and asks ssh-agent: in tests, neither
 	// is the real one unless a test says what they are.
 	agentSSHIncludes = []string{filepath.Join(state, "no-ssh-config")}
-	agentKeys = func(context.Context) []ssh.PublicKey { return nil }
+	realAgentKeys = agentKeys
+	agentKeys = func(context.Context, string) []ssh.PublicKey { return nil }
 	os.Setenv("METERM_ACTIVITY_DIR", filepath.Join(state, "activity"))
 	os.Setenv("METERM_HISTORY", filepath.Join(state, "history.json"))
 	if runtime.GOOS == "windows" {

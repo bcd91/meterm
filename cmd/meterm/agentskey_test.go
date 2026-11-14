@@ -22,11 +22,17 @@ import (
 	"meterm/internal/sshrun"
 )
 
-// newWatcherKey writes a made-up ed25519 key pair's public half, and an empty
-// stand-in for the private one, and returns the private path.
+// newWatcherKey writes a made-up ed25519 key pair, the private half unencrypted with
+// mode 0600 as a watcher key has to be, and returns the private path.
 func newWatcherKey(t *testing.T, dir, name string) string {
 	t.Helper()
-	pub, _, err := ed25519.GenerateKey(rand.Reader)
+	return writeKeyPair(t, dir, name, "", 0o600)
+}
+
+// writeKeyPair is newWatcherKey with a passphrase and a mode of its own.
+func writeKeyPair(t *testing.T, dir, name, passphrase string, mode os.FileMode) string {
+	t.Helper()
+	pub, priv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -34,8 +40,20 @@ func newWatcherKey(t *testing.T, dir, name string) string {
 	if err != nil {
 		t.Fatal(err)
 	}
+	var block *pem.Block
+	if passphrase == "" {
+		block, err = ssh.MarshalPrivateKey(priv, name)
+	} else {
+		block, err = ssh.MarshalPrivateKeyWithPassphrase(priv, name, []byte(passphrase))
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
 	p := filepath.Join(dir, name)
-	if err := os.WriteFile(p, []byte("not a real private key\n"), 0o600); err != nil {
+	if err := os.WriteFile(p, pem.EncodeToMemory(block), mode); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(p, mode); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(p+".pub", bytes.TrimSpace(ssh.MarshalAuthorizedKey(pk)), 0o600); err != nil {
@@ -82,7 +100,7 @@ func withAgentKeys(t *testing.T, keys ...string) {
 		}
 		pks = append(pks, pk)
 	}
-	agentKeys = func(context.Context) []ssh.PublicKey { return pks }
+	agentKeys = func(context.Context, string) []ssh.PublicKey { return pks }
 	t.Cleanup(func() { agentKeys = old })
 }
 
@@ -248,6 +266,9 @@ func TestWatcherKeyLineRefuses(t *testing.T) {
 	pub, _ := ssh.NewPublicKey(priv.Public())
 	bareWatcher := filepath.Join(dir, "barewatch")
 	if err := os.WriteFile(bareWatcher+".pub", ssh.MarshalAuthorizedKey(pub), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(bareWatcher, pem.EncodeToMemory(pemBlock), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	cfgKey := filepath.Join(dir, "cfgkey")
@@ -492,12 +513,14 @@ func TestWatcherLookKeepsTheRestOfTheConfig(t *testing.T) {
 	kh := filepath.Join(dir, "known_hosts")
 	useSSHConfig(t, "Host 192.0.2.1\n  HostName 198.51.100.5\n  User cfguser\n  Port 2200\n  ProxyJump jumpy\n"+
 		"  UserKnownHostsFile "+kh+"\n  GlobalKnownHostsFile "+kh+"2\n  HostKeyAlias alias1\n  IdentityFile /nowhere/cfg\n"+
+		"  AddressFamily inet\n  BindAddress 192.0.2.200\n  BindInterface lo\n"+
 		"Host *\n  IdentityFile /nowhere/all\n")
 	got := watcherG(t, config.Resolved{Address: "192.0.2.1", AgentsIdentity: key})
 	for k, want := range map[string]string{
 		"hostname": "198.51.100.5", "user": "cfguser", "port": "2200", "proxyjump": "jumpy",
 		"userknownhostsfile": kh, "globalknownhostsfile": kh + "2", "hostkeyalias": "alias1",
 		"stricthostkeychecking": "true", "identitiesonly": "yes",
+		"addressfamily": "inet", "bindaddress": "192.0.2.200", "bindinterface": "lo",
 	} {
 		if got.one(k) != want {
 			t.Errorf("%s = %q, want %q", k, got.one(k), want)

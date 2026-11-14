@@ -45,6 +45,17 @@ exec sleep 30`)
 	if _, err := stdout.Read(first); err != nil { // the start line has begun
 		t.Fatal(err)
 	}
+	// Both slow looks under way, then the reader goes.
+	for i := 0; ; i++ {
+		b, _ := os.ReadFile(pids)
+		if len(strings.Fields(string(b))) == 2 {
+			break
+		}
+		if i > 100 {
+			t.Fatal("the slow looks didn't start")
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
 	stdout.Close()
 	closed := time.Now()
 	done := make(chan error, 1)
@@ -82,5 +93,68 @@ exec sleep 30`)
 	}
 	if left, _ := os.ReadDir(tmp); len(left) != 0 {
 		t.Errorf("left in the temp directory: %v", left)
+	}
+}
+
+// As `meterm agents --watch | head -1` would: the reader takes one line and goes. In
+// text form nothing more would be written while nothing changes, and the watch still
+// stops within a few seconds, exit 3, without logging in again and again.
+func TestAgentsWatchProcessHeadOne(t *testing.T) {
+	for _, format := range []string{"text", "json"} {
+		t.Run(format, func(t *testing.T) {
+			dir := t.TempDir()
+			runs := filepath.Join(dir, "runs")
+			fakeSSHScript(t, `echo x >>'`+runs+`'; echo '[]'`)
+			cfgFile := filepath.Join(dir, "hosts.yaml")
+			if err := os.WriteFile(cfgFile, []byte("version: 1\nhosts:\n- {name: a, address: 192.0.2.1}\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			cmd := exec.Command(os.Args[0])
+			cmd.Env = append(os.Environ(), runAgentsWatchEnv+"=a\x1f--watch\x1f--interval\x1f15s\x1f--format\x1f"+format,
+				"METERM_CONFIG="+cfgFile, "TMPDIR="+t.TempDir())
+			stdout, err := cmd.StdoutPipe()
+			if err != nil {
+				t.Fatal(err)
+			}
+			var stderr bytes.Buffer
+			cmd.Stderr = &stderr
+			if err := cmd.Start(); err != nil {
+				t.Fatal(err)
+			}
+			// One line, then wait for the first look to have happened, then go.
+			buf := make([]byte, 1)
+			for {
+				if _, err := stdout.Read(buf); err != nil || buf[0] == '\n' {
+					break
+				}
+			}
+			for i := 0; i < 100; i++ {
+				if b, _ := os.ReadFile(runs); len(b) > 0 {
+					break
+				}
+				time.Sleep(50 * time.Millisecond)
+			}
+			stdout.Close()
+			closed := time.Now()
+			done := make(chan error, 1)
+			go func() { done <- cmd.Wait() }()
+			var werr error
+			select {
+			case werr = <-done:
+			case <-time.After(10 * time.Second):
+				_ = cmd.Process.Kill()
+				t.Fatal("still running 10s after its reader went")
+			}
+			var exit *exec.ExitError
+			if !errors.As(werr, &exit) || exit.ExitCode() != agentsWatchOutputGone || !strings.Contains(stderr.String(), "stdout was closed") {
+				t.Errorf("exit %v, stderr %q", werr, stderr.String())
+			}
+			if d := time.Since(closed); d > 4*time.Second {
+				t.Errorf("took %s", d)
+			}
+			if b, _ := os.ReadFile(runs); strings.Count(string(b), "\n") > 1 {
+				t.Errorf("%d logins", strings.Count(string(b), "\n"))
+			}
+		})
 	}
 }

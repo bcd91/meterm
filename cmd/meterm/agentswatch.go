@@ -36,6 +36,9 @@ const (
 	// agentsWatchOutputGone is the exit code when stdout was closed: the reader went
 	// away, so the watch stopped.
 	agentsWatchOutputGone = 3
+	// agentsRefusedMinInterval is the least wait after a refused watcher key that had
+	// got in before.
+	agentsRefusedMinInterval = time.Minute
 )
 
 // errWatchOutput is a write to stdout failing: the reader is gone.
@@ -73,6 +76,8 @@ type watchOptions struct {
 	// grace and slack go into stale_after: agentsWatchGrace and agentsLookSlack,
 	// except in tests that check the bound itself.
 	grace, slack time.Duration
+	// outputGone, if set, says the reader of stdout has gone away (stdoutGone).
+	outputGone func() bool
 }
 
 // staleMargin is how long after a look is due its line can still come: its own run,
@@ -124,12 +129,34 @@ func runAgentsWatch(ctx context.Context, w io.Writer, jobs []agentJob, query age
 			watchHost(ctx, job, labels[i], query, o, margin, sem, out)
 		}()
 	}
+	if o.outputGone != nil {
+		// In text form nothing may be written for a long time, so a reader that went
+		// away wouldn't be noticed by a write; look for it instead.
+		go func() {
+			t := time.NewTicker(time.Second)
+			defer t.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-t.C:
+					if o.outputGone() {
+						out.fail(errWatchOutput)
+						return
+					}
+				}
+			}
+		}()
+	}
 	wg.Wait()
 	if err := out.error(); err != nil {
 		return fmt.Errorf("%w: %v", errWatchOutput, err)
 	}
 	out.write(agents.Stopped{Schema: agents.WatchSchema, Type: agents.LineStopped, At: o.clock.now().UTC()})
-	return out.error()
+	if err := out.error(); err != nil {
+		return fmt.Errorf("%w: %v", errWatchOutput, err)
+	}
+	return nil
 }
 
 func watchHost(ctx context.Context, job agentJob, label string, query agentQuery, o watchOptions, margin time.Duration, sem chan struct{}, out *watchWriter) {
@@ -158,9 +185,10 @@ func watchHost(ctx context.Context, job agentJob, label string, query agentQuery
 			// network, so not "unreachable" either.
 			look.Result = agents.ResultError
 		}
-		if h.Error == agentsWatcherRefused {
-			// Asking again would only add failed logins, and enough of those get an
-			// address banned (fail2ban). It takes someone fixing the key.
+		if h.Error == agentsWatcherRefused && look.LastOKAt == nil {
+			// The key has never got in during this run: it isn't set up there, and asking
+			// again would only add failed logins, enough of which get an address banned
+			// (fail2ban). It takes someone fixing the key.
 			look.StoppedAsking = true
 			for _, c := range changes {
 				out.write(c)
@@ -172,7 +200,14 @@ func watchHost(ctx context.Context, job agentJob, label string, query agentQuery
 			<-ctx.Done()
 			return
 		}
-		delay = agents.NextDelay(o.interval, tr.Failing(), o.clock.rand())
+		base := o.interval
+		if h.Error == agentsWatcherRefused {
+			// It got in before, so this may pass (a host restarting, a file being
+			// edited), and it's asked again; but no faster than every minute, doubling,
+			// so a refusing host sees at most 4 tries in any 10 minutes (see the doc).
+			base = max(base, agentsRefusedMinInterval)
+		}
+		delay = agents.NextDelay(base, tr.Failing(), o.clock.rand())
 		next := at.Add(delay).UTC()
 		stale := next.Add(margin)
 		look.NextLookAt, look.StaleAfter = &next, &stale
@@ -229,6 +264,18 @@ type watchWriter struct {
 	last    map[string]string // text: what was last said of each host
 	started time.Time
 	cancel  context.CancelFunc
+}
+
+// fail stops the watch as a failed write would.
+func (o *watchWriter) fail(err error) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if o.err == nil {
+		o.err = err
+	}
+	if o.cancel != nil {
+		o.cancel()
+	}
 }
 
 func (o *watchWriter) error() error {

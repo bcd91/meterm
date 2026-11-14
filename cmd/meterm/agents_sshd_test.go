@@ -27,6 +27,8 @@ import (
 // this test's config, and the session's HOME is the test's.
 
 type localSSHD struct {
+	log           *syncBuffer
+	userConfig    string
 	dir, port, me string
 	authorized    string
 	watch, main   string // private keys
@@ -103,9 +105,10 @@ LogLevel VERBOSE
 		t.Fatal(err)
 	}
 	s.setAuthorized(t)
-	var log bytes.Buffer
+	log := &syncBuffer{}
+	s.log = log
 	cmd := exec.Command(sshd, "-D", "-e", "-f", conf)
-	cmd.Stderr = &log
+	cmd.Stderr = log
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
@@ -134,8 +137,9 @@ LogLevel VERBOSE
 	}
 	// The person's ssh config: where the host is and which host keys count, and their
 	// own key for every host, which a watcher look mustn't use.
-	writeUserSSHConfig(t, "Host 127.0.0.1\n  Port "+s.port+"\n  User "+s.me+"\n  UserKnownHostsFile "+kh+"\n"+
-		"Host *\n  IdentityFile "+s.main+"\n")
+	s.userConfig = "Host 127.0.0.1\n  Port " + s.port + "\n  User " + s.me + "\n  UserKnownHostsFile " + kh + "\n" +
+		"  IdentityAgent none\nHost *\n  IdentityFile " + s.main + "\n  IdentityAgent none\n"
+	writeUserSSHConfig(t, s.userConfig)
 	return s
 }
 
@@ -234,6 +238,18 @@ func TestLocalSSHDWatcherKey(t *testing.T) {
 	if tries != 1 || len(looks) != 1 || looks[0]["stopped_asking"] != true {
 		t.Errorf("tries %d, looks %v", tries, looks)
 	}
+
+	// A ProxyCommand in the person's config for the host: the look fails here, and
+	// doesn't go straight to the host instead. sshd sees no connection at all.
+	s.setAuthorized(t, "watch-limited")
+	writeUserSSHConfig(t, strings.Replace(s.userConfig, "  IdentityAgent none\nHost *", "  ProxyCommand nc %h %p\n  IdentityAgent none\nHost *", 1))
+	conns := strings.Count(s.log.String(), "Connection from")
+	got = askAgents(ctx, s.job(), sshAgentQuery("", 10*time.Second), 10*time.Second)
+	time.Sleep(200 * time.Millisecond)
+	if !strings.Contains(got.Error, "ProxyCommand") || strings.Count(s.log.String(), "Connection from") != conns {
+		t.Errorf("ProxyCommand: %+v; sshd saw %d new connections", got, strings.Count(s.log.String(), "Connection from")-conns)
+	}
+	writeUserSSHConfig(t, s.userConfig)
 
 	// And `agents key` won't print a line for the person's own key.
 	r := config.Resolved{Name: "local", Address: "127.0.0.1", AgentsIdentity: s.main}

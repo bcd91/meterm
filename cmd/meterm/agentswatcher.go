@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"os/user"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -108,14 +110,16 @@ func lookSettings(ctx context.Context, r config.Resolved, timeout time.Duration)
 }
 
 // carriedOptions are the settings of the person's ssh config that a watcher look keeps
-// for the host, while it leaves the config out for it: where the host is, as whom, and
-// which host keys count. Keys and agents stay out, as does anything that runs a
-// program (ProxyCommand, LocalCommand, KnownHostsCommand), which a look doesn't carry.
-// StrictHostKeyChecking is a look's own, yes, and isn't carried.
+// for the host, while it leaves the config out for it: where the host is, as whom, how
+// to get there, and which host keys count. Keys, agents and certificates stay out.
+// StrictHostKeyChecking is a look's own, yes, and isn't carried. A ProxyCommand isn't
+// carried either, and a host that has one isn't looked at (errProxyCommand): going
+// straight to its HostName would be a different route than the person set up.
 var carriedOptions = []struct{ key, name string }{
 	{"hostname", "HostName"}, {"user", "User"}, {"port", "Port"}, {"proxyjump", "ProxyJump"},
 	{"userknownhostsfile", "UserKnownHostsFile"}, {"globalknownhostsfile", "GlobalKnownHostsFile"},
 	{"hostkeyalias", "HostKeyAlias"},
+	{"addressfamily", "AddressFamily"}, {"bindaddress", "BindAddress"}, {"bindinterface", "BindInterface"},
 }
 
 // carriedValueRE is a value that's one plain word to ssh's config parser: no quotes, no
@@ -123,6 +127,9 @@ var carriedOptions = []struct{ key, name string }{
 var carriedValueRE = regexp.MustCompile(`^[A-Za-z0-9._/@:%~+=,\[\]-]+$`)
 
 func carry(set sshSettings) ([]string, error) {
+	if pc := set.one("proxycommand"); pc != "" && pc != "none" {
+		return nil, watcherSettingsError("the host is reached through a ProxyCommand in your ssh config, and watcher looks don't run one; use ProxyJump for it, or take agents_identity off the host")
+	}
 	var lines []string
 	for _, o := range carriedOptions {
 		vals := set[o.key]
@@ -243,13 +250,57 @@ func checkAgentsIdentity(r config.Resolved) string {
 	if st, err := os.Stat(sshkey.LocalPath(r.AgentsIdentity)); err != nil || !st.Mode().IsRegular() {
 		return "not asked: its agents_identity " + termsafe.Quote(r.AgentsIdentity) + " isn't a file here"
 	}
+	if why := watcherKeyUnusable(r.AgentsIdentity); why != "" {
+		return "not asked: " + why
+	}
+	if why := watcherKeyHasCert(r.AgentsIdentity); why != "" {
+		return "not asked: " + why
+	}
 	return ""
 }
 
-// agentKeys lists the keys ssh-agent holds, as `ssh-add -L` says: none when there's no
-// agent. A test can stand in for it.
-var agentKeys = func(ctx context.Context) []ssh.PublicKey {
-	out, err := exec.CommandContext(ctx, "ssh-add", "-L").Output()
+// watcherKeyHasCert refuses a watcher key with a certificate beside it: ssh offers
+// KEY-cert.pub with KEY on its own, and a host that trusts the certificate's CA lets it
+// in without reading authorized_keys, so without the line's limits.
+func watcherKeyHasCert(path string) string {
+	p := strings.TrimSuffix(sshkey.LocalPath(path), ".pub")
+	if _, err := os.Lstat(p + "-cert.pub"); err == nil {
+		return "the watcher key has a certificate beside it (" + termsafe.Quote(path+"-cert.pub") + "); ssh would offer it too, and a host that trusts its CA lets it in without the authorized_keys line's limits. Use a key with no certificate"
+	}
+	return ""
+}
+
+// watcherKeyUnusable says why ssh on this machine would pass over the watcher key, or
+// "". ssh skips a key it can't open without asking (BatchMode) and one others can read,
+// and goes on to say the host refused it: that would send the person to fix the wrong
+// machine, so it's caught here, before the host is asked.
+func watcherKeyUnusable(path string) string {
+	p := sshkey.LocalPath(path)
+	b, err := os.ReadFile(p)
+	if err != nil {
+		return "this machine can't use the watcher key: it can't be read"
+	}
+	if _, err := ssh.ParsePrivateKey(b); err != nil {
+		var pass *ssh.PassphraseMissingError
+		if errors.As(err, &pass) {
+			return "this machine can't use the watcher key: it has a passphrase, and a look can't type one (make it without one; the host is what limits it)"
+		}
+		return "this machine can't use the watcher key: it isn't a private key ssh can use unattended"
+	}
+	if mode := keyFileMode(p); mode&0o077 != 0 {
+		return fmt.Sprintf("this machine can't use the watcher key: its mode is %04o, and ssh won't use a key others can read (chmod 600 it)", mode)
+	}
+	return ""
+}
+
+// agentKeys lists the keys the ssh-agent at sock holds ("" for $SSH_AUTH_SOCK), as
+// `ssh-add -L` says: none when there's no agent. A test can stand in for it.
+var agentKeys = func(ctx context.Context, sock string) []ssh.PublicKey {
+	c := exec.CommandContext(ctx, "ssh-add", "-L")
+	if sock != "" {
+		c.Env = append(os.Environ(), "SSH_AUTH_SOCK="+sock)
+	}
+	out, err := c.Output()
 	if err != nil {
 		return nil
 	}
@@ -262,13 +313,106 @@ var agentKeys = func(ctx context.Context) []ssh.PublicKey {
 	return keys
 }
 
+// sshHome is the home directory ssh expands ~ and %d to: the password database's, not
+// $HOME. A test can stand in for it.
+var sshHome = func() string {
+	if u, err := user.Current(); err == nil {
+		return u.HomeDir
+	}
+	return ""
+}
+
+// expandIdentityPath does to an IdentityFile what ssh does before opening it: ~ and
+// ${VAR}, then the % tokens it allows there. ok is false for anything it can't be sure
+// of, such as a token it doesn't know or a variable that isn't set.
+func expandIdentityPath(p string, set sshSettings) (string, bool) {
+	home := sshHome()
+	if p == "~" || strings.HasPrefix(p, "~/") {
+		if home == "" {
+			return "", false
+		}
+		p = home + p[1:]
+	} else if strings.HasPrefix(p, "~") {
+		return "", false // ~user
+	}
+	ok := true
+	p = envVarRE.ReplaceAllStringFunc(p, func(m string) string {
+		v, set := os.LookupEnv(m[2 : len(m)-1])
+		if !set {
+			ok = false
+		}
+		return v
+	})
+	if !ok {
+		return "", false
+	}
+	local := ""
+	if u, err := user.Current(); err == nil {
+		local = u.Username
+	}
+	hostname, _ := os.Hostname()
+	short, _, _ := strings.Cut(hostname, ".")
+	var b strings.Builder
+	for i := 0; i < len(p); i++ {
+		if p[i] != '%' {
+			b.WriteByte(p[i])
+			continue
+		}
+		if i+1 >= len(p) {
+			return "", false
+		}
+		i++
+		var v string
+		switch p[i] {
+		case '%':
+			v = "%"
+		case 'd':
+			v = home
+		case 'u':
+			v = local
+		case 'h':
+			v = set.one("hostname")
+		case 'r':
+			v = set.one("user")
+		case 'p':
+			v = set.one("port")
+		case 'L':
+			v = short
+		case 'l':
+			v = hostname
+		case 'i':
+			v = strconv.Itoa(os.Getuid())
+		case 'k':
+			v = set.one("hostkeyalias")
+			if v == "" {
+				v = set.one("hostname")
+			}
+		default:
+			return "", false
+		}
+		if v == "" {
+			return "", false
+		}
+		b.WriteString(v)
+	}
+	return b.String(), true
+}
+
+var envVarRE = regexp.MustCompile(`\$\{[A-Za-z_][A-Za-z0-9_]*\}`)
+
 // otherLoginKeys is every key an ordinary login to the host could use: each
 // IdentityFile ssh -G names for it (the host's identity_file, the ssh config's, or
-// ssh's defaults), and every key in ssh-agent. unchecked lists files whose public key
-// couldn't be read.
+// ssh's defaults), expanded as ssh would, every key in ssh-agent, and every key in the
+// agent an IdentityAgent in the config names. unchecked lists files whose public key
+// couldn't be read, or whose path couldn't be worked out.
 func otherLoginKeys(ctx context.Context, set sshSettings) (keys []ssh.PublicKey, unchecked []string) {
 	for _, f := range set["identityfile"] {
-		k, err := publicKeyOf(f)
+		p, ok := expandIdentityPath(f, set)
+		if !ok {
+			unchecked = append(unchecked, f)
+			continue
+		}
+		k, err := publicKeyOf(p)
 		switch {
 		case err == nil:
 			keys = append(keys, k)
@@ -276,7 +420,16 @@ func otherLoginKeys(ctx context.Context, set sshSettings) (keys []ssh.PublicKey,
 			unchecked = append(unchecked, f)
 		}
 	}
-	return append(keys, agentKeys(ctx)...), unchecked
+	keys = append(keys, agentKeys(ctx, "")...)
+	if a := set.one("identityagent"); a != "" && a != "none" && a != "SSH_AUTH_SOCK" {
+		if strings.HasPrefix(a, "$") {
+			a = os.Getenv(strings.Trim(a, "${}"))
+		}
+		if a != "" {
+			keys = append(keys, agentKeys(ctx, a)...)
+		}
+	}
+	return keys, unchecked
 }
 
 // publicKeyOf is the public half of an identity file: its .pub, or the file itself if

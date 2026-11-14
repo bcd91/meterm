@@ -1001,8 +1001,10 @@ running as you on this machine can read your keys. It installs nothing, and refu
 also log in with (sshd takes the first line a key matches). After installing the line,
 `meterm agents key HOST --check` logs in with the key and asks for something else: exit 2 if
 it got it, so the key isn't limited. A look with a watcher key offers that key and no other,
-none from your ssh config; if the host refuses it the look fails rather than trying another,
-and `--watch` stops asking that host until it's restarted.
+none from your ssh config, and isn't made for a host your config reaches through a
+`ProxyCommand`. If the host refuses it the look fails rather than trying another; `--watch`
+stops asking a host the key never got in to, and backs off from a minute on one it did. A
+watcher key needs no passphrase and mode 0600, or it's refused here before the host is asked.
 
 The stream's format, what it costs and what it can't see are in
 [docs/agents-watch.md](docs/agents-watch.md).

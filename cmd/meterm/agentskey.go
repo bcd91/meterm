@@ -141,8 +141,9 @@ func checkWatcherKey(ctx context.Context, job agentJob, timeout time.Duration) (
 		return "not checked: no random word", keyCheckUnsure
 	}
 	word := "meterm-watcher-check-" + hex.EncodeToString(nonce[:])
-	stdout, stderr, _, err := sshLookQuery(sshConfig, timeout, "echo "+word, 64<<10)(ctx, wr.Resolved)
+	stdout, stderr, overflow, err := sshLookQuery(sshConfig, timeout, "echo "+word, 64<<10)(ctx, wr.Resolved)
 	var exit *exec.ExitError
+	exited := errors.As(err, &exit)
 	switch {
 	case bytes.Contains(stdout, []byte(word)):
 		return "NOT LIMITED: the watcher key ran a command of meterm's choosing on " + lbl(r.Name) +
@@ -154,9 +155,16 @@ func checkWatcherKey(ctx context.Context, job agentJob, timeout time.Duration) (
 		return "no answer within " + timeout.String(), keyCheckUnsure
 	case errors.As(err, &exit) && exit.ExitCode() == sshConnectionError:
 		return "couldn't log in: " + sshFailureText(stderr), keyCheckUnsure
-	case err != nil && !errors.As(err, &exit):
+	case overflow:
+		// The word could have been in what wasn't kept.
+		return "more output than the check reads, so it can't tell", keyCheckUnsure
+	case exited && exit.ExitCode() < 0:
+		return "ssh was stopped before it finished, so it can't tell", keyCheckUnsure
+	case err != nil && !exited:
 		return "couldn't run ssh: " + termsafe.Text(err.Error()), keyCheckUnsure
 	}
+	// ssh ran to its end, logged in (not 255), and the word didn't come back: the host
+	// ran something else.
 	return "limited: the host ran its own command for the watcher key, not the one sent", keyCheckLimited
 }
 
@@ -175,6 +183,14 @@ func watcherKeyLine(ctx context.Context, r config.Resolved, identity string, tim
 	key, err := readPublicKey(identity)
 	if err != nil {
 		return "", "", err
+	}
+	// What a look would refuse locally, said now rather than after the line is in.
+	private := strings.TrimSuffix(identity, ".pub")
+	if why := watcherKeyUnusable(private); why != "" {
+		return "", "", errors.New(why)
+	}
+	if why := watcherKeyHasCert(private); why != "" {
+		return "", "", errors.New(why)
 	}
 	// A key an ordinary login could use too would put those logins under the forced
 	// command, or leave this line unused behind another: sshd takes the first line a
