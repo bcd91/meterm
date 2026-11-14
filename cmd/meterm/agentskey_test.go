@@ -65,8 +65,8 @@ hosts:
 	}
 }
 
-// With a watcher key, a look offers it and only it of the ones meterm names, with
-// IdentitiesOnly ahead of the host's own extra_args; the other commands don't use it.
+// With a watcher key, a look offers it with IdentitiesOnly, and the host's own say on
+// keys in extra_args is dropped.
 func TestAgentsLookUsesTheWatcherKey(t *testing.T) {
 	dir := t.TempDir()
 	key := newWatcherKey(t, dir, "watch")
@@ -84,24 +84,8 @@ func TestAgentsLookUsesTheWatcherKey(t *testing.T) {
 	if i < 0 || argv[i+1] != key || slices.Contains(argv, "/nowhere/main") {
 		t.Errorf("argv: %q", argv)
 	}
-	only, theirs := slices.Index(argv, "IdentitiesOnly=yes"), slices.Index(argv, "IdentitiesOnly=no")
-	if only < 0 || theirs < 0 || only > theirs {
-		t.Errorf("IdentitiesOnly order: %q", argv)
-	}
-
-	// Real ssh agrees: ours is the one it keeps, and the key offered first is the watcher's.
-	if runtime.GOOS == "windows" {
-		return
-	}
-	realSSHForG(t)
-	r := withAgentsIdentity(config.Resolved{Address: "192.0.2.1", IdentityFile: "/nowhere/main", AgentsIdentity: key, ExtraArgs: []string{"-o", "IdentitiesOnly=no"}})
-	r.ExtraArgs = isolatedSSHArgs(t, agentSSHArgs(r, "", 5*time.Second))
-	out, err := exec.Command("ssh", append([]string{"-G"}, sshrun.BuildArgs(config.Resolved{Address: r.Address, IdentityFile: r.IdentityFile, ExtraArgs: r.ExtraArgs})...)...).Output()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(string(out), "\nidentitiesonly yes\n") || !strings.Contains(string(out), "\nidentityfile "+key+"\n") {
-		t.Errorf("ssh -G:\n%s", out)
+	if !slices.Contains(argv, "IdentitiesOnly=yes") || slices.Contains(argv, "IdentitiesOnly=no") {
+		t.Errorf("IdentitiesOnly: %q", argv)
 	}
 }
 
@@ -344,5 +328,92 @@ func TestAgentsKeyCommand(t *testing.T) {
 	})
 	if !strings.Contains(out, `"host":"key"`) {
 		t.Errorf("host called key: %q", out)
+	}
+}
+
+// With a watcher key, ssh is offered that key and no other, as real ssh reads the
+// options: not the host's identity_file, not a key from extra_args, not one from the
+// person's ssh config. Jump hops still read that config, so they log in as always.
+func TestWatcherLookOffersOnlyTheWatcherKey(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("agents refuses to run on Windows")
+	}
+	realSSHForG(t)
+	dir := t.TempDir()
+	key := newWatcherKey(t, dir, "watch")
+	userCfg := filepath.Join(dir, "user_config")
+	if err := os.WriteFile(userCfg, []byte("Host *\n  IdentityFile /nowhere/from-config\n  IdentitiesOnly no\n  IdentityAgent /nowhere/agent.sock\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	old := agentSSHIncludes
+	agentSSHIncludes = []string{userCfg}
+	defer func() { agentSSHIncludes = old }()
+
+	r := config.Resolved{Address: "192.0.2.1", User: "agent", IdentityFile: "/nowhere/main", AgentsIdentity: key,
+		ExtraArgs: []string{"-i", "/nowhere/extra", "-o", "IdentityFile=/nowhere/extra2", "-oIdentitiesOnly=no", "-p", "2222"}}
+	wr, sshConfig, remove, err := watcherLook(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer remove()
+	args := sshrun.BuildArgs(config.Resolved{Address: wr.Address, User: wr.User, IdentityFile: wr.IdentityFile,
+		ExtraArgs: agentSSHArgs(wr, sshConfig, 5*time.Second)})
+	out, err := exec.Command("ssh", append([]string{"-G"}, args...)...).Output()
+	if err != nil {
+		t.Fatalf("ssh -G %q: %v", args, err)
+	}
+	var ids []string
+	for _, l := range strings.Split(string(out), "\n") {
+		if v, ok := strings.CutPrefix(l, "identityfile "); ok {
+			ids = append(ids, v)
+		}
+	}
+	if len(ids) != 1 || ids[0] != key {
+		t.Errorf("keys offered to the target: %q", ids)
+	}
+	if !strings.Contains(string(out), "\nidentitiesonly yes\n") || !strings.Contains(string(out), "\nport 2222\n") {
+		t.Errorf("ssh -G:\n%s", out)
+	}
+	if strings.Contains(string(out), "/nowhere/agent.sock") {
+		t.Errorf("the config's agent socket reached the target:\n%s", out)
+	}
+	// A jump hop gets the same -F, and with it the person's config and keys.
+	hop, err := exec.Command("ssh", "-G", "-F", sshConfig, "192.0.2.99").Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(hop), "\nidentityfile /nowhere/from-config\n") || !strings.Contains(string(hop), "\nbatchmode yes\n") {
+		t.Errorf("hop:\n%s", hop)
+	}
+}
+
+// Through a look: the argv has the watcher key and no other, its config is gone
+// afterwards, and a refused watcher key is said to be that, once, with no second try.
+func TestWatcherKeyRefusedIsNotAFallback(t *testing.T) {
+	dir := t.TempDir()
+	key := newWatcherKey(t, dir, "watch")
+	argvFile := fakeSSHScript(t, `echo 'agent@192.0.2.1: Permission denied (publickey).' >&2; exit 255`)
+	job := agentJob{label: "x", resolve: func(context.Context) config.Resolved {
+		return config.Resolved{Address: "192.0.2.1", User: "agent", IdentityFile: "/nowhere/main", AgentsIdentity: key,
+			ExtraArgs: []string{"-i", "/nowhere/extra"}}
+	}}
+	tmp := t.TempDir()
+	t.Setenv("TMPDIR", tmp)
+	got := askAgents(context.Background(), job, sshAgentQuery("", 5*time.Second), 5*time.Second)
+	if got.Reachable || got.Agents != nil || !strings.Contains(got.Error, "watcher key") || lookUnreachable(got.Error) {
+		t.Errorf("%+v", got)
+	}
+	b, _ := os.ReadFile(argvFile)
+	if strings.Contains(string(b), "/nowhere/") || strings.Count(string(b), agents.RemoteCommand) != 1 {
+		t.Errorf("argv:\n%s", b)
+	}
+	if left, _ := os.ReadDir(tmp); len(left) != 0 {
+		t.Errorf("left behind: %v", left)
+	}
+	// A jump host refusing its usual key isn't the watcher key's fault.
+	fakeSSHScript(t, `echo 'bcd@192.0.2.50: Permission denied (publickey).' >&2; exit 255`)
+	got = askAgents(context.Background(), job, sshAgentQuery("", 5*time.Second), 5*time.Second)
+	if strings.Contains(got.Error, "watcher key") || !lookUnreachable(got.Error) {
+		t.Errorf("hop refusal: %+v", got)
 	}
 }

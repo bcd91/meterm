@@ -205,12 +205,24 @@ restrict,no-pty,no-port-forwarding,no-agent-forwarding,no-X11-forwarding,no-user
 - It refuses a key that's also the host's `identity_file`: sshd takes the first line a key
   matches, so one key can't be both limited and not.
 
-With `agents_identity` set, a look offers that key first, with `IdentitiesOnly=yes` so the
-keys in ssh-agent aren't tried. Keys named in your `~/.ssh/config` or the host's `extra_args`
-are still offered after it, so if the host doesn't take the watcher key, the look may get in
-with another. If the file isn't there, the host isn't asked (`error`), rather than looked at
-with some other key. Jump hosts on the way are logged in to as always, with your usual keys:
-the watcher key is for the host at the end.
+With `agents_identity` set, a look offers that key and no other:
+
+- `-i` that key with `IdentitiesOnly=yes`, in place of the host's `identity_file`. A key
+  that `-i`, `-o IdentityFile`, `IdentitiesOnly`, `IdentityAgent` or `CertificateFile` in the
+  host's `extra_args` names is dropped for the look.
+- The look's ssh config leaves out your own `~/.ssh/config` and `/etc/ssh/ssh_config` for that
+  host (`Match originalhost *,!ADDRESS` around the `Include`s), so an `IdentityFile`,
+  `IdentityAgent` or `CertificateFile` there isn't added either. Settings of yours for that
+  host, such as a `ProxyCommand` or `HostName` there, don't apply to a watcher look.
+- ssh-agent is still asked, for that key only, in case it holds it.
+- If the host refuses it, the look fails with `error` ("the host refused the watcher key"):
+  there's no second try with another key, as that would be the look the key rules out.
+- If the file isn't there, the host isn't asked (`error`), rather than looked at with some
+  other key.
+- Jump hosts on the way read your ssh config and log in with your usual keys, as always: the
+  watcher key is for the host at the end. A jump host on the very same address as that host
+  is the one case where they can't be told apart, and it gets the watcher look's settings
+  too.
 
 ## Settings
 

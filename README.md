@@ -997,7 +997,9 @@ isn't in wtmp, so `last` and `meterm logins` don't show them.
 A host's `agents_identity` is a key that `agents` and `--watch` use instead of its
 `identity_file`. `meterm agents key HOST` prints the `authorized_keys` line that lets that key run
 only `claude agents --json`, for you to put on the host: the limit has to be there, as anything
-running as you on this machine can read your keys. It installs nothing.
+running as you on this machine can read your keys. It installs nothing. A look with a watcher
+key offers that key and no other, your ssh config's included, and if the host refuses it the
+look fails rather than trying another.
 
 The stream's format, what it costs and what it can't see are in
 [docs/agents-watch.md](docs/agents-watch.md).

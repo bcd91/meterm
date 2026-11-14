@@ -30,12 +30,16 @@ func agentsFixture(t *testing.T, name string) []byte {
 	return b
 }
 
-// fakeClock moves only when the watch sleeps. It stops the watch after max sleeps.
+// fakeClock moves only when the watch sleeps. It stops the watch after max sleeps,
+// counted over every host, or, if until is set, once until says so: with several
+// hosts, one host's goroutine can take every sleep before another's has started,
+// so a test that needs each host looked at waits for that instead of a count.
 type fakeClock struct {
 	mu     sync.Mutex
 	t      time.Time
 	slept  []time.Duration
 	max    int
+	until  func() bool
 	r      float64
 	cancel context.CancelFunc
 }
@@ -52,7 +56,7 @@ func (c *fakeClock) clock() watchClock {
 			defer c.mu.Unlock()
 			c.slept = append(c.slept, d)
 			c.t = c.t.Add(d)
-			if len(c.slept) > c.max {
+			if c.until != nil && c.until() || c.until == nil && len(c.slept) > c.max || len(c.slept) > 100000 {
 				c.cancel()
 				return false
 			}
@@ -113,9 +117,14 @@ func ofType(lines []map[string]any, typ string) []map[string]any {
 
 func runWatchTest(t *testing.T, jobs []agentJob, q agentQuery, looks int, format string) (string, *fakeClock) {
 	t.Helper()
+	return runWatchUntil(t, jobs, q, looks, nil, format)
+}
+
+func runWatchUntil(t *testing.T, jobs []agentJob, q agentQuery, looks int, until func() bool, format string) (string, *fakeClock) {
+	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	fc := &fakeClock{t: time.Date(2026, 11, 14, 8, 0, 0, 0, time.UTC), max: looks, r: 0.5, cancel: cancel}
+	fc := &fakeClock{t: time.Date(2026, 11, 14, 8, 0, 0, 0, time.UTC), max: looks, until: until, r: 0.5, cancel: cancel}
 	var out bytes.Buffer
 	err := runAgentsWatch(ctx, &out, jobs, q, watchOptions{interval: time.Minute, timeout: 8 * time.Second, parallel: 4, format: format, clock: fc.clock()})
 	if err != nil {
@@ -260,7 +269,19 @@ func TestWatchNeverAsksProductionUnlessNamed(t *testing.T) {
 			mu.Unlock()
 			return []byte("[]"), "", false, nil
 		}
-		out, _ := runWatchTest(t, jobs, q, 3*len(jobs), "json")
+		// Until every host that may be asked has been, three times: then a refused one
+		// had its chances too.
+		until := func() bool {
+			mu.Lock()
+			defer mu.Unlock()
+			for _, j := range jobs {
+				if j.refused == "" && asked[j.host.Name] < 3 {
+					return false
+				}
+			}
+			return true
+		}
+		out, _ := runWatchUntil(t, jobs, q, 0, until, "json")
 		if !tc.live && asked["live"] > 0 {
 			t.Errorf("%v %v: production was asked %d times", tc.names, tc.tags, asked["live"])
 		}
@@ -303,17 +324,25 @@ hosts:
 		t.Fatal(err)
 	}
 	var mu sync.Mutex
-	asked := map[string]bool{}
+	asked := map[string]int{}
 	q := func(_ context.Context, r config.Resolved) ([]byte, string, bool, error) {
 		mu.Lock()
-		asked[r.Name] = true
+		asked[r.Name]++
 		mu.Unlock()
 		return []byte("[]"), "", false, nil
 	}
-	out, _ := runWatchTest(t, jobs, q, 6, "json")
-	if !asked["a"] || asked["b"] || asked["c"] || !asked["d"] {
+	// Until a and d have each been asked three times: b and c had as long.
+	until := func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return asked["a"] >= 3 && asked["d"] >= 3
+	}
+	out, _ := runWatchUntil(t, jobs, q, 0, until, "json")
+	mu.Lock()
+	if asked["a"] < 3 || asked["b"] != 0 || asked["c"] != 0 || asked["d"] < 3 {
 		t.Errorf("asked %v", asked)
 	}
+	mu.Unlock()
 	opted := 0
 	for _, l := range ofType(watchLines(t, out), "look") {
 		if l["result"] == "opted_out" {
@@ -324,7 +353,7 @@ hosts:
 		t.Errorf("%d opted_out lines: %s", opted, out)
 	}
 	rep := runAgents(context.Background(), jobs, q, time.Second, 2)
-	if agentsFailed(rep) != 0 || !asked["b"] {
+	if agentsFailed(rep) != 0 || asked["b"] != 1 {
 		t.Errorf("a single look skipped an opted-out host: %+v", rep)
 	}
 }

@@ -29,9 +29,11 @@ What changed between releases that you'd notice in use. Newest first.
 ### Watcher key
 
 - `agents_identity` on a host, group or `defaults`: a key that `agents` and `agents --watch`
-  log in with instead of `identity_file`, offered with `IdentitiesOnly=yes`. Nothing else uses
-  it, and it isn't shared with a team. A host whose `agents_identity` file is missing isn't
-  asked, rather than asked with another key.
+  log in with, and the only one they offer that host: `IdentitiesOnly=yes`, no key from its
+  `identity_file` or `extra_args`, and none from your ssh config, which isn't read for that
+  host on such a look (jump hops still read it, and use their usual keys). A refused watcher
+  key fails the look, with no second try with another key. Nothing else uses it, and it isn't
+  shared with a team. A host whose `agents_identity` file is missing isn't asked.
 - `meterm agents key HOST` prints the `authorized_keys` line that limits that key to
   `claude agents --json` (`restrict`, the `no-*` options and a forced command that ignores what
   the client sends). It installs nothing; the limit belongs on the host. It refuses a key

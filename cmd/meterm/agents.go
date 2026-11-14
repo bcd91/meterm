@@ -287,6 +287,9 @@ func askAgents(ctx context.Context, job agentJob, query agentQuery, timeout time
 	case ctx.Err() != nil:
 		out.Error = "stopped before it answered"
 		return out
+	case errors.Is(err, errWatcherKeyRefused):
+		out.Error = "not let in: the host refused the watcher key (agents_identity); is the line from `meterm agents key` on it?"
+		return out
 	case errors.As(err, &exit):
 		switch exit.ExitCode() {
 		case -1: // ssh itself was killed, so nothing is known of the host
@@ -402,27 +405,93 @@ func sshFailureText(stderr string) string {
 }
 
 // sshAgentQuery runs agents.RemoteCommand over ssh. r.ExtraArgs have passed
-// checkAgentExtraArgs by now.
+// checkAgentExtraArgs by now. A host with a watcher key gets a look of its own
+// (watcherLook), with a config of its own.
 func sshAgentQuery(sshConfig string, timeout time.Duration) agentQuery {
-	look := sshLookQuery(sshConfig, timeout, agents.RemoteCommand, agents.MaxOutput)
 	return func(ctx context.Context, r config.Resolved) ([]byte, string, bool, error) {
-		return look(ctx, withAgentsIdentity(r))
+		if r.AgentsIdentity == "" {
+			return sshLookQuery(sshConfig, timeout, agents.RemoteCommand, agents.MaxOutput)(ctx, r)
+		}
+		wr, wcfg, remove, err := watcherLook(r)
+		if err != nil {
+			return nil, "", false, err
+		}
+		defer remove()
+		stdout, stderr, overflow, err := sshLookQuery(wcfg, timeout, agents.RemoteCommand, agents.MaxOutput)(ctx, wr)
+		if watcherKeyRefused(wr, stderr) {
+			err = errWatcherKeyRefused
+		}
+		return stdout, stderr, overflow, err
 	}
 }
 
-// withAgentsIdentity makes a host's watcher key, if it has one, the key a look
-// offers: in place of its identity_file, and with IdentitiesOnly, so ssh-agent's
-// keys aren't tried. It comes before the host's extra_args, so it's the first
-// IdentitiesOnly ssh sees, which is the one it keeps. Keys named in ~/.ssh/config or
-// in extra_args are still offered after it: what this key may do is decided by the
-// host, not here (`meterm agents key`).
-func withAgentsIdentity(r config.Resolved) config.Resolved {
-	if r.AgentsIdentity == "" {
-		return r
+// errWatcherKeyRefused is the host saying no to the watcher key. There's no second
+// try with another key: that would be the look the key was meant to rule out.
+var errWatcherKeyRefused = errors.New("watcher key refused")
+
+// watcherKeyRefused is the target, not a jump hop, refusing the login: ssh names the
+// host as it was given.
+func watcherKeyRefused(r config.Resolved, stderr string) bool {
+	if sshrun.ClassifyFailure(stderr) != sshrun.FailureAuth {
+		return false
+	}
+	who := r.Address + ": Permission denied"
+	if r.User != "" {
+		who = r.User + "@" + who
+	}
+	for _, line := range strings.Split(stderr, "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), who) {
+			return true
+		}
+	}
+	return false
+}
+
+// watcherLook is a look with r's watcher key and no other: in place of its
+// identity_file, with IdentitiesOnly, without the keys its extra_args name, and with an
+// ssh config that leaves out the person's own for this host (writeLookSSHConfig), so
+// that no IdentityFile, IdentityAgent or CertificateFile there is added. ssh-agent is
+// still asked, for that key alone, in case it holds it. Jump hops read the person's
+// config as always and log in with their usual keys: the watcher key is for the host
+// at the end. The returned func removes the config.
+func watcherLook(r config.Resolved) (config.Resolved, string, func(), error) {
+	sshConfig, remove, err := writeLookSSHConfig(r.Address)
+	if err != nil {
+		return r, "", nil, err
 	}
 	r.IdentityFile = r.AgentsIdentity
-	r.ExtraArgs = append([]string{"-o", "IdentitiesOnly=yes"}, r.ExtraArgs...)
-	return r
+	extra := []string{"-o", "IdentitiesOnly=yes"}
+	for i := 0; i < len(r.ExtraArgs); i++ {
+		a := r.ExtraArgs[i]
+		switch {
+		case a == "-i":
+			i++ // and its value: checkAgentExtraArgs made sure there is one
+			continue
+		case strings.HasPrefix(a, "-i"):
+			continue
+		case a == "-o" && i+1 < len(r.ExtraArgs) && identityOption(r.ExtraArgs[i+1]):
+			i++
+			continue
+		case strings.HasPrefix(a, "-o") && identityOption(a[2:]):
+			continue
+		}
+		extra = append(extra, a)
+	}
+	r.ExtraArgs = extra
+	return r, sshConfig, remove, nil
+}
+
+// identityOption is an -o value that names a key or how keys are chosen.
+func identityOption(v string) bool {
+	key, _, found := strings.Cut(v, "=")
+	if !found {
+		key, _, _ = strings.Cut(v, " ")
+	}
+	switch strings.ToLower(strings.TrimSpace(key)) {
+	case "identityfile", "identitiesonly", "identityagent", "certificatefile":
+		return true
+	}
+	return false
 }
 
 // checkAgentsIdentity refuses a look whose watcher key isn't there: ssh would carry
@@ -500,15 +569,37 @@ func agentSSHArgs(r config.Resolved, sshConfig string, timeout time.Duration) []
 // writeAgentSSHConfig writes the file behind ssh's -F for this run, and returns how to
 // remove it. -J starts an ssh for each hop that gets none of the -o options, but it
 // does get -F, so this is how a hop comes to obey them. The first value of an option
-// wins here too, and the two Includes are what ssh would have read anyway. The path goes
+// wins here too, and the Includes are what ssh would have read anyway. The path goes
 // unquoted into the command ssh builds for a hop, so it has to be a plain one.
-func writeAgentSSHConfig() (string, func(), error) {
+func writeAgentSSHConfig() (string, func(), error) { return writeLookSSHConfig("") }
+
+// agentSSHIncludes are the files a look's config reads after its own options: the ones
+// ssh reads when there's no -F. A test points them elsewhere, as ssh finds ~ through
+// the password database and not $HOME.
+var agentSSHIncludes = []string{"~/.ssh/config", "/etc/ssh/ssh_config"}
+
+// writeLookSSHConfig is writeAgentSSHConfig, except that with exceptHost set, the
+// person's ssh config isn't read for that host, only for the others: the jump hops.
+// That's how a watcher-key look offers its one key and nothing from ssh_config
+// (IdentityFile adds up, and can't be taken back once read), while the hops still
+// get in with their usual keys. exceptHost is matched as it's given to ssh.
+func writeLookSSHConfig(exceptHost string) (string, func(), error) {
 	var b strings.Builder
 	for _, o := range agentFixedOptions {
 		key, val, _ := strings.Cut(o, "=")
 		fmt.Fprintf(&b, "%s %s\n", key, val)
 	}
-	b.WriteString("Include ~/.ssh/config\nInclude /etc/ssh/ssh_config\n")
+	indent := ""
+	if exceptHost != "" {
+		if !agentPlainHostRE.MatchString(exceptHost) {
+			return "", nil, errors.New("the host's address can't go in a Match line as it is")
+		}
+		fmt.Fprintf(&b, "Match originalhost *,!%s\n", exceptHost)
+		indent = "  "
+	}
+	for _, inc := range agentSSHIncludes {
+		fmt.Fprintf(&b, "%sInclude %s\n", indent, inc)
+	}
 	for _, base := range []string{os.TempDir(), "/tmp"} {
 		if !agentPlainPathRE.MatchString(base) {
 			continue
@@ -527,6 +618,9 @@ func writeAgentSSHConfig() (string, func(), error) {
 	}
 	return "", nil, errors.New("no temp directory with a plain path to work in")
 }
+
+// agentPlainHostRE is an address that's one pattern in a Match line and nothing else.
+var agentPlainHostRE = regexp.MustCompile(`^[A-Za-z0-9._:-]+$`)
 
 var agentPlainPathRE = regexp.MustCompile(`^[A-Za-z0-9._/-]+$`)
 
