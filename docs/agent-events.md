@@ -34,7 +34,9 @@ stays 1: it goes up when a field changes meaning, and new fields don't need it t
 | `unknown` | Nothing here can say. | Show it as unknown. |
 
 `unknown` is never `idle`. In `meterm agents --watch`, a wait that was raised stays raised
-while its session reads as `unknown`. An agent saying a word nobody has seen before could be stuck on
+while its session reads as `unknown`. That stream's last line, `stopped`, says how many lines
+it couldn't write on the way out (`dropped`, a field added within schema 1): see
+[agents-watch.md](agents-watch.md). An agent saying a word nobody has seen before could be stuck on
 something. Treat it as "can't say", as you would a host that can't be reached.
 
 ## How Claude Code's words map

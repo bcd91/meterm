@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -432,6 +433,38 @@ func TestLocalSSHDLinesMetermMustNotMiss(t *testing.T) {
 			t.Errorf("%s: exit 0: %s", tc.name, msg)
 		}
 	}
+
+	// Big, but under what's read: read whole, and it's meterm's.
+	s.writeRaw(t, strings.Repeat("# filler line\n", 14000)+meterms, "")
+	if msg, code := checkWatcherKey(ctx, s.job(), 10*time.Second, nil); code != keyCheckLimited {
+		t.Errorf("196 KB file: %d %s", code, msg)
+	}
+
+	// A FIFO as authorized_keys2: sshd passes over a key file that isn't a regular
+	// file, and so does the read, without hanging on it.
+	main := string(mustRead(t, s.main+".pub")) + "\n"
+	s.writeRaw(t, meterms+main, "")
+	_ = os.Remove(s.authorized + "2")
+	if err := syscall.Mkfifo(s.authorized+"2", 0o600); err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now()
+	if msg, code := checkWatcherKey(ctx, s.job(), 10*time.Second, nil); code != keyCheckLimited || time.Since(start) > 30*time.Second {
+		t.Errorf("FIFO: %d %s", code, msg)
+	}
+	_ = os.Remove(s.authorized + "2")
+
+	// A shell startup file that talks: the read's answer isn't only what was asked
+	// for, and can't be trusted.
+	bashrc := filepath.Join(s.dir, "home", ".bashrc")
+	if err := os.WriteFile(bashrc, []byte("echo hello-from-bashrc\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s.writeRaw(t, meterms, "")
+	if msg, code := checkWatcherKey(ctx, s.job(), 10*time.Second, nil); code != keyCheckUnsure || !strings.Contains(msg, "wasn't what was asked for") {
+		t.Errorf(".bashrc: %d %s", code, msg)
+	}
+	_ = os.Remove(bashrc)
 
 	// An RSA watcher key, its working line written as rsa-sha2-512.
 	rsaKey := filepath.Join(s.dir, "rsawatch")

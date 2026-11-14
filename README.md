@@ -963,7 +963,9 @@ destination, and `-o ProxyCommand`, `-A` or `-M` would make this more than one f
 **It isn't in the activity log.** That log is kept for good and shared with the team, so
 nothing can be taken out later, and a status bar asking every 30 seconds would bury
 everything else in it. So `agents` writes no activity entry and no history, and doesn't
-start a team sync. What shows instead is on each host: every look is a login of its own,
+start a team sync. The exception is `agents key --check`: its read of `authorized_keys` is a
+login with your own key that runs a command, so it's recorded as `exec` is, and that starts
+a sync. What shows instead is on each host: every look is a login of its own,
 which sshd logs. Sharing a connection between looks would have hidden those, and let a
 revoked key keep working, so none is shared, on any host. `meterm exec` remains the command
 that's recorded.

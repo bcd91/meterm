@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"net"
 	"os"
@@ -364,8 +365,8 @@ func TestCheckWatcherKeyCantTell(t *testing.T) {
 		return config.Resolved{Name: "devbox", Address: "192.0.2.1", AgentsIdentity: key}
 	}}
 	for name, script := range map[string]string{
-		"too much output": `head -c 70000 /dev/zero | tr '\0' x; for a; do last=$a; done; eval "$last"`,
-		"killed":          `kill -9 $$`,
+		"killed after much output": `head -c 70000 /dev/zero | tr '\0' x; kill -9 $$`,
+		"killed":                   `kill -9 $$`,
 	} {
 		t.Run(name, func(t *testing.T) {
 			fakeSSHScript(t, script)
@@ -646,6 +647,14 @@ func TestWatchGivesUpOnlyAfterRepeatedRefusals(t *testing.T) {
 	if stopped != 5 {
 		t.Errorf("stopped at look %d of %d", stopped+1, len(looks))
 	}
+	// A login that worked but found no claude got in too: never given up on.
+	noClaude := exitErr(t, agents.ExitNoClaude)
+	looks = run([]error{noClaude, r})
+	for _, l := range looks {
+		if l["stopped_asking"] != nil {
+			t.Errorf("gave up on a key that got in to no claude: %v", l)
+		}
+	}
 	// Once it got in, it's never given up on.
 	looks = run([]error{nil, r})
 	for _, l := range looks {
@@ -696,6 +705,14 @@ func TestWatchStopWaitsForASlowReader(t *testing.T) {
 	lines := strings.Split(strings.TrimSpace(w.String()), "\n")
 	if !strings.Contains(lines[len(lines)-1], `"type":"stopped"`) || len(lines) < 64 {
 		t.Errorf("%d lines, last %q", len(lines), lines[len(lines)-1])
+	}
+	// The looks that finished as it stopped, with the queue full, are counted.
+	var stopped map[string]any
+	if err := json.Unmarshal([]byte(lines[len(lines)-1]), &stopped); err != nil {
+		t.Fatal(err)
+	}
+	if d, ok := stopped["dropped"].(float64); !ok || d < 1 {
+		t.Errorf("dropped: %v", stopped)
 	}
 
 	old := agentsWatchFlushCap

@@ -37,6 +37,7 @@ What changed between releases that you'd notice in use. Newest first.
 - A wait whose session then reads as `unknown` stays raised; it isn't reported as answered.
 - On a stop the watch waits for stdout as long as it keeps taking lines (up to 10 seconds, or
   2 with none taken), and never pauses for Enter when started from the picker.
+- The `stopped` line counts the lines it couldn't write on the way out (`dropped`).
 - A closed stdout stops the watch cleanly, looks in flight included, with exit 3, in the text
   form too, which writes only on changes: stdout is polled once a second.
 - Restarted, it raises the waits still going on again: it keeps nothing between runs.
@@ -58,8 +59,9 @@ What changed between releases that you'd notice in use. Newest first.
   `--check` probes the watcher key (a command, stdin, a forward both ways) and reads its
   `authorized_keys` line with your ordinary login: exit 0 only if the installed line for the
   key is exactly meterm's and the probes found no way through; exit 2, loudly, if a probe got
-  through or the line has other options (naming them); exit 1 if it can't tell (a file over
-  256 KiB, a line meterm can't read). It doesn't read sshd's own settings, other key files, the
+  through or the line clearly grants more (naming how); exit 1 if it can't tell (a file over
+  256 KiB or changed while read, a line meterm can't read, a line that isn't meterm's but
+  doesn't clearly grant more, keys kept outside the account's home). It doesn't read sshd's own settings, other key files, the
   account's shell startup files or which `claude` runs; it says so in its answer. The read is
   in the activity log, as `exec` is. A host named `key` is now `meterm agents -- key`.
 - A watcher look keeps what your ssh config says about where the host is, how to get there and

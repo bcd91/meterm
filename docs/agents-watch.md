@@ -148,10 +148,12 @@ anything: its sessions are unknown, not answered, until it answers again.
 ### `stopped`, last
 
 ```json
-{"schema":1,"type":"stopped","at":"2026-11-14T09:30:00Z"}
+{"schema":1,"type":"stopped","at":"2026-11-14T09:30:00Z","dropped":0}
 ```
 
-If the stream ends without it, the watch was killed: treat every host as unknown.
+`dropped` counts lines that weren't written because the watch was stopping while stdout was
+behind (looks that finished as it ended, waiting for room). If the stream ends without a
+`stopped` line, the watch was killed: treat every host as unknown.
 
 ## Finding the session
 
@@ -271,9 +273,13 @@ can refuse only the ports a probe tries), so the answer rests on the line itself
 2. **The line, with your ordinary login.** It logs in a second way, as `meterm agents` would
    with no watcher key (your own key; this is a login with it, like any other), runs one fixed
    command that prints `~/.ssh/authorized_keys` and `authorized_keys2` (at most 256 KiB each),
-   and finds the lines for the watcher key by key type and blob. Any line for it whose options
-   aren't byte for byte the ones `meterm agents key HOST` prints: exit 2, naming the
-   difference ("has permitopen=…", "lacks restrict", "a different command").
+   and finds the lines for the watcher key by key type and blob. A line for it that clearly lets
+   the key do more than meterm's (no `restrict`, `port-forwarding`, `permitopen`,
+   `permitlisten`, `pty`, `agent-forwarding`, `X11-forwarding`, `user-rc`, `environment`,
+   `tunnel`, `cert-authority`, or another command): exit 2, naming the difference. A line that
+   isn't meterm's but doesn't clearly grant more (meterm's options plus `from=` or
+   `expiry-time=`, the same options in another case or order, an option meterm doesn't know):
+   exit 1, "isn't meterm's line; meterm can't vouch for it".
 
 **Exit 0** means: as far as `~/.ssh/authorized_keys` and `authorized_keys2` go, the
 installed line for this key is exactly meterm's, it's the only one, and the probes found no way
@@ -282,16 +288,28 @@ an admin set elsewhere (`/etc/ssh/keys/%u`), `AuthorizedKeysCommand`, `Match`, `
 nor the account's shell startup files (sshd runs the forced command through the account's
 shell, and Debian's bash runs `~/.bashrc` first, with what the client asked for in
 `SSH_ORIGINAL_COMMAND`), nor which `claude` the account's `PATH` finds. Those belong to the
-account or the admin, and can do anything the account can. It's the line's `restrict` that
+account or the admin, and can do anything the account can. The read itself runs through the
+account's shell too, so that shell can also fake its answer. It's the line's `restrict` that
 turns off forwarding, a pty, agent and X11 forwarding and `~/.ssh/rc` for the key.
+
+**A root-owned key file can't be checked.** Where an admin keeps keys outside the account's
+home (`AuthorizedKeysFile /etc/ssh/authorized_keys/%u`), the key isn't in the two files the
+read looks in, so `--check` always says exit 1. It doesn't try to work out where sshd looks:
+that takes `sshd -T` (root), or reading `sshd_config` with its `Include`s and `Match` blocks
+as sshd would, and getting that wrong would be a false exit 0. Check such a line by hand.
 
 What it reads, and how:
 
 - The probes and the read are separate connections. A name that leads to more than one
   machine (round robin, a load balancer) can send them to different ones.
 - The read runs in the account's own `$HOME` on the far side, as the account sees it.
-- Each file is read whole up to 256 KiB; a bigger one is "too big to read all of it", exit 1,
-  as a line past the cut could be the one sshd uses.
+- Each file's size comes first (`wc -c`, padding taken out), then the file, up to 256 KiB.
+  A bigger one is "too big to read all of it", exit 1, as a line past the cut could be the
+  one sshd uses. What comes has to be exactly that size; if not, the file changed while it
+  was read, or the read stopped partway: exit 1. Anything in the answer outside the blocks
+  meterm asked for (a startup file printing something, say) is exit 1 too.
+- A key file that isn't a regular file (a FIFO, a device) is passed over, as sshd passes over
+  it.
 - Every line that isn't blank or a `#` comment has to be one meterm can read: a line with a
   control character (other than a tab, or a CR at the end), or one Go's parser won't take, is
   exit 1, as sshd might read it, and it might be the watcher key's. An RSA key written under
@@ -306,10 +324,11 @@ What it reads, and how:
 **Exit 1**, can't tell: the key isn't in those two files (sshd may take keys from an
 `AuthorizedKeysFile` elsewhere or an `AuthorizedKeysCommand`, which meterm can't see), it's
 there more than once, a file can't be read, the ordinary login fails, the host refuses the
-watcher key or doesn't answer, more than 64 KiB of output, ssh stopped by a signal, a forward
-that failed without saying why.
+watcher key or doesn't answer, the probe ssh stopped by a signal, a forward that failed
+without saying why, a line that isn't meterm's but doesn't clearly grant more.
 
-Each login is held to `--timeout`. Like a look, the check isn't in the activity log. Run it
+Each login is held to `--timeout`. The probes aren't in the activity log; the read is, as
+above. Run it
 after installing the line, and after anything that changes `authorized_keys` or `sshd_config`
 there.
 
@@ -351,7 +370,8 @@ With `agents_identity` set, a look offers that key and no other:
 - If the host refuses the key, the look fails with `error` ("the host refused the watcher
   key"), whichever user ssh logged in as. What `--watch` does next depends on whether the key
   has got in during this run:
-  - **Never:** the key may not be set up there. Once it has been refused 3 times in a row over
+  - **Never** (no login with it worked, whatever came after; a login that found no `claude`
+    counts as getting in): the key may not be set up there. Once it has been refused 3 times in a row over
     at least 5 minutes (with the backoff below, that's the 4th refusal, about 7 minutes after
     the first), it stops asking that host for the rest of the run (`stopped_asking: true`); one
     refusal alone can be a passing thing (a home on NFS, an LDAP hiccup, `authorized_keys`

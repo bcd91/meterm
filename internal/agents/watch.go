@@ -77,6 +77,9 @@ type Stopped struct {
 	Schema int       `json:"schema"`
 	Type   string    `json:"type"`
 	At     time.Time `json:"at"`
+	// Dropped counts lines that weren't written because the watch was stopping while
+	// stdout was behind: looks that finished as it ended, waiting for room.
+	Dropped int `json:"dropped"`
 }
 
 // Look is what one look at one host found.

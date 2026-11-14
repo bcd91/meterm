@@ -169,6 +169,7 @@ func watchHost(ctx context.Context, job agentJob, label string, query agentQuery
 	tr := agents.NewTracker()
 	delay := agents.FirstDelay(o.interval, o.clock.rand())
 	refusedRun, refusedSince := 0, time.Time{} // watcher-key refusals in a row
+	gotIn := false                             // the watcher key got a login this run
 	for {
 		if !o.clock.sleep(ctx, delay) {
 			return
@@ -192,6 +193,11 @@ func watchHost(ctx context.Context, job agentJob, label string, query agentQuery
 			// network, so not "unreachable" either.
 			look.Result = agents.ResultError
 		}
+		if h.Reachable {
+			// A login that worked, whatever came of it (no claude, say): the key isn't
+			// refused there.
+			gotIn = true
+		}
 		if h.Error == agentsWatcherRefused {
 			if refusedRun == 0 {
 				refusedSince = at
@@ -200,7 +206,7 @@ func watchHost(ctx context.Context, job agentJob, label string, query agentQuery
 		} else {
 			refusedRun = 0
 		}
-		if h.Error == agentsWatcherRefused && look.LastOKAt == nil &&
+		if h.Error == agentsWatcherRefused && !gotIn &&
 			refusedRun >= agentsRefusedStopAfter && at.Sub(refusedSince) >= agentsRefusedStopSpan {
 			// The key has never got in during this run, and has been refused again and
 			// again for minutes: it isn't set up there, and asking again would only add
@@ -292,6 +298,7 @@ type watchWriter struct {
 	// so it's measured on the monotonic clock and a step of the wall clock can't
 	// shorten the wait for it.
 	takenAt time.Time
+	dropped int // lines given up on as the watch stopped, under mu
 }
 
 func (o *watchWriter) took() {
@@ -375,6 +382,9 @@ func (o *watchWriter) write(v any) {
 	select {
 	case o.lines <- b:
 	case <-o.stop:
+		o.mu.Lock()
+		o.dropped++
+		o.mu.Unlock()
 	}
 }
 
@@ -384,9 +394,12 @@ var errWatchBlocked = fmt.Errorf("%w: stdout isn't being read", errWatchOutput)
 // close writes the last line, and waits for everything to be written: as long as
 // stdout keeps taking lines, up to a stall of stall with none taken, and cap in all.
 // Called once, after every other write.
-func (o *watchWriter) close(last any, stall, capAll time.Duration) error {
+func (o *watchWriter) close(last agents.Stopped, stall, capAll time.Duration) error {
 	start := time.Now()
 	o.took()
+	o.mu.Lock()
+	last.Dropped = o.dropped
+	o.mu.Unlock()
 	stuck := func() bool {
 		return o.sinceTaken() > stall || time.Since(start) > capAll
 	}
@@ -430,6 +443,9 @@ func (o *watchWriter) text(v any) string {
 		o.started = l.At
 		return fmt.Sprintf("%s  watching %d host(s), each about every %s; Ctrl-C to stop\n", clock(l.At), len(l.Hosts), time.Duration(l.IntervalS)*time.Second)
 	case agents.Stopped:
+		if l.Dropped > 0 {
+			return fmt.Sprintf("%s  stopped (%d line(s) not written: stdout was behind)\n", clock(l.At), l.Dropped)
+		}
 		return fmt.Sprintf("%s  stopped\n", clock(l.At))
 	case agents.Change:
 		word := "NEEDS INPUT"

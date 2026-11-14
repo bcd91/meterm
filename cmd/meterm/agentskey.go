@@ -59,8 +59,11 @@ func newAgentsKeyCmd() *cobra.Command {
 			"Exit 0 covers those two files and no more: sshd's own settings and other key\n" +
 			"files (AuthorizedKeysFile set elsewhere, AuthorizedKeysCommand, Match,\n" +
 			"ForceCommand) aren't read, nor the account's shell startup files, which run\n" +
-			"before the forced command, nor which claude its PATH finds. The read is in the\n" +
-			"activity log, as exec is.\n\n" +
+			"before the forced command (the read runs through that shell too, which could\n" +
+			"fake its answer), nor which claude its PATH finds. A key file kept outside the\n" +
+			"account's home (/etc/ssh/authorized_keys/%u) can't be checked: exit 1. A line\n" +
+			"that isn't meterm's but doesn't clearly grant more is exit 1, not 2. The read is\n" +
+			"in the activity log, as exec is.\n\n" +
 			"The limit is on the host's side because nothing on this machine can be: anything\n" +
 			"running as you here, an agent included, can read the key and use it as it likes.\n\n" +
 			"To set one up:\n" +
@@ -169,23 +172,23 @@ func checkWatcherKey(ctx context.Context, job agentJob, timeout time.Duration, r
 	word := "meterm-watcher-check-" + hex.EncodeToString(nonce[:])
 	// The word goes in the command and on stdin: a forced command that's a shell
 	// (command="/bin/sh") ignores the one and runs the other.
-	stdout, stderr, overflow, err := lookWithStdin(ctx, sshConfig, timeout, "echo "+word, "echo "+word+"\nexit\n", 64<<10, wr.Resolved)
+	echoCtx, echoCancel := context.WithTimeout(ctx, timeout) // its own share of the budget
+	found, stderr, err := echoProbe(echoCtx, sshConfig, timeout, word, wr.Resolved)
+	timedOut := echoCtx.Err() != nil
+	echoCancel()
 	var exit *exec.ExitError
 	exited := errors.As(err, &exit)
 	switch {
-	case bytes.Contains(stdout, []byte(word)):
+	case found:
 		return "NOT LIMITED: the watcher key ran a command of meterm's choosing on " + lbl(r.Name) +
 			". Anything that can read the key can run anything there. Put the line from `meterm agents key` " +
 			"before any other line with this key, or take the other line out, and check again.", keyCheckUnlimited
 	case wr.refused(stderr):
 		return "the host refused the watcher key: the line isn't there, or isn't for this key", keyCheckUnsure
-	case ctx.Err() != nil:
+	case timedOut:
 		return "no answer within " + timeout.String(), keyCheckUnsure
 	case errors.As(err, &exit) && exit.ExitCode() == sshConnectionError:
 		return "couldn't log in: " + sshFailureText(stderr), keyCheckUnsure
-	case overflow:
-		// The word could have been in what wasn't kept.
-		return "more output than the check reads, so it can't tell", keyCheckUnsure
 	case exited && exit.ExitCode() < 0:
 		return "ssh was stopped before it finished, so it can't tell", keyCheckUnsure
 	case err != nil && !exited:
@@ -217,7 +220,8 @@ func checkWatcherKey(ctx context.Context, job agentJob, timeout time.Duration, r
 		"meterm's, and the probes (a command, stdin, -W, -R) found no way through. sshd's own settings and any " +
 		"other key file aren't read (an AuthorizedKeysFile set elsewhere, AuthorizedKeysCommand, Match, " +
 		"ForceCommand), nor the account's shell startup files (~/.bashrc and the like run before the forced " +
-		"command) or which claude its PATH finds. The line's restrict is what turns off forwarding, a pty, agent " +
+		"command, and the read itself runs through that shell, which could fake it) or which claude its PATH finds. " +
+		"The line's restrict is what turns off forwarding, a pty, agent " +
 		"and X11 forwarding and ~/.ssh/rc for this key", keyCheckLimited
 }
 
@@ -235,8 +239,9 @@ func readAuthorizedKeys(nonce string) string {
 	m := "--meterm-" + nonce
 	return `sh -c 'for f in "$HOME/.ssh/authorized_keys" "$HOME/.ssh/authorized_keys2"; do ` +
 		`if [ ! -e "$f" ]; then echo "` + m + `-missing-- $f"; ` +
+		`elif [ ! -f "$f" ]; then echo "` + m + `-not-a-file-- $f"; ` +
 		`elif [ ! -r "$f" ]; then echo "` + m + `-unreadable-- $f"; ` +
-		`else echo "` + m + `-file-- $(wc -c <"$f") $f"; head -c ` + strconv.Itoa(authorizedKeysCap+1) + ` "$f"; echo; echo "` + m + `-end--"; fi; done'`
+		`else echo "` + m + `-file-- $(wc -c <"$f" | tr -d " ") $f"; head -c ` + strconv.Itoa(authorizedKeysCap) + ` "$f"; echo; echo "` + m + `-end--"; fi; done'`
 }
 
 // installedLine reads the account's authorized_keys over an ordinary login (the
@@ -288,9 +293,15 @@ func installedLine(ctx context.Context, r config.Resolved, timeout time.Duration
 	}
 	entries, problems := watcherEntries(string(stdout), key, nonce)
 	for _, e := range entries {
-		if e != want {
+		if e != want && grantsMore(e, want) {
 			return "NOT LIMITED: the authorized_keys line for the watcher key on " + lbl(r.Name) +
-				" isn't meterm's: " + optionsDiff(e, want) + ". Replace it with the line from `meterm agents key`, and check again.", keyCheckUnlimited
+				" isn't meterm's and lets the key do more: " + optionsDiff(e, want) + ". Replace it with the line from `meterm agents key`, and check again.", keyCheckUnlimited
+		}
+	}
+	for _, e := range entries {
+		if e != want {
+			return "the authorized_keys line for the watcher key on " + lbl(r.Name) + " isn't meterm's line, so meterm can't vouch for it (" +
+				optionsDiff(e, want) + "). It may be as limited or more; to have it checked, use the line from `meterm agents key` as it is", keyCheckUnsure
 		}
 	}
 	switch {
@@ -316,27 +327,50 @@ var rsaSHA2RE = regexp.MustCompile(`(^|[ \t])rsa-sha2-(256|512)([ \t])`)
 func watcherEntries(out string, key ssh.PublicKey, nonce string) (entries, problems []string) {
 	m := "--meterm-" + nonce
 	files := 0
-	file, n, got := "", 0, 0
+	file, n, got, size := "", 0, 0, 0
 	inFile := false
-	for _, line := range strings.Split(out, "\n") {
+	for _, line := range strings.Split(strings.TrimSuffix(out, "\n"), "\n") {
 		switch {
 		case strings.HasPrefix(line, m+"-file-- "):
 			files++
-			size, name, _ := strings.Cut(strings.TrimPrefix(line, m+"-file-- "), " ")
+			// "SIZE NAME". BSD's wc pads the count with spaces; the command takes them
+			// out, and Fields doesn't mind them either.
+			f := strings.Fields(strings.TrimPrefix(line, m+"-file-- "))
+			name := ""
+			if len(f) > 1 {
+				name = strings.Join(f[1:], " ")
+			}
 			file, n, got, inFile = termsafe.Text(name), 0, 0, true
-			if sz, err := strconv.Atoi(strings.TrimSpace(size)); err != nil || sz > authorizedKeysCap {
+			sz, err := -1, errors.New("no size")
+			if len(f) > 0 {
+				sz, err = strconv.Atoi(f[0])
+			}
+			switch {
+			case err != nil || sz < 0:
+				problems = append(problems, file+": its size couldn't be read")
+				size = -1
+			case sz > authorizedKeysCap:
 				problems = append(problems, file+" is too big to read all of it")
+				size = -1
+			default:
+				size = sz
 			}
 			continue
 		case line == m+"-end--":
-			// The size said in the header is wc's; what came may be more if the file
-			// grew in between. The extra newline is the command's own.
-			if got-1 > authorizedKeysCap && !slices.Contains(problems, file+" is too big to read all of it") {
-				problems = append(problems, file+" is too big to read all of it")
+			// What came has to be the whole file: the size wc gave, plus the newline
+			// the command adds after it. Anything else, the file changed while it was
+			// read, or the read stopped partway.
+			if size >= 0 && got-1 != size {
+				problems = append(problems, file+" changed while it was read, or wasn't read whole")
 			}
 			inFile = false
 			continue
 		case strings.HasPrefix(line, m+"-missing-- "):
+			files++
+			continue
+		case strings.HasPrefix(line, m+"-not-a-file-- "):
+			// sshd skips a key file that isn't a regular file (auth_openfile): so does
+			// this. A FIFO would hang a read.
 			files++
 			continue
 		case strings.HasPrefix(line, m+"-unreadable-- "):
@@ -345,9 +379,9 @@ func watcherEntries(out string, key ssh.PublicKey, nonce string) (entries, probl
 			continue
 		}
 		if !inFile {
-			if strings.TrimSpace(line) != "" {
-				problems = append(problems, "the answer wasn't what was asked for")
-			}
+			// Anything outside the blocks is something else talking: a shell startup
+			// file, a banner. It can't be told from the answer, so it spoils it.
+			problems = append(problems, "the answer wasn't what was asked for")
 			continue
 		}
 		n++
@@ -423,6 +457,33 @@ func optionsDiff(got, want string) string {
 	return "options differ from meterm's line: " + strings.Join(parts, "; ")
 }
 
+// grantsMore says whether an installed line's options clearly let the key do more than
+// meterm's: no restrict, an option that lets something back in, or another command.
+// Options that only narrow it (from=, expiry-time=, verify-required, no-*), or meterm's
+// own in another case or order, don't; such a line is still not meterm's, and gets a
+// "can't vouch" rather than a pass.
+func grantsMore(got, want string) bool {
+	opts := func(s string) map[string]string {
+		m := map[string]string{}
+		for _, o := range splitOptions(s) {
+			k, v, _ := strings.Cut(o, "=")
+			m[strings.ToLower(k)] = v
+		}
+		return m
+	}
+	g, w := opts(got), opts(want)
+	if _, ok := g["restrict"]; !ok {
+		return true
+	}
+	for _, k := range []string{"port-forwarding", "permitopen", "permitlisten", "pty", "agent-forwarding",
+		"x11-forwarding", "user-rc", "cert-authority", "environment", "tunnel", "no-touch-required", "principals"} {
+		if _, ok := g[k]; ok {
+			return true
+		}
+	}
+	return g["command"] != w["command"]
+}
+
 // splitOptions splits an authorized_keys options string at commas outside quotes.
 func splitOptions(s string) []string {
 	var out []string
@@ -451,8 +512,10 @@ func splitOptions(s string) []string {
 	return out
 }
 
-// lookWithStdin is sshLookQuery with stdin given rather than /dev/null.
-func lookWithStdin(ctx context.Context, sshConfig string, timeout time.Duration, command, stdin string, maxOut int, r config.Resolved) ([]byte, string, bool, error) {
+// echoProbe runs command "echo word", with the same on stdin, and says whether word
+// came back. Output of any size is read to the end, kept no further than it takes to
+// find the word, so a forced command that answers at length is no reason to stop.
+func echoProbe(ctx context.Context, sshConfig string, timeout time.Duration, word string, r config.Resolved) (found bool, stderr string, err error) {
 	r.Forwards = nil
 	var args []string
 	for i, a := range agentSSHArgs(r, sshConfig, timeout) {
@@ -462,18 +525,43 @@ func lookWithStdin(ctx context.Context, sshConfig string, timeout time.Duration,
 		args = append(args, a)
 	}
 	r.ExtraArgs = args
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
-	c := sshrun.SSHContext(ctx, r, command)
+	c := sshrun.SSHContext(ctx, r, "echo "+word)
 	noPrompts(c)
-	c.Stdin = strings.NewReader(stdin)
-	stdout := &cappedBuffer{max: maxOut, over: cancel}
-	stderr := &sshrun.Tail{Max: 16 << 10}
-	c.Stdout, c.Stderr = stdout, stderr
+	c.Stdin = strings.NewReader("echo " + word + "\nexit\n")
+	out := &wordFinder{word: []byte(word)}
+	errs := &sshrun.Tail{Max: 16 << 10}
+	c.Stdout, c.Stderr = out, errs
 	c.WaitDelay = time.Second
-	err := c.Run()
-	return stdout.b, stderr.String(), stdout.overflow, err
+	err = c.Run()
+	return out.found(), errs.String(), err
 }
+
+// wordFinder looks for word in everything written, keeping only enough of the end to
+// find it across two writes.
+type wordFinder struct {
+	mu   sync.Mutex
+	word []byte
+	tail []byte
+	hit  bool
+}
+
+func (w *wordFinder) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if !w.hit {
+		buf := append(w.tail, p...)
+		if bytes.Contains(buf, w.word) {
+			w.hit = true
+		}
+		if keep := len(w.word) - 1; len(buf) > keep {
+			buf = buf[len(buf)-keep:]
+		}
+		w.tail = append([]byte(nil), buf...)
+	}
+	return len(p), nil
+}
+
+func (w *wordFinder) found() bool { w.mu.Lock(); defer w.mu.Unlock(); return w.hit }
 
 // remoteForwarding asks the host, with the watcher key alone, to listen on a port of
 // its own for this side (ssh -R, port 0: any free one, on its loopback). "Allocated

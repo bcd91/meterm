@@ -13,6 +13,7 @@ import (
 	"regexp"
 	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -661,6 +662,7 @@ func TestCheckWatcherKey(t *testing.T) {
 		want              string
 	}{
 		{"unlimited", meterms, `for a; do last=$a; done; eval "$last"`, keyCheckUnlimited, "NOT LIMITED"},
+		{"unlimited, the word after 100 KB", meterms, `head -c 100000 /dev/zero | tr '\0' x; for a; do last=$a; done; eval "$last"`, keyCheckUnlimited, "NOT LIMITED"},
 		{"meterm's line, nothing through", other + meterms, fwd(prohibited) + `echo '[]'`, keyCheckLimited, "exactly meterm's"},
 		{"meterm's line, no claude", meterms, fwd(prohibited) + `exit 127`, keyCheckLimited, "exactly meterm's"},
 		{"forwards", meterms, fwd(`echo SSH-2.0-OpenSSH_10.0; exec sleep 30`) + `echo '[]'`, keyCheckUnlimited, "port forwarding is allowed"},
@@ -905,5 +907,142 @@ func TestCheckRecordsTheOrdinaryRead(t *testing.T) {
 	}
 	if !strings.Contains(log, `"exit_code":0`) {
 		t.Errorf("no outcome:\n%s", log)
+	}
+}
+
+// farRaw is a fake ssh's answer to the ordinary read with authorized_keys as content,
+// under a header whose size field is sizeField ("" for the real size), and with what
+// follows controlled: end false leaves the end mark out, and extra goes before the
+// blocks. exit is the read's exit code.
+func farRaw(t *testing.T, content, sizeField, extra string, blocks int, end bool, exit int) string {
+	t.Helper()
+	p := filepath.Join(t.TempDir(), "ak")
+	if err := os.WriteFile(p, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if sizeField == "" {
+		sizeField = strconv.Itoa(len(content))
+	}
+	sc := `for a; do case "$a" in *authorized_keys2*) n=$(printf '%s' "$a" | sed -n 's/.*--meterm-\([0-9a-f]*\)-missing.*/\1/p'); ` + extra +
+		`echo "--meterm-$n-file-- ` + sizeField + ` /h/.ssh/authorized_keys"; cat '` + p + `'; echo; `
+	if end {
+		sc += `echo "--meterm-$n-end--"; `
+	}
+	if blocks > 1 {
+		sc += `echo "--meterm-$n-missing-- /h/.ssh/authorized_keys2"; `
+	}
+	return sc + `exit ` + strconv.Itoa(exit) + `;; esac; done; `
+}
+
+// What the read's answer has to be, whole: the size wc gave (padded or not), exactly
+// what came, both blocks, both end marks, nothing else around them, and ssh ending
+// well. Anything else is exit 1.
+func TestCheckWatcherKeyAnswerHasToBeWhole(t *testing.T) {
+	dir := t.TempDir()
+	key := newWatcherKey(t, dir, "watch")
+	job := agentJob{label: "devbox", resolve: func(context.Context) config.Resolved {
+		return config.Resolved{Name: "devbox", Address: "192.0.2.1", AgentsIdentity: key}
+	}}
+	opts, _ := agents.KeyOptions()
+	meterms := opts + " " + string(mustRead(t, key+".pub")) + "\n"
+	size := strconv.Itoa(len(meterms))
+	for _, tc := range []struct {
+		name, size, extra string
+		blocks            int
+		end               bool
+		exit, code        int
+		want              string
+	}{
+		{"as wc gives it", "", "", 2, true, 0, keyCheckLimited, "exactly meterm's"},
+		{"BSD wc's padding", "     " + size, "", 2, true, 0, keyCheckLimited, "exactly meterm's"},
+		{"BusyBox", size, "", 2, true, 0, keyCheckLimited, "exactly meterm's"},
+		{"not a number", "abc", "", 2, true, 0, keyCheckUnsure, "size couldn't be read"},
+		{"no size", " ", "", 2, true, 0, keyCheckUnsure, "size couldn't be read"},
+		{"shrank while read", "5000", "", 2, true, 0, keyCheckUnsure, "changed while it was read"},
+		{"grew while read", strconv.Itoa(len(meterms) - 5), "", 2, true, 0, keyCheckUnsure, "changed while it was read"},
+		{"a startup file talking", "", "echo hello from bashrc; ", 2, true, 0, keyCheckUnsure, "wasn't what was asked for"},
+		{"one block", "", "", 1, true, 0, keyCheckUnsure, "wasn't what was asked for"},
+		{"cut off partway", "", "", 2, false, 0, keyCheckUnsure, "wasn't what was asked for"},
+		{"the read failed", "", "", 2, true, 1, keyCheckUnsure, "couldn't read the host's authorized_keys"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fakeSSHScript(t, farRaw(t, meterms, tc.size, tc.extra, tc.blocks, tc.end, tc.exit)+fwd(prohibited)+`echo '[]'`)
+			cannedSSHG(t, "user agent\nhostname 192.0.2.1\n")
+			if msg, code := checkWatcherKey(context.Background(), job, 5*time.Second, nil); code != tc.code || !strings.Contains(msg, tc.want) {
+				t.Errorf("%d %q", code, msg)
+			}
+		})
+	}
+}
+
+// A line that's meterm's options plus more limits, or meterm's in another case or
+// order, isn't meterm's line: "can't vouch", exit 1. One that lets the key do more is
+// exit 2. A forced command that answers at length is no reason to stop.
+func TestCheckWatcherKeyVouchesOnlyForItsOwnLine(t *testing.T) {
+	dir := t.TempDir()
+	key := newWatcherKey(t, dir, "watch")
+	job := agentJob{label: "devbox", resolve: func(context.Context) config.Resolved {
+		return config.Resolved{Name: "devbox", Address: "192.0.2.1", AgentsIdentity: key}
+	}}
+	opts, _ := agents.KeyOptions()
+	pub := string(mustRead(t, key+".pub"))
+	parts := splitOptions(opts)
+	reordered := append(append([]string{}, parts[1:len(parts)-1]...), parts[0], parts[len(parts)-1])
+	cmd := parts[len(parts)-1]
+	for _, tc := range []struct {
+		name, opts string
+		code       int
+		want       string
+	}{
+		{"from= on top", `from="192.0.2.0/24",` + opts, keyCheckUnsure, "can't vouch"},
+		{"expiry-time on top", opts + `,expiry-time="20990101"`, keyCheckUnsure, "can't vouch"},
+		{"another order", strings.Join(reordered, ","), keyCheckUnsure, "can't vouch"},
+		{"another case", strings.Replace(opts, "restrict", "RESTRICT", 1), keyCheckUnsure, "can't vouch"},
+		{"no restrict", strings.Replace(opts, "restrict,", "", 1), keyCheckUnlimited, "lets the key do more"},
+		{"restrict, pty back", "restrict,pty," + cmd, keyCheckUnlimited, "lets the key do more"},
+		{"restrict, agent forwarding back", "restrict,agent-forwarding," + cmd, keyCheckUnlimited, "lets the key do more"},
+		{"restrict, environment", `restrict,environment="A=b",` + cmd, keyCheckUnlimited, "lets the key do more"},
+		{"another command", `restrict,command="id"`, keyCheckUnlimited, "lets the key do more"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := filepath.Join(t.TempDir(), "ak")
+			if err := os.WriteFile(p, []byte(tc.opts+" "+pub+"\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			fakeSSHScript(t, farSide(p)+fwd(prohibited)+`echo '[]'`)
+			cannedSSHG(t, "user agent\nhostname 192.0.2.1\n")
+			if msg, code := checkWatcherKey(context.Background(), job, 5*time.Second, nil); code != tc.code || !strings.Contains(msg, tc.want) {
+				t.Errorf("%d %q", code, msg)
+			}
+		})
+	}
+	// meterm's line, and a forced command that says a lot: still limited.
+	p := filepath.Join(t.TempDir(), "ak")
+	if err := os.WriteFile(p, []byte(opts+" "+pub+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fakeSSHScript(t, farSide(p)+fwd(prohibited)+`head -c 200000 /dev/zero | tr '\0' '['; echo`)
+	cannedSSHG(t, "user agent\nhostname 192.0.2.1\n")
+	if msg, code := checkWatcherKey(context.Background(), job, 5*time.Second, nil); code != keyCheckLimited {
+		t.Errorf("long answer: %d %q", code, msg)
+	}
+}
+
+// The word is found however much comes before it, and across two writes.
+func TestWordFinder(t *testing.T) {
+	w := &wordFinder{word: []byte("meterm-watcher-check-0123456789abcdef")}
+	big := bytes.Repeat([]byte("x"), 200<<10)
+	for len(big) > 0 {
+		n := min(4096, len(big))
+		w.Write(big[:n])
+		big = big[n:]
+	}
+	if w.found() {
+		t.Fatal("found in nothing")
+	}
+	w.Write([]byte("...meterm-watcher-che"))
+	w.Write([]byte("ck-0123456789abcdef\n"))
+	if !w.found() {
+		t.Error("not found across two writes")
 	}
 }
