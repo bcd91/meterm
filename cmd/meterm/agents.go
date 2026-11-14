@@ -203,6 +203,10 @@ type agentJob struct {
 	watchOff bool
 }
 
+// agentsRouteDial, when a test sets it, is how a look's route picker dials a route,
+// instead of the network.
+var agentsRouteDial func(ctx context.Context, addr string) error
+
 const agentsRefusedProduction = "refused: production host or route; name it to include it"
 
 // selectAgentHosts picks the hosts, and says which ones that are production, or are
@@ -223,6 +227,9 @@ func selectAgentHosts(cfg *config.Config, names, tags, groups []string) ([]agent
 		}
 	}
 	look := route.NewLook(cfg, filepath.Join(filepath.Dir(cfg.Path()), "routes.json"))
+	if agentsRouteDial != nil {
+		look.Dial = agentsRouteDial
+	}
 	jobs := make([]agentJob, 0, len(hosts))
 	for _, h := range hosts {
 		label := h.Name
