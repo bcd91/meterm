@@ -129,6 +129,12 @@ func parseAgent(raw json.RawMessage) (Agent, error) {
 		return Agent{}, err
 	}
 	a.Event, a.Confidence = Classify(a.State, a.Status, a.WaitingFor)
+	if a.PID == nil && (a.Event == EventNeedsInput || a.Event == EventWorking) {
+		// Busy or waiting with no process: what a background session reads for a few
+		// seconds after its worker died, before the supervisor starts another or drops
+		// the row. Not confirmed, so not high.
+		a.Confidence = ConfidenceLow
+	}
 	a.AgentKind, a.Source = KindClaudeCode, SourceClaudeAgents
 	return a, nil
 }

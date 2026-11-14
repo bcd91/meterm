@@ -77,3 +77,17 @@ func TestEnvIsShared(t *testing.T) {
 		t.Errorf("Diff = %v", d)
 	}
 }
+
+// The watcher key and the watch opt-out are this person's, like identity_file: a
+// team pull keeps them, and sharing a host doesn't send them.
+func TestApplyToKeepsAgentsSettings(t *testing.T) {
+	off := false
+	local := config.Host{Name: "w", Address: "192.0.2.1", IdentityFile: "~/.ssh/k", AgentsIdentity: "~/.ssh/watch", AgentsWatch: &off}
+	got := SharedFromHost(local).ApplyTo(local, "t")
+	if got.AgentsIdentity != "~/.ssh/watch" || got.AgentsWatch == nil || *got.AgentsWatch || got.IdentityFile != "~/.ssh/k" {
+		t.Errorf("%+v", got)
+	}
+	if fresh := SharedFromHost(local).ApplyTo(config.Host{}, "t"); fresh.AgentsIdentity != "" || fresh.AgentsWatch != nil {
+		t.Errorf("went to the team: %+v", fresh)
+	}
+}

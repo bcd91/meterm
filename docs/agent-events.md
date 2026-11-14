@@ -20,7 +20,7 @@ stays 1: it goes up when a field changes meaning, and new fields don't need it t
 | `event` | `working`, `needs_input`, `done`, `failed`, `idle`, `unknown` | What the agent is doing. |
 | `agent_kind` | `claude-code` | Which agent. More can be added, so show one you don't know as text. |
 | `source` | `claude agents --json` | What this reading came from. It says how far to trust it, and another source may come later. |
-| `confidence` | `high`, `low` | `high`: a known value said so and nothing contradicted it. `low`: the values disagree, or `event` is `unknown`. |
+| `confidence` | `high`, `low` | `high`: a known value said so and nothing contradicted it. `low`: the values disagree, `event` is `unknown`, or it's `working` or `needs_input` with no `pid`. |
 
 ## What each event means
 
@@ -52,13 +52,20 @@ One function does this, `Classify` in `internal/agents/event.go`, with a table t
 | `status` `idle` | `idle` |
 | any other value of `state` or `status`, or neither | `unknown` |
 
+A row with no `pid` whose `event` is `working` or `needs_input` has `confidence: low`. That's
+what a background session's row reads like for 6 to 10 seconds after its worker died, until the
+supervisor starts another (seen on Claude Code 2.1.323): `state: blocked` and no process.
+`meterm agents --watch` raises such a row only when two looks in a row say so
+([agents-watch.md](agents-watch.md)).
+
 `state` goes before `status`, as a finished background agent says `state: done, status: idle`.
 Matching is exact, so `IDLE` is `unknown`. `stopped` is `unknown` on purpose: it says neither
 that the work finished nor that it failed. `done` with `status: busy`, or a finished agent with
 `waitingFor` still set, keeps the `state` and has `confidence: low`.
 
-`claude agents --json` isn't a promised interface. Only `busy`, `idle` and `done` have been seen
-in real output; the other values come from reading Claude Code 2.1.316 itself, and may change.
+`claude agents --json` isn't a promised interface. `busy`, `idle`, `waiting`, `working`,
+`blocked`, `done` and `failed`, and `waitingFor: "permission prompt"`, have been seen in real
+output (2.1.323); the other values come from reading Claude Code 2.1.316 itself, and may change.
 That's what `unknown` is for: a change shows up as `unknown`, not as something false.
 
 ## Reading it safely

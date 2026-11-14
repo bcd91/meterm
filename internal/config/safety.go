@@ -441,7 +441,7 @@ func (h Host) CheckPrintable() error {
 	fields := []struct{ name, val string }{
 		{"name", h.Name}, {"address", h.Address}, {"user", h.User}, {"group", h.Group},
 		{"identity_file", h.IdentityFile}, {"proxy_jump", h.ProxyJump},
-		{"env", h.Env},
+		{"env", h.Env}, {"agents_identity", h.AgentsIdentity},
 	}
 	for _, u := range h.Users {
 		fields = append(fields, struct{ name, val string }{"users", u})

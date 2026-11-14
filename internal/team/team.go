@@ -100,14 +100,18 @@ func SharedFromHost(h config.Host) SharedHost {
 }
 
 // ApplyTo copies s onto a local host for team teamID, keeping the fields that
-// stay personal (identity_file) from local.
+// stay personal (identity_file, agents_identity, agents_watch) from local.
 func (s SharedHost) ApplyTo(local config.Host, teamID string) config.Host {
 	return config.Host{
 		Name: s.Name, Address: s.Address, Port: s.Port, User: s.User, Users: s.Users, Group: s.Group,
 		Tags: s.Tags, Env: s.Env, ProxyJump: s.ProxyJump, Forwards: s.Forwards, ExtraArgs: s.ExtraArgs, Notes: s.Notes,
 		Routes:       s.Routes,
 		IdentityFile: local.IdentityFile,
-		Team:         teamID,
+		// Personal too: a watcher key is a path on this machine, and whether to
+		// watch a host is this person's call.
+		AgentsIdentity: local.AgentsIdentity,
+		AgentsWatch:    local.AgentsWatch,
+		Team:           teamID,
 	}
 }
 

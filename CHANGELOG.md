@@ -2,7 +2,48 @@
 
 What changed between releases that you'd notice in use. Newest first.
 
-## Unreleased (after v0.23.1)
+## Unreleased (after v0.24.0)
+
+### Watching agents
+
+- `meterm agents --watch` keeps looking at the hosts you choose, each about every
+  `--interval` (60s by default, 15s at least, plus up to a tenth at random so hosts aren't
+  logged in to at once), and stops on SIGINT, SIGTERM or SIGHUP with exit 0, leaving nothing
+  behind. Each look is a fresh login, as with `agents`: no connection is held or shared. The
+  same selection rules hold: named, `--tag` or `--group`, and production only when named.
+- With `--format json` it prints one line per host per look (`type: look`: `result` `ok`,
+  `unreachable`, `error`, `refused` or `opted_out`; `sessions` null unless `ok`; `last_ok_at`,
+  `age_s`, `failing_since`, `next_look_at`, `stale_after`, and `looks`/`failures` counted in
+  this run), and a `type: change` line when a session starts or stops waiting
+  (`needs_input_started`, `needs_input_ended`). Versioned with `schema: 1`; the contract is
+  [docs/agents-watch.md](docs/agents-watch.md). Without it, readable lines when something
+  changes.
+- A host that doesn't answer is asked half as often after each failure in a row from the
+  second on, down to every 10 minutes, and as often as before once it answers. Its last answer stays in the stream,
+  marked with its age; it's never shown as having nothing running.
+- A session with no process that says it's waiting is raised only when two looks in a row say
+  so: that's what a background session's row says for a few seconds after its worker died.
+- `agents_watch: false` on a host or group keeps `--watch` away from it; `agents HOST` still asks.
+- Looks aren't in the activity log, as before; each is an sshd login on the host, not in wtmp.
+
+### Watcher key
+
+- `agents_identity` on a host, group or `defaults`: a key that `agents` and `agents --watch`
+  log in with instead of `identity_file`, offered with `IdentitiesOnly=yes`. Nothing else uses
+  it, and it isn't shared with a team. A host whose `agents_identity` file is missing isn't
+  asked, rather than asked with another key.
+- `meterm agents key HOST` prints the `authorized_keys` line that limits that key to
+  `claude agents --json` (`restrict`, the `no-*` options and a forced command that ignores what
+  the client sends). It installs nothing; the limit belongs on the host. It refuses a key
+  that's also the host's `identity_file`. A host named `key` is now `meterm agents -- key`.
+- A meterm before this one ignores both settings, and drops them if it saves `hosts.yaml`.
+
+### Agent events
+
+- A session that's `working` or `needs_input` with no `pid` has `confidence: low`, in
+  `meterm agents` too: it isn't confirmed.
+
+## v0.24.0
 
 ### Keys that moved
 

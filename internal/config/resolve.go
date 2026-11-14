@@ -20,6 +20,10 @@ type Resolved struct {
 	Tags         []string
 	Env          string // see Config.Env
 	Route        string // the route used, when not the host's own address
+	// AgentsIdentity is the watcher key for `meterm agents`, inherited like
+	// IdentityFile; empty for none. AgentsWatchOff says --watch skips the host.
+	AgentsIdentity string
+	AgentsWatchOff bool
 	// Err is set when the host, or a jump host on the way, has a field ssh
 	// would misread (an address starting with "-", a team host's unsafe
 	// extra args, …); sshrun refuses to run anything for it.
@@ -83,6 +87,13 @@ func (c *Config) resolve(h Host, rt *Route, seen map[string]bool) Resolved {
 	}
 	if r.IdentityFile == "" {
 		r.IdentityFile = c.Defaults.IdentityFile
+	}
+	r.AgentsIdentity = firstNonEmpty(h.AgentsIdentity, g.AgentsIdentity, c.Defaults.AgentsIdentity)
+	switch {
+	case h.AgentsWatch != nil:
+		r.AgentsWatchOff = !*h.AgentsWatch
+	case g.AgentsWatch != nil:
+		r.AgentsWatchOff = !*g.AgentsWatch
 	}
 
 	tagSet := map[string]bool{}

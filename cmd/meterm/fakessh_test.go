@@ -23,6 +23,10 @@ const fakeSSHEnv = "METERM_TEST_FAKE_SSH"
 // runTunnelUpEnv makes the test binary act as `meterm tunnel up`, with the real exit.
 const runTunnelUpEnv = "METERM_TEST_TUNNEL_UP"
 
+// runAgentsWatchEnv makes the test binary act as `meterm agents` with these
+// arguments, split at \x1f, for a test that signals it as a seat would.
+const runAgentsWatchEnv = "METERM_TEST_AGENTS_WATCH"
+
 // fakeSSHExitEnv makes the test binary act as an ssh that logs its
 // arguments to $METERM_TEST_SSH_LOG and exits with the code this names.
 const fakeSSHExitEnv = "METERM_TEST_SSH_EXIT"
@@ -33,6 +37,16 @@ func TestMain(m *testing.M) {
 		c.SetArgs(strings.Split(args, "\x1f"))
 		c.SilenceUsage, c.SilenceErrors = true, true
 		if err := c.Execute(); err != nil {
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
+	if args := os.Getenv(runAgentsWatchEnv); args != "" {
+		c := newAgentsCmd()
+		c.SetArgs(strings.Split(args, "\x1f"))
+		c.SilenceUsage, c.SilenceErrors = true, true
+		if err := c.Execute(); err != nil {
+			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
 		}
 		os.Exit(0)
