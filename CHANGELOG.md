@@ -2,7 +2,7 @@
 
 What changed between releases that you'd notice in use. Newest first.
 
-## Unreleased (after v0.24.0)
+## v0.25.0
 
 ### Watching agents
 
